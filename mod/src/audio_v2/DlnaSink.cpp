@@ -303,6 +303,11 @@ private:
 
 DlnaSink::~DlnaSink() {
     Close();
+    for (auto& entry : retiredSessions_) {
+        if (entry.first) server_.RemoveSession(entry.first->Token());
+    }
+    retiredSessions_.clear();
+    server_.Stop();
 }
 
 void DlnaSink::RecordError(HRESULT error) noexcept {
@@ -403,43 +408,32 @@ bool DlnaSink::BuildFormatCandidates(const std::wstring& sinkProtocolInfo) noexc
 bool DlnaSink::SetupStream() noexcept {
     // ProducerMain may have exited already, so its cleanup loop is gone.
     // Release only retired sessions whose grace period has elapsed; a session
-    // retired at the immediately preceding Close must keep its connection
-    // alive until the renderer has picked up the new playlist item.
+    // retired at the immediately preceding track change keeps its connection
+    // alive until the renderer has drained all bytes.
     if (!retiredSessions_.empty()) {
         const auto now = GetTickCount64();
         for (auto it = retiredSessions_.begin(); it != retiredSessions_.end();) {
             if (now >= it->second) {
-                server_.RemoveSession(it->first->Token());
+                if (it->first) server_.RemoveSession(it->first->Token());
                 it = retiredSessions_.erase(it);
             } else {
                 ++it;
             }
         }
     }
-    if (shape_ != DlnaStreamShape::FlacLive) {
-        // Mode switch away from live: close everything the live path kept
-        // alive across the previous Close+Open.
-        for (auto& entry : retiredSessions_) {
-            if (entry.first) server_.RemoveSession(entry.first->Token());
-        }
-        retiredSessions_.clear();
-        if (!liveAlias_.empty()) {
-            server_.RemoveAlias(liveAlias_);
-            liveAlias_.clear();
-        }
+    if (shape_ != DlnaStreamShape::FlacLive && !liveAlias_.empty()) {
+        server_.RemoveAlias(liveAlias_);
+        liveAlias_.clear();
     }
-    // Drop any prior session but keep the HTTP server running across format
-    // retries. Restarting the server on every retry forced the renderer to
-    // re-resolve a new random port and left stale connections behind, which
-    // is exactly the shape that made attempt N+1 fail even when attempt N had
-    // the renderer connected.
-    if (shape_ == DlnaStreamShape::FlacLive && session_) {
-        // Do not abort: the renderer is still reading while we switch items.
-        // The producer loop aborts it once the deadline passes.
-        retiredSessions_.emplace_back(session_, GetTickCount64() + 5000);
+    // Retire any prior session across all shapes (FlacLive, FlacFile, WavFile)
+    // with a generous 60-second grace period.
+    // NEVER call CloseStream() / RemoveSession() here: the renderer is actively
+    // streaming the tail of the current track and may issue Range resume requests
+    // if a connection drops. Aborting here is the exact defect that caused
+    // "tail cut off" and "HTTP 410 unknown token".
+    if (session_) {
+        retiredSessions_.emplace_back(session_, GetTickCount64() + 60000);
         session_.reset();
-    } else {
-        CloseStream();
     }
     chunkFrames_ = std::min<std::uint32_t>(
         std::max<std::uint32_t>(format_.sampleRate / 50u, 256u), 4096u);
@@ -466,8 +460,10 @@ bool DlnaSink::SetupStream() noexcept {
         // decoder accepts from a stream.
         const bool verbatim = shape_ == DlnaStreamShape::FlacFile;
         const std::uint64_t samples = verbatim
-            ? static_cast<std::uint64_t>(format_.sampleRate) *
-                  static_cast<std::uint64_t>(std::max<std::uint32_t>(streamSeconds_, 5))
+            ? (trackDurationMsExact_ != 0
+                  ? static_cast<std::uint64_t>(trackDurationMsExact_) * format_.sampleRate / 1000ull
+                  : static_cast<std::uint64_t>(format_.sampleRate) *
+                        static_cast<std::uint64_t>(std::max<std::uint32_t>(streamSeconds_, 5)))
             : 0;
         flac_.Reset(format_.sampleRate, format_.channels, format_.containerBits,
                     verbatim, samples);
@@ -518,9 +514,10 @@ bool DlnaSink::SetupStream() noexcept {
         // Verbatim frames are fixed size, so the exact entity length is known
         // before a single sample exists. That is what lets a live capture be
         // announced as a normal file with Content-Length and byte ranges.
-        const std::uint64_t samples =
-            static_cast<std::uint64_t>(format_.sampleRate) *
-            static_cast<std::uint64_t>(std::max<std::uint32_t>(streamSeconds_, 5));
+        const std::uint64_t samples = trackDurationMsExact_ != 0
+            ? static_cast<std::uint64_t>(trackDurationMsExact_) * format_.sampleRate / 1000ull
+            : static_cast<std::uint64_t>(format_.sampleRate) *
+                  static_cast<std::uint64_t>(std::max<std::uint32_t>(streamSeconds_, 5));
         totalBytes_ = FlacEncoder::VerbatimSize(format_.sampleRate, format_.channels,
                                                 format_.containerBits, samples);
     } else {
@@ -591,8 +588,10 @@ void DlnaSink::CloseStream() noexcept {
     // The live alias deliberately survives: a mid-playback GET on the old
     // alias must keep resolving (to the sealed old session, which reports EOS
     // immediately) until the new session re-points it.
+    // Retire with a generous 60-second grace period instead of immediately
+    // aborting and erasing the token, so in-flight HTTP reads drain smoothly.
     if (session_) {
-        server_.RemoveSession(session_->Token());
+        retiredSessions_.emplace_back(session_, GetTickCount64() + 60000);
         session_.reset();
     }
 }
@@ -637,12 +636,8 @@ void DlnaSink::RefreshTrackDurationFromSmtc(const std::wstring& previousTitle,
         GetTickCount64() - info.stampTick < 15000;
     if (fresh && info.durationMs >= 10000 &&
         info.durationMs <= 4ull * 3600ull * 1000ull) {
-        // A few seconds of headroom: Apple's timeline is the decoded
-        // length, and stopping short would cut the tail off.
-        streamSeconds_ = info.durationMs / 1000u + 3u;
-        // ...but the auto-advance cut point must be the exact length: the
-        // headroom exists only so the declared entity never truncates a
-        // track, not to decide where one track ends and the next begins.
+        // Ceiling in seconds for metadata / display
+        streamSeconds_ = (info.durationMs + 999u) / 1000u;
         trackDurationMsExact_ = info.durationMs;
         lastTrackTitle_ = info.title;
         DlnaLog(L"track duration from SMTC ms=" +
@@ -1178,12 +1173,12 @@ void DlnaSink::ProducerMain() noexcept {
     std::vector<std::int32_t> samples(samplesPerChunk);
     std::vector<BYTE> packed;
     for (;;) {
-        // Abort retired live sessions whose grace period has passed.
+        // Prune retired sessions whose grace period has passed.
         if (!retiredSessions_.empty()) {
             const auto now = GetTickCount64();
             for (auto it = retiredSessions_.begin(); it != retiredSessions_.end();) {
                 if (now >= it->second) {
-                    server_.RemoveSession(it->first->Token());
+                    if (it->first) server_.RemoveSession(it->first->Token());
                     it = retiredSessions_.erase(it);
                 } else {
                     ++it;
@@ -1546,35 +1541,17 @@ void DlnaSink::Stop() noexcept {
 
 void DlnaSink::Close() noexcept {
     Stop();
-    if (shape_ == DlnaStreamShape::FlacLive) {
-        // Keep the HTTP server and alias alive across the runtime's
-        // Close+Open at a format change. The new Open reuses both, so the
-        // renderer sees a new playlist item, not a reset and not a 410.
-        CloseStream(); // retires the current session without aborting it
-        // ProducerMain has exited by now, so its cleanup loop will not run
-        // again. Release only the retired sessions whose 5 s grace has
-        // elapsed; SetupStream prunes the rest on the next Open.
-        const auto now = GetTickCount64();
-        for (auto it = retiredSessions_.begin(); it != retiredSessions_.end();) {
-            if (now >= it->second) {
-                server_.RemoveSession(it->first->Token());
-                it = retiredSessions_.erase(it);
-            } else {
-                ++it;
-            }
+    // Prune retired sessions whose grace period has expired.
+    const auto now = GetTickCount64();
+    for (auto it = retiredSessions_.begin(); it != retiredSessions_.end();) {
+        if (now >= it->second) {
+            if (it->first) server_.RemoveSession(it->first->Token());
+            it = retiredSessions_.erase(it);
+        } else {
+            ++it;
         }
-    } else {
-        for (auto& entry : retiredSessions_) {
-            if (entry.first) server_.RemoveSession(entry.first->Token());
-        }
-        retiredSessions_.clear();
-        CloseStream();
-        server_.Stop();
-        if (!liveAlias_.empty()) {
-            server_.RemoveAlias(liveAlias_);
-        }
-        liveAlias_.clear();
     }
+    CloseStream(); // retires current session without aborting
     startedOnce_.store(false, std::memory_order_release);
     endOfStreamSubmitted_.store(false, std::memory_order_release);
     endOfStreamTick_.store(0, std::memory_order_release);

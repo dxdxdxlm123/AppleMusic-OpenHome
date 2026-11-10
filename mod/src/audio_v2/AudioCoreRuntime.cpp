@@ -374,6 +374,7 @@ void AudioCoreRuntime::OnTransportPlayPause(std::uint64_t revision) noexcept {
     userPauseIntent_ = false;
     nativeStartedAfterUserPause_ = false;
     TryResumePausedSinkLocked(true);
+    TryActivateLocked();
     Wake();
 }
 
@@ -1142,7 +1143,10 @@ void AudioCoreRuntime::OnAudioUnitStarted(void* unit) noexcept {
         graphStarted_ = true;
         graphOutputUnit_ = unit;
     }
-    if (!userPauseIntent_) TryResumePausedSinkLocked();
+    userPauseIntent_ = false;
+    nativeStartedAfterUserPause_ = false;
+    TryResumePausedSinkLocked();
+    TryActivateLocked();
     Wake();
 }
 
@@ -1246,10 +1250,18 @@ void AudioCoreRuntime::OnNativeClientStarted(void* client, HRESULT result) noexc
     nativeClient_.store(client, std::memory_order_release);
     nativeInitialized_ = true;
     nativeStarted_ = true;
-    if (userPauseIntent_ || resumeProducerPending_) nativeStartedAfterUserPause_ = true;
+
+    // When Apple's native audio client starts, playback is actively running.
+    // Clear any prior user pause intent so that activation or resume can proceed.
+    userPauseIntent_ = false;
+    nativeStartedAfterUserPause_ = false;
+    resumeProducerPending_ = false;
+
     TryBindGraphLocked();
-    if (!userPauseIntent_) TryResumePausedSinkLocked();
-    if (!userPauseIntent_ && playbackStateAvailable_ && observedPlaybackItem_ != 0 &&
+    TryResumePausedSinkLocked(true);
+    TryActivateLocked();
+
+    if (playbackStateAvailable_ && observedPlaybackItem_ != 0 &&
         observedPlaybackItem_ == pausedPlaybackItem_ &&
         coordinator_.SinkState() == WasapiSinkState::Running)
         pausedPlaybackGeneration_ = 0;
@@ -1920,7 +1932,9 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
     // converter after the previous session has finished. A successor decoder
     // can also be prepared while the current live session is still active;
     // reopening then aborts audible PCM and immediately starts a new URL.
-    if (graphBound_ && boundConverter_.load(std::memory_order_acquire) == graphConverter_) {
+    if (graphBound_ && boundConverter_.load(std::memory_order_acquire) == graphConverter_ &&
+        coordinator_.Phase() != AudioCoreGatePhase::Faulted &&
+        coordinator_.Phase() != AudioCoreGatePhase::Off) {
         if (!trackChangePending_) {
             RebindDiag(callbacks_, L"skip-same-bound", graphRate_,
                        reinterpret_cast<std::uintptr_t>(graphConverter_), trackChangePending_);
@@ -1929,13 +1943,18 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
         if (outputKind_ == AudioSinkKind::Dlna &&
             coordinator_.Phase() == AudioCoreGatePhase::Active &&
             !coordinator_.EndOfStreamSubmitted()) {
-            // Keep the notification pending. A real Stop/seek/graph takeover
-            // retires through its existing path; natural EOS drains first and
-            // FinalizeEndOfStreamDrainLocked() rearms this same-converter bind.
-            RebindDiag(callbacks_, L"defer-active-track-change", graphRate_,
-                       reinterpret_cast<std::uintptr_t>(graphConverter_),
-                       reinterpret_cast<std::uintptr_t>(boundConverter_.load(std::memory_order_acquire)));
-            return;
+            const bool userInitiated =
+                directSelectionArmEpoch_.load(std::memory_order_acquire) != 0 ||
+                transportSkipArmEpoch_.load(std::memory_order_acquire) != 0;
+            if (!userInitiated) {
+                // Keep the notification pending. A real Stop/seek/graph takeover
+                // retires through its existing path; natural EOS drains first and
+                // FinalizeEndOfStreamDrainLocked() rearms this same-converter bind.
+                RebindDiag(callbacks_, L"defer-active-track-change", graphRate_,
+                           reinterpret_cast<std::uintptr_t>(graphConverter_),
+                           reinterpret_cast<std::uintptr_t>(boundConverter_.load(std::memory_order_acquire)));
+                return;
+            }
         }
     }
 
@@ -1968,6 +1987,8 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
 
     const auto generation = ++nextMediaGeneration_;
     trackChangePending_ = false;
+    userPauseIntent_ = false;
+    nativeStartedAfterUserPause_ = false;
     registry_.UpdateMediaGeneration(graphConverter_, generation);
     if (!registry_.Snapshot(graphConverter_, snapshot)) return;
 
@@ -2141,7 +2162,7 @@ void AudioCoreRuntime::ExtendSeekQuietPeriodLocked() noexcept {
 }
 
 void AudioCoreRuntime::TryResumePausedSinkLocked(bool requireFreshProducer) noexcept {
-    if (userPauseIntent_ || seekFence_ ||
+    if ((userPauseIntent_ && (!nativeStarted_ || !graphStarted_)) || seekFence_ ||
         coordinator_.Phase() != AudioCoreGatePhase::Active ||
         coordinator_.SinkState() != WasapiSinkState::Open) {
         return;
@@ -2192,7 +2213,7 @@ void AudioCoreRuntime::TryResumePausedSinkLocked(bool requireFreshProducer) noex
 }
 
 void AudioCoreRuntime::TryActivateLocked() noexcept {
-    if (userPauseIntent_) return;
+    if (userPauseIntent_ && (!nativeStarted_ || !graphStarted_)) return;
     if (seekFence_) {
         if (seekFenceReleaseTick_ == 0 || GetTickCount64() < seekFenceReleaseTick_) return;
         seekFence_ = false;
@@ -2455,6 +2476,11 @@ void AudioCoreRuntime::RetireCaptureLocked(bool keepGraph, bool keepPendingCaptu
     resumeProducerPending_ = false;
     resumeProducerFrames_ = 0;
     nativeStartedAfterUserPause_ = false;
+    if (!keepGraph) {
+        userPauseIntent_ = false;
+        pausedPlaybackGeneration_ = 0;
+        pausedPlaybackItem_ = 0;
+    }
     pendingGraphBind_ = {};
     if (!keepPendingCapture) ClearPendingCaptureLocked();
     graphPaused_ = false;

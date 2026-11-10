@@ -246,10 +246,20 @@ bool DlnaStreamSession::ReadAt(std::uint64_t cursor, BYTE* destination,
 void DlnaStreamSession::ReclaimLocked() noexcept {
     if (size_ == 0) return;
     // File-shaped sessions keep byte 0 addressable until a reader actually
-    // asks for a byte range; see NewReaderAt.
-    if (!rangeRequested_ && shape_ == DlnaStreamShape::WavFile &&
-        totalBytes_ > kWavHeaderBytes) {
-        return;
+    // asks for a byte range (or has committed to a streaming pull past 512 KB);
+    // see NewReaderAt.
+    const bool isFileShape =
+        (shape_ == DlnaStreamShape::WavFile || shape_ == DlnaStreamShape::FlacFile) &&
+        totalBytes_ > kWavHeaderBytes;
+    if (isFileShape && !rangeRequested_) {
+        bool hasCommittedReader = false;
+        for (const auto& entry : readers_) {
+            if (entry.second.cursor >= 512 * 1024) {
+                hasCommittedReader = true;
+                break;
+            }
+        }
+        if (!hasCommittedReader) return;
     }
     const std::uint64_t oldest = produced_ - size_;
     const std::uint64_t now = GetTickCount64();
