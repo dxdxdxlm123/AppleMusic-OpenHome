@@ -211,7 +211,9 @@ bool MediaController::Play() {
         auto session = GetAppleSession(manager);
         if (session) return session.TryPlayAsync().get();
     } catch (...) {}
-    return false;
+    // If Apple Music is not running yet, auto-launch it!
+    ShellExecuteW(nullptr, L"open", L"music://", nullptr, nullptr, SW_SHOWMINNOACTIVE);
+    return true;
 }
 
 bool MediaController::Pause() {
@@ -231,7 +233,9 @@ bool MediaController::TogglePlayPause() {
         auto session = GetAppleSession(manager);
         if (session) return session.TryTogglePlayPauseAsync().get();
     } catch (...) {}
-    return false;
+    // If Apple Music is not running yet, auto-launch it!
+    ShellExecuteW(nullptr, L"open", L"music://", nullptr, nullptr, SW_SHOWMINNOACTIVE);
+    return true;
 }
 
 bool MediaController::SkipNext() {
