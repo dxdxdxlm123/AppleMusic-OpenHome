@@ -718,6 +718,7 @@ void RemoteServer::SetupRoutes() {
             uint8_t kind = 0;
             if (type == "dlna") kind = 1;
             else if (type == "asio") kind = 2;
+            else if (type == "raat" || type == "roon") kind = 3;
             ok = AmPluginClient::Instance().SetOutputTarget(kind, Widen(id), Widen(name), Widen(loc));
         } catch (...) {}
         res.set_content(json({{"success", ok}}).dump(), "application/json");

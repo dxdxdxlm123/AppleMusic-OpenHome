@@ -189,18 +189,20 @@ void AmPluginClient::HandleStatusMessage(const ipc::Message& msg) {
 
 void AmPluginClient::HandleDeviceMessage(const ipc::Message& msg, bool found) {
     std::lock_guard lock(stateMutex_);
-    std::string udn = Narrow(msg.endpointId);
+    std::string id = Narrow(msg.endpointId);
     std::string name = Narrow(msg.endpointName);
     std::string loc = Narrow(msg.detail);
+    std::string type = (msg.reserved[3] == 1u) ? "raat" : "dlna";
 
     auto it = std::find_if(devices_.begin(), devices_.end(),
-                           [&udn](const DeviceInfo& d) { return d.id == udn; });
+                           [&id](const DeviceInfo& d) { return d.id == id; });
     if (it != devices_.end()) {
         it->online = found;
         if (!name.empty()) it->name = name;
         if (!loc.empty()) it->location = loc;
-    } else if (found && !udn.empty()) {
-        devices_.push_back({ udn, name, "dlna", true, loc });
+        it->type = type;
+    } else if (found && !id.empty()) {
+        devices_.push_back({ id, name, type, true, loc });
     }
 }
 
@@ -272,9 +274,9 @@ bool AmPluginClient::SetOutputTarget(uint8_t kind, const std::wstring& id, const
 
     auto msg = ipc::NewMessage(ipc::MessageType::SetOutputTarget, ipc::Role::Controller);
     msg.senderPid = GetCurrentProcessId();
-    msg.enabledIntent = kind; // 0=WASAPI, 1=DLNA, 2=ASIO
+    msg.enabledIntent = kind; // 0=WASAPI, 1=DLNA, 2=ASIO, 3=Roon RAAT
 
-    if (kind == 1) { // DLNA
+    if (kind == 1 || kind == 3) { // DLNA or Roon RAAT
         wcsncpy_s(msg.endpointId, id.c_str(), _TRUNCATE);
         wcsncpy_s(msg.endpointName, name.c_str(), _TRUNCATE);
         wcsncpy_s(msg.detail, location.c_str(), _TRUNCATE);

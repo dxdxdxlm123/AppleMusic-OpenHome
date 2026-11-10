@@ -17,17 +17,19 @@ target_compile_definitions(am_exclusive_drain_probe PRIVATE UNICODE _UNICODE WIN
 target_link_libraries(am_exclusive_drain_probe PRIVATE ole32 uuid avrt)
 
 # Explicit build/run only: RAAT wire-format self test (offline, no device).
-add_executable(am_exclusive_raat_selftest EXCLUDE_FROM_ALL
-  tests/RaatSelfTest.cpp
-  src/audio_v2/DlnaLog.cpp
-  src/audio_v2/RaatDiscovery.cpp
-  src/audio_v2/RaatProtocol.cpp
-  src/audio_v2/RaatScripts.cpp
-  src/audio_v2/RaatScripts.rc
-  src/audio_v2/RaatSink.cpp)
-target_include_directories(am_exclusive_raat_selftest PRIVATE src)
-target_compile_definitions(am_exclusive_raat_selftest PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(am_exclusive_raat_selftest PRIVATE ws2_32 ole32 iphlpapi)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/RaatSelfTest.cpp")
+  add_executable(am_exclusive_raat_selftest EXCLUDE_FROM_ALL
+    tests/RaatSelfTest.cpp
+    src/audio_v2/DlnaLog.cpp
+    src/audio_v2/RaatDiscovery.cpp
+    src/audio_v2/RaatProtocol.cpp
+    src/audio_v2/RaatScripts.cpp
+    src/audio_v2/RaatScripts.rc
+    src/audio_v2/RaatSink.cpp)
+  target_include_directories(am_exclusive_raat_selftest PRIVATE src)
+  target_compile_definitions(am_exclusive_raat_selftest PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+  target_link_libraries(am_exclusive_raat_selftest PRIVATE ws2_32 ole32 iphlpapi)
+endif()
 
 # Explicit build/run only: drives DlnaSink + a synthetic PCM source against a
 # local OpenHome renderer (tools/oh_test_renderer.py) to validate the whole
