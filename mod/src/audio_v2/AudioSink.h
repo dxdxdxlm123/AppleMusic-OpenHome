@@ -274,6 +274,7 @@ public:
     // Only the DLNA live diagnostic tail delay uses this. Other outputs have
     // no such wait, so their default remains a no-op.
     virtual void CancelNaturalEndOfStreamDelayForSuccessor() noexcept {}
+    virtual void NotifyNextTrack() noexcept {}
 };
 
 } // namespace ammod::audio_v2

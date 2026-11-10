@@ -56,6 +56,7 @@ public:
     void CancelNaturalEndOfStreamDelayForSuccessor() noexcept override {
         naturalEosDelayCancel_.store(true, std::memory_order_release);
     }
+    void NotifyNextTrack() noexcept override;
 
 private:
     bool BuildFormatCandidates(const std::wstring& sinkProtocolInfo) noexcept;
@@ -180,6 +181,7 @@ private:
     std::condition_variable producerExitCv_;
     bool producerExited_{false};
     std::atomic<bool> producerStop_{false};
+    std::atomic<bool> externalTrackBoundaryPending_{false};
     // Set by the runtime as soon as a real successor is pending. This releases
     // only the natural-end wait; unlike producerStop_, it must still submit EOS.
     std::atomic<bool> naturalEosDelayCancel_{false};

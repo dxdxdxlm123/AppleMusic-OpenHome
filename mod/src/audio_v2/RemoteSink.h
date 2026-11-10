@@ -143,6 +143,9 @@ public:
         }
         resumeBlocked_.store(blocked, std::memory_order_release);
     }
+    void NotifyNextTrack() noexcept override {
+        if (fallback_) fallback_->NotifyNextTrack();
+    }
 
     bool UsingFallback() const noexcept { return fallback_ != nullptr; }
     std::uint32_t TargetKind() const noexcept { return targetKind_; }

@@ -129,7 +129,7 @@ namespace {
 //   TRACK<TAB>durationMs<TAB>title
 // A line is emitted when the timeline end changes and every few seconds after
 // that, so the reader can tell "no news" apart from "the helper died".
-constexpr std::uint32_t kPollMs = 800;
+constexpr std::uint32_t kPollMs = 200;
 constexpr std::uint64_t kRefreshMs = 3000;
 
 void WriteUtf8Line(const std::wstring& text) {

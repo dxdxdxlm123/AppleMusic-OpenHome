@@ -118,6 +118,9 @@ public:
     void SetSinkResumeBlocked(bool blocked) noexcept {
         if (sink_) sink_->SetResumeBlocked(blocked);
     }
+    void NotifyTrackChanged() noexcept {
+        if (sink_) sink_->NotifyNextTrack();
+    }
     std::size_t BufferedBlocks() const noexcept { return queue_ ? queue_->Size() : 0; }
     std::size_t BufferedFrames() const noexcept {
         // In Remote mode the samples move from this queue into the shared ring,

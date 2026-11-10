@@ -344,6 +344,7 @@ void AudioCoreRuntime::NotifyTrackChanged(std::uint64_t playerItem) noexcept {
     }
     if (!UiEnabled()) return;
     ControlScope lock(*this);
+    coordinator_.NotifyTrackChanged();
     // Nothing bound yet (or already torn down): the next bind will start the
     // stream from scratch anyway.
     if (!graphBound_ && coordinator_.Phase() == AudioCoreGatePhase::Off) return;
@@ -1087,8 +1088,7 @@ void AudioCoreRuntime::OnAudioUnitInitialized(void* unit, void* candidateConvert
     // died below the prebuffer threshold and no attempt ever activated (ENG-1).
     // A formatless, candidate-less init while a bind is live or pending belongs
     // to the current graph: leave the graph identity alone.
-    if (!candidateConverter && sampleRate == 0 && channels == 0 &&
-        (graphBound_ || pendingGraphBind_.converter)) {
+    if (!candidateConverter && sampleRate == 0 && channels == 0) {
         return;
     }
     const bool graphIdentityChanged =
@@ -1872,6 +1872,7 @@ AudioCoreRuntimeStats AudioCoreRuntime::Stats() const noexcept {
 }
 
 void AudioCoreRuntime::TryBindGraphLocked() noexcept {
+    bool outputTargetChanged = false;
     if (outputChangePending_) {
         outputKind_ = pendingProfile_.kind;
         dlnaTarget_ = pendingProfile_.dlna;
@@ -1881,14 +1882,29 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
         asioDriverClsid_ = pendingProfile_.asioDriverClsid;
         asioDriverName_ = pendingProfile_.asioDriverName;
         outputChangePending_ = false;
+        outputTargetChanged = true;
     }
     if (!UiEnabled() || !graphUnit_ || graphRate_ < 8000 || graphRate_ > 768000 ||
-        graphChannels_ != 2) return;
+        graphChannels_ != 2) {
+        if (outputTargetChanged) {
+            if (coordinator_.Phase() != AudioCoreGatePhase::Off) {
+                coordinator_.Disable();
+            }
+        }
+        return;
+    }
     if (!graphConverter_ && graphSourceBits_ != 0) {
         registry_.FindCandidate(graphRate_, graphChannels_, graphSourceBits_,
                                 graphObservationId_, graphConverter_);
     }
-    if (!graphConverter_) return;
+    if (!graphConverter_) {
+        if (outputTargetChanged) {
+            if (coordinator_.Phase() != AudioCoreGatePhase::Off) {
+                coordinator_.Disable();
+            }
+        }
+        return;
+    }
 
     ConverterRegistrationSnapshot snapshot{};
     if (!registry_.Snapshot(graphConverter_, snapshot)) return;
@@ -1932,7 +1948,8 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
     // converter after the previous session has finished. A successor decoder
     // can also be prepared while the current live session is still active;
     // reopening then aborts audible PCM and immediately starts a new URL.
-    if (graphBound_ && boundConverter_.load(std::memory_order_acquire) == graphConverter_ &&
+    if (!outputTargetChanged &&
+        graphBound_ && boundConverter_.load(std::memory_order_acquire) == graphConverter_ &&
         coordinator_.Phase() != AudioCoreGatePhase::Faulted &&
         coordinator_.Phase() != AudioCoreGatePhase::Off) {
         if (!trackChangePending_) {

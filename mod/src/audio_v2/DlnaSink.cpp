@@ -596,6 +596,10 @@ void DlnaSink::CloseStream() noexcept {
     }
 }
 
+void DlnaSink::NotifyNextTrack() noexcept {
+    externalTrackBoundaryPending_.store(true, std::memory_order_release);
+}
+
 void DlnaSink::RefreshTrackDurationFromSmtc(const std::wstring& previousTitle,
                                             bool fastTrackChange) noexcept {
     wchar_t value[16]{};
@@ -624,16 +628,16 @@ void DlnaSink::RefreshTrackDurationFromSmtc(const std::wstring& previousTitle,
         // session declares the new track's length, not the old one's. A
         // repeated title (same song on repeat) is indistinguishable from a
         // stale snapshot, so this wait is bounded and harmless either way.
-        const auto deadline = GetTickCount64() + (fastTrackChange ? 500u : 3000u);
+        const auto deadline = GetTickCount64() + (fastTrackChange ? 800u : 5000u);
         while (info.valid && info.title == previousTitle &&
                GetTickCount64() < deadline) {
             if (producerStop_.load(std::memory_order_acquire)) return;
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
             info = monitor.Snapshot(0);
         }
     }
-    const bool fresh = info.valid &&
-        GetTickCount64() - info.stampTick < 15000;
+    const bool titleChanged = !previousTitle.empty() ? (info.valid && info.title != previousTitle) : info.valid;
+    const bool fresh = titleChanged && (GetTickCount64() - info.stampTick < 15000);
     if (fresh && info.durationMs >= 10000 &&
         info.durationMs <= 4ull * 3600ull * 1000ull) {
         // Ceiling in seconds for metadata / display
@@ -644,8 +648,20 @@ void DlnaSink::RefreshTrackDurationFromSmtc(const std::wstring& previousTitle,
                 std::to_wstring(info.durationMs) + L" title=" + info.title);
     } else {
         trackDurationMsExact_ = 0;
-        DlnaLog(L"track duration unavailable, using stream_seconds=" +
-                std::to_wstring(streamSeconds_));
+        wchar_t fallbackSec[16]{};
+        GetPrivateProfileStringW(L"dlna", L"stream_seconds", L"600", fallbackSec,
+                                 static_cast<DWORD>(std::size(fallbackSec)),
+                                 IniPath().c_str());
+        const auto configuredSec = static_cast<std::uint32_t>(_wtoi(fallbackSec));
+        streamSeconds_ = configuredSec != 0 ? configuredSec : 600u;
+        if (!previousTitle.empty() && info.valid && info.title == previousTitle) {
+            DlnaLog(L"SMTC title unchanged from previous (" + previousTitle +
+                    L"); duration not yet published by player, fallback stream_seconds=" +
+                    std::to_wstring(streamSeconds_));
+        } else {
+            DlnaLog(L"track duration unavailable from SMTC, fallback stream_seconds=" +
+                    std::to_wstring(streamSeconds_));
+        }
     }
 }
 
@@ -1252,6 +1268,20 @@ void DlnaSink::ProducerMain() noexcept {
             continue;
         }
         waitingForSource_.store(false, std::memory_order_release);
+        if (trackDurationMsExact_ == 0) {
+            auto& monitor = TrackMonitor::Instance();
+            auto liveInfo = monitor.Snapshot(0);
+            if (liveInfo.valid && !lastTrackTitle_.empty() && liveInfo.title != lastTrackTitle_ &&
+                liveInfo.durationMs >= 10000 && liveInfo.durationMs <= 4ull * 3600ull * 1000ull) {
+                trackDurationMsExact_ = liveInfo.durationMs;
+                lastTrackTitle_ = liveInfo.title;
+                const auto boundaryMs = static_cast<std::uint64_t>(liveInfo.durationMs);
+                trackFramesExact_ = boundaryMs * format_.sampleRate / 1000ull;
+                DlnaLog(L"SMTC duration acquired dynamically mid-stream: " +
+                        std::to_wstring(liveInfo.durationMs) + L"ms title=" + liveInfo.title +
+                        L" updated trackFramesExact=" + std::to_wstring(trackFramesExact_));
+            }
+        }
         // Append the chunk, rolling over to the next track's session when the
         // declared entity is exhausted. A chunk can straddle the boundary:
         // frames past it already belong to the next track (Apple Music feeds
@@ -1260,8 +1290,11 @@ void DlnaSink::ProducerMain() noexcept {
         std::size_t offsetFrames = 0;
         bool failed = false;
         while (offsetFrames < written) {
-            if (trackFramesExact_ != 0 &&
-                sessionFramesProduced_ >= trackFramesExact_) {
+            const bool trackBoundaryReached =
+                (trackFramesExact_ != 0 && sessionFramesProduced_ >= trackFramesExact_) ||
+                externalTrackBoundaryPending_.load(std::memory_order_acquire);
+            if (trackBoundaryReached) {
+                externalTrackBoundaryPending_.store(false, std::memory_order_release);
                 if (!AdvanceToNextTrack()) {
                     RecordError(ammod::audio::kDlnaStreamFailed);
                     failed = true;
