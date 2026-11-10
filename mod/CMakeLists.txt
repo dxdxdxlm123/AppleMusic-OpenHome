@@ -159,14 +159,17 @@ target_link_libraries(am_exclusive_media_control PRIVATE ole32 runtimeobject win
 add_executable(am_exclusive_remote
   src/remote/Main.cpp
   src/remote/MediaController.cpp
-  src/remote/RemoteServer.cpp)
+  src/remote/RemoteServer.cpp
+  src/remote/AmPluginClient.cpp
+  src/IpcTransport.cpp
+  src/LocalOutputDevices.cpp)
 target_include_directories(am_exclusive_remote PRIVATE
   src
   ${CMAKE_CURRENT_SOURCE_DIR}/../third_party
   ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cpp-httplib
   ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/nlohmann)
 target_compile_definitions(am_exclusive_remote PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(am_exclusive_remote PRIVATE ole32 oleaut32 runtimeobject windowsapp ws2_32 crypt32 winhttp)
+target_link_libraries(am_exclusive_remote PRIVATE advapi32 ole32 oleaut32 runtimeobject windowsapp ws2_32 crypt32 winhttp user32 shell32)
 set_target_properties(am_exclusive_remote PROPERTIES OUTPUT_NAME "am-exclusive-remote")
 
 add_executable(am_exclusive_broker

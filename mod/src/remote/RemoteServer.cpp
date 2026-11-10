@@ -1,4 +1,6 @@
 #include "RemoteServer.h"
+#include "AmPluginClient.h"
+#include "WebRemoteHtml.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -17,6 +19,8 @@ using json = nlohmann::json;
 namespace ammod::remote {
 
 namespace {
+
+const char* kAppleDeveloperToken = "eyJ0eXAiOiJKV1QiLCJhbGciOiJFUzI1NiIsImtpZCI6IldlYlBsYXlLaWQifQ.eyJpc3MiOiJBTVBXZWJQbGF5IiwiaWF0IjoxNzkyNzgwNTM0LCJleHAiOjE3OTg4Mjg1MzQsInJvb3RfaHR0cHNfb3JpZ2luIjpbImFwcGxlLmNvbSJdfQ.wcf_7U-zcgUjY2L8d4HWFkdxP1YSJCkkqEpEtVPKpRARrlaag0DHyIpRcoUEWZU8kJlvx5Q7ZNp04OabfuiuAw";
 
 std::string Narrow(const std::wstring& text) {
     if (text.empty()) return {};
@@ -50,40 +54,41 @@ std::string UrlEncode(const std::string& value) {
     return escaped.str();
 }
 
+struct CachedTrackInfo {
+    std::string name;
+    std::string url;
+};
+
 std::mutex g_trackCacheMutex;
-std::unordered_map<std::string, std::string> g_trackUrlCache;
+std::unordered_map<std::string, CachedTrackInfo> g_trackCache;
 
-std::string ResolveTrackUrl(const std::string& trackId) {
-    if (trackId.empty()) return {};
-    {
-        std::lock_guard lock(g_trackCacheMutex);
-        auto it = g_trackUrlCache.find(trackId);
-        if (it != g_trackUrlCache.end() && !it->second.empty()) {
-            return it->second;
-        }
-    }
-
-    // Fallback: iTunes lookup
-    HINTERNET hSession = WinHttpOpen(L"AMExclusiveLookup/1.0",
+json FetchAppleMusicApi(const std::string& path, const std::string& query = "") {
+    HINTERNET hSession = WinHttpOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                                      WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) return {};
+    if (!hSession) return json::object();
 
-    WinHttpSetTimeouts(hSession, 2000, 2000, 3000, 3000);
-    HINTERNET hConnect = WinHttpConnect(hSession, L"itunes.apple.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    WinHttpSetTimeouts(hSession, 4000, 4000, 8000, 8000);
+    HINTERNET hConnect = WinHttpConnect(hSession, L"api.music.apple.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (!hConnect) {
         WinHttpCloseHandle(hSession);
-        return {};
+        return json::object();
     }
 
-    std::string path = "/lookup?id=" + trackId + "&entity=song";
-    std::wstring wPath = Widen(path);
+    std::string fullPath = path;
+    if (!query.empty()) {
+        fullPath += (fullPath.find('?') == std::string::npos ? "?" : "&") + query;
+    }
+    std::wstring wPath = Widen(fullPath);
+
     HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", wPath.c_str(), nullptr,
                                           WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
                                           WINHTTP_FLAG_SECURE);
     std::string responseBody;
     if (hRequest) {
-        if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+        std::wstring headers = L"Authorization: Bearer " + Widen(kAppleDeveloperToken) +
+                               L"\r\nOrigin: https://music.apple.com\r\nAccept: application/json\r\n";
+        if (WinHttpSendRequest(hRequest, headers.c_str(), static_cast<DWORD>(headers.size()), WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
             WinHttpReceiveResponse(hRequest, nullptr)) {
             DWORD bytesAvailable = 0;
             while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
@@ -101,140 +106,80 @@ std::string ResolveTrackUrl(const std::string& trackId) {
     WinHttpCloseHandle(hConnect);
     WinHttpCloseHandle(hSession);
 
-    if (!responseBody.empty()) {
-        try {
-            auto j = json::parse(responseBody);
-            if (j.contains("results") && j["results"].is_array() && !j["results"].empty()) {
-                std::string url = j["results"][0].value("trackViewUrl", "");
-                if (!url.empty()) {
-                    std::lock_guard lock(g_trackCacheMutex);
-                    g_trackUrlCache[trackId] = url;
-                    return url;
-                }
-            }
-        } catch (...) {}
+    if (responseBody.empty()) return json::object();
+    try {
+        return json::parse(responseBody);
+    } catch (...) {
+        return json::object();
+    }
+}
+
+CachedTrackInfo ResolveTrackInfo(const std::string& trackId) {
+    if (trackId.empty()) return {};
+    {
+        std::lock_guard lock(g_trackCacheMutex);
+        auto it = g_trackCache.find(trackId);
+        if (it != g_trackCache.end() && !it->second.url.empty()) {
+            return it->second;
+        }
+    }
+
+    // Lookup via Apple Music Streaming API
+    auto resp = FetchAppleMusicApi("/v1/catalog/cn/songs/" + trackId);
+    if (resp.contains("data") && resp["data"].is_array() && !resp["data"].empty()) {
+        const auto& attrs = resp["data"][0].value("attributes", json::object());
+        std::string name = attrs.value("name", "");
+        std::string url = attrs.value("url", "");
+        if (!name.empty() && !url.empty()) {
+            CachedTrackInfo info{ name, url };
+            std::lock_guard lock(g_trackCacheMutex);
+            g_trackCache[trackId] = info;
+            return info;
+        }
     }
     return {};
 }
 
-json FetchAppleSearch(const std::string& term, int limit) {
-    json emptyResults = {
-        {"data", {
-            {"results", {
-                {"songs", {{"data", json::array()}}}
-            }}
-        }}
-    };
-
-    if (term.empty()) return emptyResults;
-
-    HINTERNET hSession = WinHttpOpen(L"AMExclusiveRemote/1.0",
-                                     WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
-                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSession) return emptyResults;
-
-    WinHttpSetTimeouts(hSession, 3000, 3000, 5000, 5000);
-
-    HINTERNET hConnect = WinHttpConnect(hSession, L"itunes.apple.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
-    if (!hConnect) {
-        WinHttpCloseHandle(hSession);
-        return emptyResults;
-    }
-
-    std::string path = "/search?term=" + UrlEncode(term) + "&entity=song&limit=" + std::to_string(limit);
-    std::wstring wPath = Widen(path);
-
-    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", wPath.c_str(), nullptr,
-                                          WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
-                                          WINHTTP_FLAG_SECURE);
-    if (!hRequest) {
-        WinHttpCloseHandle(hConnect);
-        WinHttpCloseHandle(hSession);
-        return emptyResults;
-    }
-
-    bool sent = WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
-                WinHttpReceiveResponse(hRequest, nullptr);
-
-    std::string responseBody;
-    if (sent) {
-        DWORD bytesAvailable = 0;
-        while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
-            std::vector<char> buffer(bytesAvailable);
-            DWORD bytesRead = 0;
-            if (WinHttpReadData(hRequest, buffer.data(), bytesAvailable, &bytesRead) && bytesRead > 0) {
-                responseBody.append(buffer.data(), bytesRead);
-            } else {
-                break;
-            }
-        }
-    }
-
-    WinHttpCloseHandle(hRequest);
-    WinHttpCloseHandle(hConnect);
-    WinHttpCloseHandle(hSession);
-
-    if (responseBody.empty()) return emptyResults;
-
-    try {
-        auto itunesJson = json::parse(responseBody);
-        json songsData = json::array();
-
-        if (itunesJson.contains("results") && itunesJson["results"].is_array()) {
-            for (const auto& item : itunesJson["results"]) {
-                std::string trackId = std::to_string(item.value("trackId", 0ll));
-                std::string trackName = item.value("trackName", "");
-                std::string artistName = item.value("artistName", "");
-                std::string albumName = item.value("collectionName", "");
-                std::string artworkUrl = item.value("artworkUrl100", "");
-                int64_t durationMs = item.value("trackTimeMillis", 0ll);
-                std::string trackViewUrl = item.value("trackViewUrl", "");
-
-                {
-                    std::lock_guard lock(g_trackCacheMutex);
-                    g_trackUrlCache[trackId] = trackViewUrl;
-                }
-
-                // Convert 100x100 to template {w}x{h}bb.{f}
-                size_t pos = artworkUrl.find("100x100bb.");
-                if (pos != std::string::npos) {
-                    artworkUrl.replace(pos, 10, "{w}x{h}bb.");
-                }
-
-                json songItem = {
-                    {"id", trackId},
-                    {"type", "songs"},
-                    {"attributes", {
-                        {"name", trackName},
-                        {"artistName", artistName},
-                        {"albumName", albumName},
-                        {"durationInMillis", durationMs},
-                        {"url", trackViewUrl},
-                        {"artwork", {
-                            {"url", artworkUrl}
-                        }},
-                        {"playParams", {
-                            {"id", trackId},
-                            {"kind", "song"}
-                        }}
-                    }}
-                };
-                songsData.push_back(songItem);
-            }
-        }
-
+json FetchAppleSearch(const std::string& term, const std::string& types, int limit) {
+    if (term.empty()) {
         return {
             {"data", {
-                {"results", {
-                    {"songs", {
-                        {"data", songsData}
-                    }}
-                }}
+                {"results", json::object()}
             }}
         };
-    } catch (...) {
-        return emptyResults;
     }
+
+    std::string q = "term=" + UrlEncode(term) + "&types=" + types + "&limit=" + std::to_string(limit);
+    auto apiRes = FetchAppleMusicApi("/v1/catalog/cn/search", q);
+
+    if (apiRes.contains("results")) {
+        // Pre-cache song names and URLs from results if present
+        if (apiRes["results"].contains("songs") && apiRes["results"]["songs"].contains("data")) {
+            std::lock_guard lock(g_trackCacheMutex);
+            for (const auto& song : apiRes["results"]["songs"]["data"]) {
+                std::string sId = song.value("id", "");
+                if (song.contains("attributes")) {
+                    const auto& attrs = song["attributes"];
+                    std::string sName = attrs.value("name", "");
+                    std::string sUrl = attrs.value("url", "");
+                    if (!sId.empty() && !sName.empty() && !sUrl.empty()) {
+                        g_trackCache[sId] = { sName, sUrl };
+                    }
+                }
+            }
+        }
+        return {
+            {"data", {
+                {"results", apiRes["results"]}
+            }}
+        };
+    }
+
+    return {
+        {"data", {
+            {"results", json::object()}
+        }}
+    };
 }
 
 } // namespace
@@ -409,6 +354,13 @@ void RemoteServer::SetupRoutes() {
         res.status = 204;
     });
 
+    // Web Remote UI
+    server_->Get("/", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        auto html = GetWebRemoteHtml();
+        res.set_content(html.data(), html.size(), "text/html; charset=utf-8");
+    });
+
     // Health check
     server_->Get("/api/v1/playback/active", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
@@ -482,13 +434,32 @@ void RemoteServer::SetupRoutes() {
         res.set_content(j.dump(), "application/json");
     });
 
-    // Audio Quality (Hi-Res badge)
+    // Audio Quality (AMExclusive format monitor)
     server_->Get("/api/v2/playback/audio-quality", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
+        auto status = AmPluginClient::Instance().GetStatus();
+        std::string flavor = "alac";
+        std::string label = "Lossless";
+        if (status.state == 6) { // Active
+            if (status.format.find("192000") != std::string::npos ||
+                status.format.find("96000") != std::string::npos ||
+                status.format.find("88200") != std::string::npos ||
+                status.format.find("176400") != std::string::npos) {
+                label = "Hi-Res Lossless · " + status.format;
+            } else if (!status.format.empty()) {
+                label = "Lossless · " + status.format;
+            } else {
+                label = "Lossless · Bit-Perfect Exclusive";
+            }
+        } else if (status.connected && status.enabled) {
+            label = "Lossless (Exclusive Armed)";
+        } else {
+            label = "High Quality";
+        }
         json j = {
             {"data", {
-                {"flavor", "alac"},
-                {"flavorLabel", "Hi-Res Lossless · WASAPI Exclusive Bit-Perfect"}
+                {"flavor", flavor},
+                {"flavorLabel", label}
             }}
         };
         res.set_content(j.dump(), "application/json");
@@ -563,10 +534,10 @@ void RemoteServer::SetupRoutes() {
             }
             if (!id.empty()) {
                 std::cout << "[REMOTE] Play Item ID: " << id << std::endl;
-                std::string resolved = ResolveTrackUrl(id);
-                if (!resolved.empty()) {
-                    std::cout << "[REMOTE] Resolved URL: " << resolved << std::endl;
-                    controller_.PlayUrl(resolved);
+                auto info = ResolveTrackInfo(id);
+                std::cout << "[REMOTE] Resolved Track: " << info.name << ", URL: " << info.url << std::endl;
+                if (!info.url.empty()) {
+                    controller_.PlayTrack(info.url, Widen(info.name));
                 } else {
                     controller_.PlayTrackId(id);
                 }
@@ -581,7 +552,7 @@ void RemoteServer::SetupRoutes() {
             auto j = json::parse(req.body);
             if (j.contains("url") && j["url"].is_string()) {
                 std::string url = j["url"].get<std::string>();
-                controller_.PlayUrl(url);
+                controller_.PlayTrack(url, L"");
             }
         } catch (...) {}
         res.set_content("{\"data\":{}}", "application/json");
@@ -593,7 +564,8 @@ void RemoteServer::SetupRoutes() {
             auto j = json::parse(req.body);
             if (j.contains("id") && j["id"].is_string()) {
                 std::string id = j["id"].get<std::string>();
-                controller_.PlayAlbumId(id);
+                std::string url = "music://music.apple.com/album/" + id;
+                controller_.PlayTrack(url, L"");
             }
         } catch (...) {}
         res.set_content("{\"data\":{}}", "application/json");
@@ -605,22 +577,157 @@ void RemoteServer::SetupRoutes() {
         res.set_content("{\"data\":{\"items\":[],\"position\":0},\"meta\":{\"total\":0}}", "application/json");
     });
 
+    server_->Get("/api/v2/queue/position", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_content("{\"data\":{\"position\":0,\"total\":1}}", "application/json");
+    });
+
+    server_->Get("/api/v2/library/now-playing/status", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_content("{\"data\":{\"inLibrary\":true,\"rating\":0}}", "application/json");
+    });
+
+    // Apple Music API raw proxy
+    server_->Get(R"(/api/v2/amapi/raw/(.*))", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        std::string path = req.matches[1];
+        size_t sf = path.find("$STOREFRONT");
+        while (sf != std::string::npos) {
+            path.replace(sf, 11, "cn");
+            sf = path.find("$STOREFRONT");
+        }
+        std::string query;
+        for (const auto& [k, v] : req.params) {
+            if (!query.empty()) query += "&";
+            query += UrlEncode(k) + "=" + UrlEncode(v);
+        }
+        auto apiRes = FetchAppleMusicApi("/" + path, query);
+        json wrapped = {{"data", apiRes}};
+        res.set_content(wrapped.dump(), "application/json");
+    });
+
     server_->Get("/api/v2/audio/volume", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
         res.set_content("{\"data\":{\"volume\":1.0}}", "application/json");
     });
 
-    // Search catalog
+    // Search catalog (Apple Music Streaming Mainland China Catalog)
     server_->Get("/api/v2/amapi/search", [](const httplib::Request& req, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
         std::string term = req.get_param_value("term");
+        std::string types = req.get_param_value("types");
+        if (types.empty()) types = "songs,albums,artists,playlists";
         std::string limitStr = req.get_param_value("limit");
         int limit = 15;
         if (!limitStr.empty()) {
             try { limit = std::stoi(limitStr); } catch (...) {}
         }
-        json searchResult = FetchAppleSearch(term, limit);
+        json searchResult = FetchAppleSearch(term, types, limit);
         res.set_content(searchResult.dump(), "application/json");
+    });
+
+    // =========================================================================
+    // AMExclusive Plugin Control Endpoints
+    // =========================================================================
+
+    // Plugin Status & DAC format monitor
+    server_->Get("/api/v2/amexclusive/status", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        auto status = AmPluginClient::Instance().GetStatus();
+        json j = {
+            {"connected", status.connected},
+            {"state", status.state},
+            {"stateName", status.stateName},
+            {"enabled", status.enabled},
+            {"hardwareBufferMs", status.hardwareBufferMs},
+            {"allowResampling", status.allowResampling},
+            {"endpointId", status.endpointId},
+            {"endpointName", status.endpointName},
+            {"format", status.format},
+            {"detail", status.detail},
+            {"errorCategory", status.errorCategory},
+            {"errorString", status.errorString}
+        };
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // Audio Output Devices (WASAPI DACs, ASIO drivers, DLNA renderers)
+    server_->Get("/api/v2/amexclusive/devices", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        auto devices = AmPluginClient::Instance().GetDevices();
+        json arr = json::array();
+        for (const auto& d : devices) {
+            arr.push_back({
+                {"id", d.id},
+                {"name", d.name},
+                {"type", d.type},
+                {"online", d.online},
+                {"location", d.location}
+            });
+        }
+        json j = {{"devices", arr}};
+        res.set_content(j.dump(), "application/json");
+    });
+
+    // Toggle Exclusive Mode
+    server_->Post("/api/v2/amexclusive/set-enabled", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        bool enabled = false;
+        try {
+            auto j = json::parse(req.body);
+            enabled = j.value("enabled", false);
+        } catch (...) {}
+        bool ok = AmPluginClient::Instance().SetEnabled(enabled);
+        res.set_content(json({{"success", ok}}).dump(), "application/json");
+    });
+
+    // Set Hardware Buffer Size (e.g. 5ms, 10ms, 20ms, 50ms)
+    server_->Post("/api/v2/amexclusive/set-buffer", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        uint32_t ms = 20;
+        try {
+            auto j = json::parse(req.body);
+            ms = j.value("bufferMs", 20u);
+        } catch (...) {}
+        bool ok = AmPluginClient::Instance().SetHardwareBuffer(ms);
+        res.set_content(json({{"success", ok}}).dump(), "application/json");
+    });
+
+    // Set Allow Resampling
+    server_->Post("/api/v2/amexclusive/set-resampling", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        bool allow = false;
+        try {
+            auto j = json::parse(req.body);
+            allow = j.value("allow", false);
+        } catch (...) {}
+        bool ok = AmPluginClient::Instance().SetAllowResampling(allow);
+        res.set_content(json({{"success", ok}}).dump(), "application/json");
+    });
+
+    // Select Active Audio Output Target (DAC / ASIO / DLNA)
+    server_->Post("/api/v2/amexclusive/set-device", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        bool ok = false;
+        try {
+            auto j = json::parse(req.body);
+            std::string type = j.value("type", "wasapi");
+            std::string id = j.value("id", "");
+            std::string name = j.value("name", "");
+            std::string loc = j.value("location", "");
+            uint8_t kind = 0;
+            if (type == "dlna") kind = 1;
+            else if (type == "asio") kind = 2;
+            ok = AmPluginClient::Instance().SetOutputTarget(kind, Widen(id), Widen(name), Widen(loc));
+        } catch (...) {}
+        res.set_content(json({{"success", ok}}).dump(), "application/json");
+    });
+
+    // Trigger Device Discovery Refresh
+    server_->Post("/api/v2/amexclusive/refresh-devices", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        AmPluginClient::Instance().RefreshDevices();
+        res.set_content("{\"success\":true}", "application/json");
     });
 
     // WebSocket /socket.io/ (Engine.IO v4 handler)

@@ -1,4 +1,5 @@
 #include "RemoteServer.h"
+#include "AmPluginClient.h"
 
 #include <windows.h>
 #include <winrt/base.h>
@@ -38,9 +39,12 @@ int wmain(int argc, wchar_t** argv) {
     std::wcout << L" Press Ctrl+C to stop." << std::endl;
     std::wcout << L"============================================================" << std::endl;
 
+    ammod::remote::AmPluginClient::Instance().Start();
+
     ammod::remote::RemoteServer server(port);
     if (!server.Start()) {
         std::wcerr << L"Failed to start remote server on port " << port << std::endl;
+        ammod::remote::AmPluginClient::Instance().Stop();
         return 1;
     }
 
@@ -50,6 +54,7 @@ int wmain(int argc, wchar_t** argv) {
 
     std::wcout << L"\nShutting down remote server..." << std::endl;
     server.Stop();
+    ammod::remote::AmPluginClient::Instance().Stop();
     std::wcout << L"Server stopped cleanly." << std::endl;
 
     return 0;

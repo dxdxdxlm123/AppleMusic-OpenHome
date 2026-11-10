@@ -269,7 +269,7 @@ void BroadcastDevice(const ammod::dlna::DiscoveredDevice& device) {
     {
         std::lock_guard lock(g_mutex);
         for (const auto& client : g_clients) {
-            if (client.role != Role::Ui || client.minor < 3) continue;
+            if ((client.role != Role::Ui && client.role != Role::Controller) || client.minor < 3) continue;
             HANDLE duplicate{};
             if (DuplicateHandle(GetCurrentProcess(), client.pipe, GetCurrentProcess(),
                                 &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
@@ -1650,8 +1650,8 @@ void ClientThread(HANDLE pipe) {
             return;
         }
     }
-    if (hello.role == Role::Ui && hello.minor >= 3) SendRaatSnapshot(pipe);
-    if (hello.role == Role::Ui && hello.minor >= 3 && g_discovery) {
+    if ((hello.role == Role::Ui || hello.role == Role::Controller) && hello.minor >= 3) SendRaatSnapshot(pipe);
+    if ((hello.role == Role::Ui || hello.role == Role::Controller) && hello.minor >= 3 && g_discovery) {
         const auto devices = g_discovery->Snapshot();
         for (const auto& device : devices) {
             auto message = NewMessage(device.online ? MessageType::DeviceFound
@@ -1676,7 +1676,7 @@ void ClientThread(HANDLE pipe) {
         }
         if (incoming.type == MessageType::Goodbye) break;
         if (incoming.type == MessageType::GetStatus) PublishStatus(pipe);
-        else if (incoming.type == MessageType::RefreshDevices && hello.role == Role::Ui &&
+        else if (incoming.type == MessageType::RefreshDevices && (hello.role == Role::Ui || hello.role == Role::Controller) &&
                  hello.minor >= 3) {
             if (g_discovery) {
                 const auto devices = g_discovery->Snapshot();

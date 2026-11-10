@@ -40,6 +40,7 @@ public:
     bool SkipNext();
     bool SkipPrevious();
     bool Seek(double seconds);
+    bool PlayTrack(const std::string& albumUrl, const std::wstring& trackName = L"");
     bool PlayUrl(const std::string& url);
     bool PlayTrackId(const std::string& trackId);
     bool PlayAlbumId(const std::string& albumId);

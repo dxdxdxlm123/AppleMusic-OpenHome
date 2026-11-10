@@ -1,7 +1,9 @@
 #include "MediaController.h"
 
 #include <windows.h>
+#include <ole2.h>
 #include <shellapi.h>
+#include <uiautomation.h>
 #include <winrt/base.h>
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
@@ -271,68 +273,203 @@ bool MediaController::Seek(double seconds) {
     return false;
 }
 
-bool MediaController::PlayUrl(const std::string& url) {
-    if (url.empty()) return false;
-    std::string playUri = url;
+bool MediaController::PlayTrack(const std::string& albumUrl, const std::wstring& trackName) {
+    if (albumUrl.empty() && trackName.empty()) return false;
 
-    // Strip tracking parameters
-    size_t uoPos = playUri.find("&uo=");
-    if (uoPos != std::string::npos) {
-        size_t nextAmp = playUri.find('&', uoPos + 1);
-        if (nextAmp != std::string::npos) {
-            playUri.erase(uoPos, nextAmp - uoPos);
-        } else {
-            playUri.erase(uoPos);
-        }
-    }
+    if (!albumUrl.empty()) {
+        std::string playUri = albumUrl;
 
-    // Ensure autoplay=true is present
-    if (playUri.find("autoplay=true") == std::string::npos) {
-        if (playUri.find('?') != std::string::npos) {
-            playUri += "&autoplay=true";
-        } else {
-            playUri += "?autoplay=true";
-        }
-    }
-
-    // Convert https:// or http:// to music://
-    if (playUri.rfind("https://", 0) == 0) {
-        playUri = "music://" + playUri.substr(8);
-    } else if (playUri.rfind("http://", 0) == 0) {
-        playUri = "music://" + playUri.substr(7);
-    }
-
-    std::wstring wUri = ToWide(playUri);
-    HINSTANCE res = ShellExecuteW(nullptr, L"open", wUri.c_str(), nullptr, nullptr, SW_SHOW);
-    bool ok = reinterpret_cast<intptr_t>(res) > 32;
-
-    // Automatic playback insurance:
-    // Some Apple Music versions navigate to the album/song but remain paused.
-    // Poll for up to 3 seconds and trigger Play() if it doesn't auto-start.
-    std::thread([this]() {
-        for (int i = 0; i < 10; ++i) {
-            Sleep(350);
-            auto snap = this->GetSnapshot();
-            if (snap.isPlaying) {
-                break; // already started playing!
+        // Strip tracking parameters
+        size_t uoPos = playUri.find("&uo=");
+        if (uoPos != std::string::npos) {
+            size_t nextAmp = playUri.find('&', uoPos + 1);
+            if (nextAmp != std::string::npos) {
+                playUri.erase(uoPos, nextAmp - uoPos);
+            } else {
+                playUri.erase(uoPos);
             }
+        }
+
+        // Convert https:// or http:// to music://
+        if (playUri.rfind("https://", 0) == 0) {
+            playUri = "music://" + playUri.substr(8);
+        } else if (playUri.rfind("http://", 0) == 0) {
+            playUri = "music://" + playUri.substr(7);
+        }
+
+        std::wstring wUri = ToWide(playUri);
+        ShellExecuteW(nullptr, L"open", wUri.c_str(), nullptr, nullptr, SW_SHOW);
+    }
+
+    // Launch UI Automation background worker to activate playback of the track
+    std::thread([this, trackName]() {
+        // Wait for Apple Music to navigate and begin rendering the target page
+        Sleep(1200);
+
+        // Switch worker thread to user's interactive desktop
+        HDESK hDesk = OpenDesktopW(L"default", 0, FALSE, GENERIC_ALL);
+        if (hDesk) {
+            SetThreadDesktop(hDesk);
+        }
+
+        CoInitialize(nullptr);
+
+        IUIAutomation* pAutomation = nullptr;
+        CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                         IID_IUIAutomation, reinterpret_cast<void**>(&pAutomation));
+
+        bool trackActivated = false;
+
+        std::wstring coreTitle = trackName;
+        auto paren = coreTitle.find(L" (");
+        if (paren != std::wstring::npos) coreTitle = coreTitle.substr(0, paren);
+        auto dash = coreTitle.find(L" - ");
+        if (dash != std::wstring::npos) coreTitle = coreTitle.substr(0, dash);
+
+        // Polling loop: up to 15 attempts x 350ms (~5.25 seconds)
+        for (int attempt = 0; attempt < 15 && !trackActivated; ++attempt) {
+            HWND amHwnd = nullptr;
+            EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+                if (!IsWindowVisible(hwnd)) return TRUE;
+                wchar_t cls[256]{};
+                GetClassNameW(hwnd, cls, 256);
+                wchar_t title[256]{};
+                GetWindowTextW(hwnd, title, 256);
+                if (wcscmp(cls, L"WinUIDesktopWin32WindowClass") == 0 && wcsstr(title, L"Apple Music") != nullptr) {
+                    *reinterpret_cast<HWND*>(lParam) = hwnd;
+                    return FALSE;
+                }
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&amHwnd));
+
+            if (!amHwnd || !pAutomation) {
+                Sleep(350);
+                continue;
+            }
+
+            if (IsIconic(amHwnd)) ShowWindow(amHwnd, SW_RESTORE);
+            SetForegroundWindow(amHwnd);
+
+            IUIAutomationElement* pRoot = nullptr;
+            if (FAILED(pAutomation->ElementFromHandle(amHwnd, &pRoot)) || !pRoot) {
+                Sleep(350);
+                continue;
+            }
+
+            IUIAutomationCondition* pTrueCond = nullptr;
+            pAutomation->CreateTrueCondition(&pTrueCond);
+
+            // 1. If we have a track name, look for the ListViewItem matching trackName
+            if (!trackName.empty() && pTrueCond) {
+                IUIAutomationElementArray* pArray = nullptr;
+                if (SUCCEEDED(pRoot->FindAll(TreeScope_Descendants, pTrueCond, &pArray)) && pArray) {
+                    int len = 0;
+                    pArray->get_Length(&len);
+                    std::cout << "[CONTROLLER] Attempt " << attempt << ": " << len << " elements in view, looking for: "
+                              << std::string(trackName.begin(), trackName.end()) << std::endl;
+                    for (int i = 0; i < len; ++i) {
+                        IUIAutomationElement* pElem = nullptr;
+                        pArray->GetElement(i, &pElem);
+                        if (!pElem) continue;
+
+                        BSTR name{};
+                        CONTROLTYPEID ctrlType{};
+                        pElem->get_CurrentName(&name);
+                        pElem->get_CurrentControlType(&ctrlType);
+
+                        if (name && ctrlType == UIA_ListItemControlTypeId) {
+                            if (wcsstr(name, trackName.c_str()) != nullptr ||
+                                (!coreTitle.empty() && wcsstr(name, coreTitle.c_str()) != nullptr)) {
+                                RECT rect{};
+                                pElem->get_CurrentBoundingRectangle(&rect);
+                                std::cout << "[CONTROLLER] Found matching ListViewItem! Rect: "
+                                          << rect.left << "," << rect.top << " to " << rect.right << "," << rect.bottom << std::endl;
+                                if (rect.right > rect.left && rect.bottom > rect.top) {
+                                    int cx = rect.left + 80;
+                                    int cy = (rect.top + rect.bottom) / 2;
+
+                                    POINT origPos{};
+                                    GetCursorPos(&origPos);
+
+                                    SetCursorPos(cx, cy);
+                                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                                    Sleep(50);
+                                    mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+                                    mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+                                    SetCursorPos(origPos.x, origPos.y);
+
+                                    std::cout << "[CONTROLLER] Double-clicked at (" << cx << ", " << cy << ")!" << std::endl;
+                                    trackActivated = true;
+                                    SysFreeString(name);
+                                    pElem->Release();
+                                    break;
+                                }
+                            }
+                        }
+                        if (name) SysFreeString(name);
+                        pElem->Release();
+                    }
+                    pArray->Release();
+                }
+            }
+
+            // 2. If trackName is empty (e.g. play album), invoke PlayButtonElement directly
+            if (!trackActivated && trackName.empty()) {
+                VARIANT varProp;
+                varProp.vt = VT_BSTR;
+                varProp.bstrVal = SysAllocString(L"PlayButtonElement");
+                IUIAutomationCondition* pCond = nullptr;
+                pAutomation->CreatePropertyCondition(UIA_AutomationIdPropertyId, varProp, &pCond);
+                SysFreeString(varProp.bstrVal);
+
+                if (pCond) {
+                    IUIAutomationElement* pPlayBtn = nullptr;
+                    if (SUCCEEDED(pRoot->FindFirst(TreeScope_Descendants, pCond, &pPlayBtn)) && pPlayBtn) {
+                        IUIAutomationInvokePattern* pInvoke = nullptr;
+                        if (SUCCEEDED(pPlayBtn->GetCurrentPattern(UIA_InvokePatternId, reinterpret_cast<IUnknown**>(&pInvoke))) && pInvoke) {
+                            pInvoke->Invoke();
+                            pInvoke->Release();
+                            trackActivated = true;
+                        }
+                        pPlayBtn->Release();
+                    }
+                    pCond->Release();
+                }
+            }
+
+            if (pTrueCond) pTrueCond->Release();
+            pRoot->Release();
+
+            if (!trackActivated) Sleep(350);
+        }
+
+        if (pAutomation) pAutomation->Release();
+        CoUninitialize();
+
+        // 3. Fallback: if not started after all attempts, attempt GSMTC Play
+        if (!trackActivated) {
             this->Play();
         }
     }).detach();
 
-    return ok;
+    return true;
+}
+
+bool MediaController::PlayUrl(const std::string& url) {
+    return PlayTrack(url, L"");
 }
 
 bool MediaController::PlayTrackId(const std::string& trackId) {
     if (trackId.empty()) return false;
-    std::string playUri = "music://music.apple.com/song/" + trackId + "?autoplay=true";
-    return PlayUrl(playUri);
+    std::string playUri = "music://music.apple.com/song/" + trackId;
+    return PlayTrack(playUri, L"");
 }
 
 bool MediaController::PlayAlbumId(const std::string& albumId) {
     if (albumId.empty()) return false;
-    std::string playUri = "music://music.apple.com/album/" + albumId + "?autoplay=true";
-    return PlayUrl(playUri);
+    std::string playUri = "music://music.apple.com/album/" + albumId;
+    return PlayTrack(playUri, L"");
 }
 
 } // namespace ammod::remote
