@@ -33,23 +33,35 @@ void WriteBe32(std::uint8_t* data, std::uint32_t value) noexcept {
 }
 
 bool WaitWritable(SOCKET socket, std::uint32_t timeoutMs) noexcept {
-    fd_set set;
-    FD_ZERO(&set);
-    FD_SET(socket, &set);
+    fd_set writeSet;
+    FD_ZERO(&writeSet);
+    FD_SET(socket, &writeSet);
+    fd_set errSet;
+    FD_ZERO(&errSet);
+    FD_SET(socket, &errSet);
     timeval tv{};
     tv.tv_sec = static_cast<long>(timeoutMs / 1000u);
     tv.tv_usec = static_cast<long>((timeoutMs % 1000u) * 1000u);
-    return select(0, nullptr, &set, nullptr, &tv) > 0;
+    const int r = select(0, nullptr, &writeSet, &errSet, &tv);
+    if (r <= 0) return false;
+    if (FD_ISSET(socket, &errSet)) return false;
+    return FD_ISSET(socket, &writeSet) != 0;
 }
 
 bool WaitReadable(SOCKET socket, std::uint32_t timeoutMs) noexcept {
-    fd_set set;
-    FD_ZERO(&set);
-    FD_SET(socket, &set);
+    fd_set readSet;
+    FD_ZERO(&readSet);
+    FD_SET(socket, &readSet);
+    fd_set errSet;
+    FD_ZERO(&errSet);
+    FD_SET(socket, &errSet);
     timeval tv{};
     tv.tv_sec = static_cast<long>(timeoutMs / 1000u);
     tv.tv_usec = static_cast<long>((timeoutMs % 1000u) * 1000u);
-    return select(0, &set, nullptr, nullptr, &tv) > 0;
+    const int r = select(0, &readSet, nullptr, &errSet, &tv);
+    if (r <= 0) return false;
+    if (FD_ISSET(socket, &errSet)) return false;
+    return FD_ISSET(socket, &readSet) != 0;
 }
 
 std::string ValueAfterKey(const std::string& json, const std::string& key,
@@ -331,6 +343,9 @@ bool TcpConnection::Connect(const std::wstring& address, std::uint16_t port,
     }
     nonBlocking = 0;
     (void)ioctlsocket(socket_, FIONBIO, &nonBlocking);
+    BOOL noDelay = TRUE;
+    (void)::setsockopt(socket_, IPPROTO_TCP, TCP_NODELAY,
+                       reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
     return true;
 }
 

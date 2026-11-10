@@ -78,7 +78,8 @@ private:
     bool Prefill() noexcept;
     bool SendStart(bool resume) noexcept;
     bool SendSync() noexcept;
-    void MaybeSendKeepalive() noexcept;
+    void KeepaliveMain() noexcept;
+    void StopKeepalive() noexcept;
     void PumpMain() noexcept;
     void ClockMain() noexcept;
     bool SendData(const std::int32_t* samples, std::uint32_t frames) noexcept;
@@ -125,11 +126,12 @@ private:
     std::uint64_t paceStartTick_{0};
     std::uint64_t paceStartSample_{0};
     std::uint64_t paceLastLogTick_{0};
-    std::uint64_t lastKeepaliveTick_{0};
     std::atomic<std::uint32_t> clockProbesIn_{0};
     std::atomic<std::uint32_t> clockRepliesOut_{0};
 
     std::thread pumpThread_;
+    std::thread keepaliveThread_;
+    std::atomic<bool> keepaliveStop_{false};
     std::atomic<bool> stop_{false};
     std::atomic<bool> paused_{false};
     std::atomic<bool> startedOnce_{false};

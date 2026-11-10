@@ -8,6 +8,9 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <timeapi.h>
+
+#pragma comment(lib, "winmm.lib")
 
 #include <algorithm>
 #include <chrono>
@@ -27,7 +30,7 @@ namespace {
 using namespace ammod::raat;
 
 constexpr std::uint32_t kRaatDefaultLookaheadMs = 1000;
-constexpr std::uint32_t kRaatDefaultStartLeadMs = 1000;
+constexpr std::uint32_t kRaatDefaultStartLeadMs = 300;
 constexpr std::uint32_t kRaatConnectTimeoutMs = 2500;
 constexpr std::uint32_t kRaatRequestTimeoutMs = 5000;
 
@@ -150,7 +153,6 @@ HRESULT RaatSink::Start(IIntegerPcmSource& source) noexcept {
         control_.IsOpen() && audio_.IsOpen()) {
         paused_.store(false, std::memory_order_release);
         paceStartTick_ = 0;
-        lastKeepaliveTick_ = GetTickCount64();
         if (!SendStart(true)) {
             RecordError(ammod::audio::kRaatControlFailed);
             return ammod::audio::kRaatControlFailed;
@@ -167,12 +169,12 @@ HRESULT RaatSink::Start(IIntegerPcmSource& source) noexcept {
     paceStartTick_ = 0;
     paceStartSample_ = 0;
     paceLastLogTick_ = 0;
-    lastKeepaliveTick_ = GetTickCount64();
     lastError_.store(S_OK, std::memory_order_release);
 
     if (!EnsureSession()) {
         const HRESULT error = lastError_.load(std::memory_order_acquire);
         RecordError(error == S_OK ? ammod::audio::kRaatStreamFailed : error);
+        StopKeepalive();
         StopClock();
         control_.Close();
         audio_.Close();
@@ -180,10 +182,18 @@ HRESULT RaatSink::Start(IIntegerPcmSource& source) noexcept {
         return error == S_OK ? ammod::audio::kRaatStreamFailed : error;
     }
 
+    StopKeepalive();
+    keepaliveStop_.store(false, std::memory_order_release);
+    try {
+        keepaliveThread_ = std::thread(&RaatSink::KeepaliveMain, this);
+    } catch (...) {
+    }
+
     try {
         pumpThread_ = std::thread(&RaatSink::PumpMain, this);
     } catch (...) {
         RecordError(ammod::audio::kRaatStreamFailed);
+        StopKeepalive();
         StopClock();
         control_.Close();
         audio_.Close();
@@ -229,6 +239,7 @@ void RaatSink::Stop() noexcept {
             (void)control_.Request(request, 1500, response, final, error);
         }
     }
+    StopKeepalive();
     StopClock();
     control_.Close();
     audio_.Close();
@@ -255,6 +266,7 @@ void RaatSink::Close() noexcept {
         std::wstring error;
         (void)control_.Request("{\"request\":\"teardown\"}", 1500, response, final, error);
     }
+    StopKeepalive();
     StopClock();
     control_.Close();
     audio_.Close();
@@ -899,7 +911,7 @@ bool RaatSink::SendStream(std::wstring& error) noexcept {
     // never observed on the wire and is not accepted by this firmware.
     std::ostringstream json;
     json << "{\"request\":\"stream\",\"first_seq\":0,\"stream_id\":" << streamId_
-         << ",\"buffer_size\":1.0,\"ready_threshold\":0.25}";
+         << ",\"buffer_size\":2.0,\"ready_threshold\":0.25}";
     std::string response;
     bool final = false;
     {
@@ -1046,35 +1058,47 @@ bool RaatSink::SendSync() noexcept {
     return status == "Success" || status == "Ready";
 }
 
-void RaatSink::MaybeSendKeepalive() noexcept {
-    const std::uint64_t now = GetTickCount64();
-    if (lastKeepaliveTick_ == 0) {
-        lastKeepaliveTick_ = now;
-        return;
-    }
-    // RAATServer has a 10000ms inactivity watchdog on the control TCP client.
-    // Send a lightweight control request every ~4 seconds to prevent the device
-    // from timing out and terminating the session mid-stream.
-    if (now - lastKeepaliveTick_ < 4000) {
-        return;
-    }
-    lastKeepaliveTick_ = now;
+void RaatSink::KeepaliveMain() noexcept {
+    while (!keepaliveStop_.load(std::memory_order_acquire)) {
+        for (int i = 0; i < 25 && !keepaliveStop_.load(std::memory_order_acquire); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (keepaliveStop_.load(std::memory_order_acquire)) break;
 
-    if (!control_.IsOpen()) return;
+        if (!control_.IsOpen()) continue;
 
-    std::lock_guard lock(controlMutex_);
-    std::string response;
-    bool final = false;
-    std::wstring error;
-    (void)control_.Request("{\"request\":\"info\"}", 1000, response, final, error);
+        std::string response;
+        bool final = false;
+        std::wstring error;
+        {
+            std::lock_guard lock(controlMutex_);
+            if (control_.IsOpen()) {
+                // Send lightweight echo request every 2.5 seconds to keep RAATServer's
+                // 10-second inactivity watchdog refreshed without touching audio HW.
+                (void)control_.Request("{\"request\":\"echo\"}", 1000,
+                                       response, final, error);
+            }
+        }
+    }
+}
+
+void RaatSink::StopKeepalive() noexcept {
+    keepaliveStop_.store(true, std::memory_order_release);
+    if (keepaliveThread_.joinable()) {
+        keepaliveThread_.join();
+    }
 }
 
 void RaatSink::PumpMain() noexcept {
+    struct TimePeriodScope {
+        TimePeriodScope() noexcept { timeBeginPeriod(1); }
+        ~TimePeriodScope() noexcept { timeEndPeriod(1); }
+    } timeScope;
+
     bool reconnected = false;
     while (!stop_.load(std::memory_order_acquire)) {
         if (paused_.load(std::memory_order_acquire)) {
             paceStartTick_ = 0;
-            MaybeSendKeepalive();
             std::this_thread::sleep_for(std::chrono::milliseconds(20));
             continue;
         }
@@ -1141,14 +1165,13 @@ void RaatSink::PumpMain() noexcept {
                     std::string response;
                     bool final = false;
                     std::wstring stopError;
-                    (void)control_.Request("{\"request\":\"stop\"}", 1500,
+                    (void)control_.Request("{\"request\":\"stop\"}", 1000,
                                            response, final, stopError);
                 }
                 if (SendStream(error) && OpenAudio(error) && SendStart(true)) {
                     LogRaat(L"audio path re-established mid-stream");
                     reconnected = false;
                     paceStartTick_ = 0;
-                    lastKeepaliveTick_ = GetTickCount64();
                     continue;
                 }
                 LogRaat(L"audio reconnect failed: " + error);
@@ -1187,10 +1210,7 @@ void RaatSink::PumpMain() noexcept {
                 std::clamp<std::uint64_t>(waitMs, 1u, 10u));
 
             std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
-            MaybeSendKeepalive();
         }
-
-        MaybeSendKeepalive();
 
         const std::uint64_t nowLogTick = GetTickCount64();
         if (nowLogTick - paceLastLogTick_ >= 5000) {
@@ -1254,7 +1274,7 @@ bool RaatSink::SendData(const std::int32_t* samples, std::uint32_t frames) noexc
     frame_.insert(frame_.end(), pcm_.begin(), pcm_.begin() + bodyBytes);
 
     std::lock_guard lock(audioMutex_);
-    if (!audio_.SendAll(frame_.data(), frame_.size(), 5000)) return false;
+    if (!audio_.SendAll(frame_.data(), frame_.size(), 2000)) return false;
     lastSendTick_ = GetTickCount64();
     submittedFrames_.fetch_add(frames, std::memory_order_relaxed);
     return true;
