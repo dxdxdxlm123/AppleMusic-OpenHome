@@ -140,11 +140,16 @@ add_executable(am_exclusive_audiohost
   src/audio_v2/DlnaSink.cpp
   src/audio_v2/DlnaStreamServer.cpp
   src/audio_v2/FlacEncoder.cpp
+  src/audio_v2/RaatDiscovery.cpp
+  src/audio_v2/RaatProtocol.cpp
+  src/audio_v2/RaatScripts.cpp
+  src/audio_v2/RaatScripts.rc
+  src/audio_v2/RaatSink.cpp
   src/audio_v2/WasapiExclusiveSink.cpp)
 target_include_directories(am_exclusive_audiohost PRIVATE src)
 target_compile_definitions(am_exclusive_audiohost PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(am_exclusive_audiohost PRIVATE ole32 oleaut32 uuid advapi32
-  avrt ws2_32 winhttp msxml6 bcrypt iphlpapi)
+  avrt ws2_32 winhttp msxml6 bcrypt iphlpapi winmm)
 set_target_properties(am_exclusive_audiohost PROPERTIES OUTPUT_NAME "am-exclusive-audiohost")
 
 add_executable(am_exclusive_media_control src/MediaSessionControl.cpp)

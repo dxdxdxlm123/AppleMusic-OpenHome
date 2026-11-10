@@ -8,6 +8,7 @@
 #include "audio_v2/DlnaSink.h"
 #include "audio_v2/LocalPlaybackTuning.h"
 #include "audio_v2/MemoryLock.h"
+#include "audio_v2/RaatSink.h"
 #include "audio_v2/RemoteSink.h"
 #include "audio_v2/RingPcmSource.h"
 #include "audio_v2/SharedAudioRing.h"
@@ -172,6 +173,17 @@ HRESULT OpenTarget(HostState& state, const HostMessage& request) noexcept {
     params.asioDriverClsid = request.asioClsid;
     params.asioDriverName = request.asioName;
     if (request.targetKind == static_cast<std::uint32_t>(
+            ammod::audio_v2::HostTargetKind::Raat) ||
+        request.raatAddress[0] != L'\0') {
+        params.raat.deviceId = request.endpointId;
+        params.raat.friendlyName = request.asioName;
+        params.raat.address = request.raatAddress;
+        params.raat.raatVersion = request.raatVersion;
+        params.raat.controlPort = static_cast<std::uint16_t>(request.raatControlPort);
+        params.endpointId.clear();
+        params.asioDriverClsid.clear();
+        params.dlna.location.clear();
+    } else if (request.targetKind == static_cast<std::uint32_t>(
             ammod::audio_v2::HostTargetKind::Dlna) ||
         request.dlnaLocation[0] != L'\0') {
         params.dlna.udn = request.endpointId;
@@ -196,7 +208,9 @@ HRESULT OpenTarget(HostState& state, const HostMessage& request) noexcept {
             0, capacity);
     }
 
-    if (!params.dlna.location.empty()) {
+    if (!params.raat.address.empty() || !params.raat.deviceId.empty()) {
+        state.sink = std::make_unique<ammod::audio_v2::RaatSink>();
+    } else if (!params.dlna.location.empty()) {
         // Network renderer: the engine owns the SOAP control client, the
         // HTTP stream server and the encoder, none of which belong in the
         // Apple Music process.

@@ -3,6 +3,7 @@
 #include "AsioExclusiveSink.h"
 #include "DlnaSink.h"
 #include "LocalPlaybackTuning.h"
+#include "RaatSink.h"
 #include "WasapiExclusiveSink.h"
 
 #include <algorithm>
@@ -145,7 +146,9 @@ bool RemoteSink::Request(HostMessage& message) noexcept {
 
 HRESULT RemoteSink::OpenFallback(const AudioSinkOpenParams& params) noexcept {
     fallback_.reset();
-    if (targetKind_ == static_cast<std::uint32_t>(HostTargetKind::Dlna)) {
+    if (targetKind_ == static_cast<std::uint32_t>(HostTargetKind::Raat)) {
+        fallback_ = std::make_unique<RaatSink>();
+    } else if (targetKind_ == static_cast<std::uint32_t>(HostTargetKind::Dlna)) {
         fallback_ = std::make_unique<DlnaSink>();
     } else if (!params.asioDriverClsid.empty()) {
         fallback_ = std::make_unique<AsioExclusiveSink>();
@@ -166,13 +169,16 @@ HRESULT RemoteSink::OpenFallback(const AudioSinkOpenParams& params) noexcept {
 HRESULT RemoteSink::Open(const AudioSinkOpenParams& params) noexcept {
     Close();
     params_ = params;
-    // DLNA wins when the profile carries a renderer location; ASIO when it
-    // carries a driver CLSID; otherwise it is plain WASAPI.
-    targetKind_ = !params.dlna.location.empty()
-        ? static_cast<std::uint32_t>(HostTargetKind::Dlna)
-        : (!params.asioDriverClsid.empty()
-               ? static_cast<std::uint32_t>(HostTargetKind::Asio)
-               : static_cast<std::uint32_t>(HostTargetKind::Wasapi));
+    // R-Device wins when the profile carries RAAT address/id; DLNA when it
+    // carries a renderer location; ASIO when it carries a driver CLSID;
+    // otherwise it is plain WASAPI.
+    targetKind_ = (!params.raat.address.empty() || !params.raat.deviceId.empty())
+        ? static_cast<std::uint32_t>(HostTargetKind::Raat)
+        : (!params.dlna.location.empty()
+               ? static_cast<std::uint32_t>(HostTargetKind::Dlna)
+               : (!params.asioDriverClsid.empty()
+                      ? static_cast<std::uint32_t>(HostTargetKind::Asio)
+                      : static_cast<std::uint32_t>(HostTargetKind::Wasapi)));
     if (!Connect()) {
         Disconnect();
         return OpenFallback(params);
@@ -192,7 +198,13 @@ HRESULT RemoteSink::Open(const AudioSinkOpenParams& params) noexcept {
     open.streamBufferMs = params.streamBufferMs;
     open.streamSeconds = params.streamSeconds;
     open.generation = 0;
-    if (targetKind_ == static_cast<std::uint32_t>(HostTargetKind::Dlna)) {
+    if (targetKind_ == static_cast<std::uint32_t>(HostTargetKind::Raat)) {
+        wcsncpy_s(open.endpointId, params.raat.deviceId.c_str(), _TRUNCATE);
+        wcsncpy_s(open.asioName, params.raat.friendlyName.c_str(), _TRUNCATE);
+        wcsncpy_s(open.raatAddress, params.raat.address.c_str(), _TRUNCATE);
+        wcsncpy_s(open.raatVersion, params.raat.raatVersion.c_str(), _TRUNCATE);
+        open.raatControlPort = params.raat.controlPort;
+    } else if (targetKind_ == static_cast<std::uint32_t>(HostTargetKind::Dlna)) {
         wcsncpy_s(open.endpointId, params.dlna.udn.c_str(), _TRUNCATE);
         wcsncpy_s(open.asioName, params.dlna.friendlyName.c_str(), _TRUNCATE);
         wcsncpy_s(open.dlnaLocation, params.dlna.location.c_str(), _TRUNCATE);

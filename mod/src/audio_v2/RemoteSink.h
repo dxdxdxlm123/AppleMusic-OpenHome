@@ -34,13 +34,14 @@ enum class HostMessageType : std::uint32_t {
 // identical; PcmFormat is POD and contains no pointers. Bump kHostProtocol
 // whenever the layout changes - the host refuses older/newer peers, and the
 // hook falls back to its in-process sinks.
-inline constexpr std::uint32_t kHostProtocolVersion = 3;
+inline constexpr std::uint32_t kHostProtocolVersion = 4;
 
-// Which engine the audiohost should build: 0 WASAPI, 1 DLNA, 2 ASIO.
+// Which engine the audiohost should build: 0 WASAPI, 1 DLNA, 2 ASIO, 3 RAAT.
 enum class HostTargetKind : std::uint32_t {
     Wasapi = 0,
     Dlna = 1,
     Asio = 2,
+    Raat = 3,
 };
 
 struct HostMessage final {
@@ -61,11 +62,17 @@ struct HostMessage final {
     std::uint64_t generation{};
     wchar_t asioClsid[64]{};
     wchar_t asioName[128]{};
-    // WASAPI: endpoint id. DLNA: the renderer's UDN.
+    // WASAPI: endpoint id. DLNA: the renderer's UDN. RAAT: deviceId.
     wchar_t endpointId[256]{};
     // DLNA: the renderer's device description URL, the only field DlnaSink
     // really needs - it re-resolves the service URLs itself.
     wchar_t dlnaLocation[512]{};
+    // RAAT: endpoint network address (e.g. 192.168.108.4).
+    wchar_t raatAddress[128]{};
+    // RAAT: firmware / raat version string (e.g. 1.1.41).
+    wchar_t raatVersion[64]{};
+    // RAAT: control port.
+    std::uint32_t raatControlPort{0};
 };
 
 inline constexpr wchar_t kHostPipePrefix[] = L"\\\\.\\pipe\\AMEAudioHost_";

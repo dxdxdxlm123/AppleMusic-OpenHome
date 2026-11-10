@@ -1759,8 +1759,8 @@ void AudioCoreRuntime::Emit(AudioCoreRuntimeEvent event, HRESULT result) noexcep
         ? callbacks_.captureEventContext(callbacks_.context) : 0;
     snapshot.mediaGeneration = boundMediaGeneration_.load(std::memory_order_acquire);
     snapshot.sinkKind = coordinator_.SinkKind();
-    snapshot.sinkName = outputKind_ == AudioSinkKind::Raat
-        ? raatTarget_.friendlyName : dlnaTarget_.friendlyName;
+    const bool isRaatTarget = !raatTarget_.deviceId.empty() || !raatTarget_.address.empty();
+    snapshot.sinkName = isRaatTarget ? raatTarget_.friendlyName : dlnaTarget_.friendlyName;
     snapshot.converter = BoundConverter();
     snapshot.outputFormat = coordinator_.OutputFormat();
     snapshot.sourceFormat = coordinator_.SourceFormat();
@@ -2009,8 +2009,12 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
     config.sink.lifecycleContext = callbacks_.context;
     config.sink.onLifecycle = callbacks_.onSinkLifecycle;
     // JPLAY-style deep reservoir applies to local outputs only. The network
-    // renderer keeps its own [dlna] buffer policy completely untouched.
-    const bool localTuned = outputKind_ != AudioSinkKind::Dlna && localTuning_.enabled;
+    // renderer keeps its own buffer policy completely untouched.
+    const bool isNetworkSink = outputKind_ == AudioSinkKind::Dlna ||
+                               outputKind_ == AudioSinkKind::Raat ||
+                               (outputKind_ == AudioSinkKind::Remote &&
+                                (!dlnaTarget_.location.empty() || !raatTarget_.address.empty() || !raatTarget_.deviceId.empty()));
+    const bool localTuned = !isNetworkSink && localTuning_.enabled;
     std::size_t queueCapacity = kProductionQueueCapacity;
     std::uint64_t reservoirFrames = 0;
     if (localTuned) {
@@ -2091,12 +2095,17 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
             requiredPrebufferFrames_, static_cast<std::uint32_t>(usableFrames));
     }
     const auto rate = static_cast<std::uint64_t>(format.sampleRate);
-    if (outputKind_ == AudioSinkKind::Dlna ||
-        outputKind_ == AudioSinkKind::Raat) {
+    const bool isNetworkTarget = outputKind_ == AudioSinkKind::Dlna ||
+                                 outputKind_ == AudioSinkKind::Raat ||
+                                 (outputKind_ == AudioSinkKind::Remote &&
+                                  (!dlnaTarget_.location.empty() || !raatTarget_.address.empty() || !raatTarget_.deviceId.empty()));
+    if (isNetworkTarget) {
         // Keep the reservoir near the configured target. The existing 9/10/11 ms
         // software pump performs the coarse drift correction; +/-10% covers
         // ordinary DAC clock drift with a 1-1.5 s reservoir.
-        const auto effectiveBufferMs = outputKind_ == AudioSinkKind::Raat
+        const bool isRaatStream = outputKind_ == AudioSinkKind::Raat ||
+                                  (outputKind_ == AudioSinkKind::Remote && (!raatTarget_.address.empty() || !raatTarget_.deviceId.empty()));
+        const auto effectiveBufferMs = isRaatStream
             ? std::min<std::uint32_t>(streamBufferMs_, 1000u)
             : streamBufferMs_;
         nativePumpLowWaterFrames_ = rate * std::max<std::uint32_t>(effectiveBufferMs / 2u, 300u) / 1000u;

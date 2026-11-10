@@ -3716,11 +3716,11 @@ DWORD WINAPI PipeClientLoop(void*) {
                 const bool hifiMode =
                     _wcsicmp(ReadSetting(L"player_mode", L"am").c_str(), L"hifi") == 0;
                 ammod::audio_v2::OutputProfile profile{};
-                profile.kind = kindCode == 3u ? AudioSinkKind::Raat
-                    : (hifiMode ? AudioSinkKind::Remote
+                profile.kind = hifiMode ? AudioSinkKind::Remote
+                    : (kindCode == 3u ? AudioSinkKind::Raat
                      : (kindCode == 2u ? AudioSinkKind::Asio
-                      : kindCode == 1u ? AudioSinkKind::Dlna
-                                       : AudioSinkKind::Wasapi));
+                      : (kindCode == 1u ? AudioSinkKind::Dlna
+                                       : AudioSinkKind::Wasapi)));
                 profile.dlna.udn = incoming.endpointId;
                 profile.dlna.friendlyName = incoming.endpointName;
                 profile.dlna.location = incoming.detail;
