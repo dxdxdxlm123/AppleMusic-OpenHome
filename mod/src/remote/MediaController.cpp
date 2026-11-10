@@ -274,24 +274,64 @@ bool MediaController::Seek(double seconds) {
 bool MediaController::PlayUrl(const std::string& url) {
     if (url.empty()) return false;
     std::string playUri = url;
-    // If it's https://music.apple.com/..., convert to music://music.apple.com/...
+
+    // Strip tracking parameters
+    size_t uoPos = playUri.find("&uo=");
+    if (uoPos != std::string::npos) {
+        size_t nextAmp = playUri.find('&', uoPos + 1);
+        if (nextAmp != std::string::npos) {
+            playUri.erase(uoPos, nextAmp - uoPos);
+        } else {
+            playUri.erase(uoPos);
+        }
+    }
+
+    // Ensure autoplay=true is present
+    if (playUri.find("autoplay=true") == std::string::npos) {
+        if (playUri.find('?') != std::string::npos) {
+            playUri += "&autoplay=true";
+        } else {
+            playUri += "?autoplay=true";
+        }
+    }
+
+    // Convert https:// or http:// to music://
     if (playUri.rfind("https://", 0) == 0) {
         playUri = "music://" + playUri.substr(8);
+    } else if (playUri.rfind("http://", 0) == 0) {
+        playUri = "music://" + playUri.substr(7);
     }
+
     std::wstring wUri = ToWide(playUri);
     HINSTANCE res = ShellExecuteW(nullptr, L"open", wUri.c_str(), nullptr, nullptr, SW_SHOW);
-    return reinterpret_cast<intptr_t>(res) > 32;
+    bool ok = reinterpret_cast<intptr_t>(res) > 32;
+
+    // Automatic playback insurance:
+    // Some Apple Music versions navigate to the album/song but remain paused.
+    // Poll for up to 3 seconds and trigger Play() if it doesn't auto-start.
+    std::thread([this]() {
+        for (int i = 0; i < 10; ++i) {
+            Sleep(350);
+            auto snap = this->GetSnapshot();
+            if (snap.isPlaying) {
+                break; // already started playing!
+            }
+            this->Play();
+        }
+    }).detach();
+
+    return ok;
 }
 
 bool MediaController::PlayTrackId(const std::string& trackId) {
     if (trackId.empty()) return false;
-    std::string playUri = "music://music.apple.com/song/" + trackId;
+    std::string playUri = "music://music.apple.com/song/" + trackId + "?autoplay=true";
     return PlayUrl(playUri);
 }
 
 bool MediaController::PlayAlbumId(const std::string& albumId) {
     if (albumId.empty()) return false;
-    std::string playUri = "music://music.apple.com/album/" + albumId;
+    std::string playUri = "music://music.apple.com/album/" + albumId + "?autoplay=true";
     return PlayUrl(playUri);
 }
 

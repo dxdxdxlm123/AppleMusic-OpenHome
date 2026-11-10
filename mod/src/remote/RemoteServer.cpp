@@ -50,6 +50,73 @@ std::string UrlEncode(const std::string& value) {
     return escaped.str();
 }
 
+std::mutex g_trackCacheMutex;
+std::unordered_map<std::string, std::string> g_trackUrlCache;
+
+std::string ResolveTrackUrl(const std::string& trackId) {
+    if (trackId.empty()) return {};
+    {
+        std::lock_guard lock(g_trackCacheMutex);
+        auto it = g_trackUrlCache.find(trackId);
+        if (it != g_trackUrlCache.end() && !it->second.empty()) {
+            return it->second;
+        }
+    }
+
+    // Fallback: iTunes lookup
+    HINTERNET hSession = WinHttpOpen(L"AMExclusiveLookup/1.0",
+                                     WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+                                     WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!hSession) return {};
+
+    WinHttpSetTimeouts(hSession, 2000, 2000, 3000, 3000);
+    HINTERNET hConnect = WinHttpConnect(hSession, L"itunes.apple.com", INTERNET_DEFAULT_HTTPS_PORT, 0);
+    if (!hConnect) {
+        WinHttpCloseHandle(hSession);
+        return {};
+    }
+
+    std::string path = "/lookup?id=" + trackId + "&entity=song";
+    std::wstring wPath = Widen(path);
+    HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", wPath.c_str(), nullptr,
+                                          WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                          WINHTTP_FLAG_SECURE);
+    std::string responseBody;
+    if (hRequest) {
+        if (WinHttpSendRequest(hRequest, WINHTTP_NO_ADDITIONAL_HEADERS, 0, WINHTTP_NO_REQUEST_DATA, 0, 0, 0) &&
+            WinHttpReceiveResponse(hRequest, nullptr)) {
+            DWORD bytesAvailable = 0;
+            while (WinHttpQueryDataAvailable(hRequest, &bytesAvailable) && bytesAvailable > 0) {
+                std::vector<char> buffer(bytesAvailable);
+                DWORD bytesRead = 0;
+                if (WinHttpReadData(hRequest, buffer.data(), bytesAvailable, &bytesRead) && bytesRead > 0) {
+                    responseBody.append(buffer.data(), bytesRead);
+                } else {
+                    break;
+                }
+            }
+        }
+        WinHttpCloseHandle(hRequest);
+    }
+    WinHttpCloseHandle(hConnect);
+    WinHttpCloseHandle(hSession);
+
+    if (!responseBody.empty()) {
+        try {
+            auto j = json::parse(responseBody);
+            if (j.contains("results") && j["results"].is_array() && !j["results"].empty()) {
+                std::string url = j["results"][0].value("trackViewUrl", "");
+                if (!url.empty()) {
+                    std::lock_guard lock(g_trackCacheMutex);
+                    g_trackUrlCache[trackId] = url;
+                    return url;
+                }
+            }
+        } catch (...) {}
+    }
+    return {};
+}
+
 json FetchAppleSearch(const std::string& term, int limit) {
     json emptyResults = {
         {"data", {
@@ -122,6 +189,11 @@ json FetchAppleSearch(const std::string& term, int limit) {
                 std::string artworkUrl = item.value("artworkUrl100", "");
                 int64_t durationMs = item.value("trackTimeMillis", 0ll);
                 std::string trackViewUrl = item.value("trackViewUrl", "");
+
+                {
+                    std::lock_guard lock(g_trackCacheMutex);
+                    g_trackUrlCache[trackId] = trackViewUrl;
+                }
 
                 // Convert 100x100 to template {w}x{h}bb.{f}
                 size_t pos = artworkUrl.find("100x100bb.");
@@ -324,6 +396,11 @@ void RemoteServer::BroadcastWebSocket(const std::string& message) {
 }
 
 void RemoteServer::SetupRoutes() {
+    server_->set_pre_routing_handler([](const httplib::Request& req, httplib::Response&) {
+        std::cout << "[REMOTE] " << req.method << " " << req.path << std::endl;
+        return httplib::Server::HandlerResponse::Unhandled;
+    });
+
     // CORS & Options handler
     server_->Options(R"(/.*)", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
@@ -476,9 +553,23 @@ void RemoteServer::SetupRoutes() {
         res.set_header("Access-Control-Allow-Origin", "*");
         try {
             auto j = json::parse(req.body);
-            if (j.contains("id") && j["id"].is_string()) {
-                std::string id = j["id"].get<std::string>();
-                controller_.PlayTrackId(id);
+            std::string id;
+            if (j.contains("id")) {
+                if (j["id"].is_string()) {
+                    id = j["id"].get<std::string>();
+                } else if (j["id"].is_number()) {
+                    id = std::to_string(j["id"].get<int64_t>());
+                }
+            }
+            if (!id.empty()) {
+                std::cout << "[REMOTE] Play Item ID: " << id << std::endl;
+                std::string resolved = ResolveTrackUrl(id);
+                if (!resolved.empty()) {
+                    std::cout << "[REMOTE] Resolved URL: " << resolved << std::endl;
+                    controller_.PlayUrl(resolved);
+                } else {
+                    controller_.PlayTrackId(id);
+                }
             }
         } catch (...) {}
         res.set_content("{\"data\":{}}", "application/json");
