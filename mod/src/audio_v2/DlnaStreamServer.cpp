@@ -149,6 +149,27 @@ bool DlnaStreamSession::Append(const BYTE* data, std::size_t bytes,
             // the timed wait is only a fallback for abort and missed wakeups.
             const std::size_t freeBytes = capacityBytes_ - size_;
             if (freeBytes == 0) {
+                // When no reader has connected yet (e.g. track queued in OpenHome before previous track finishes),
+                // dynamically expand the ring up to 64MB so the producer never wedges on prebuffered audio.
+                if (readers_.empty() && capacityBytes_ < 64u * 1024u * 1024u) {
+                    const std::size_t newCap = std::min<std::size_t>(capacityBytes_ * 2u, 64u * 1024u * 1024u);
+                    if (newCap > capacityBytes_) {
+                        if (head_ == 0) {
+                            ring_.resize(newCap);
+                        } else {
+                            std::vector<BYTE> newRing(newCap);
+                            const std::size_t first = std::min(size_, capacityBytes_ - head_);
+                            std::memcpy(newRing.data(), ring_.data() + head_, first);
+                            if (size_ > first) {
+                                std::memcpy(newRing.data() + first, ring_.data(), size_ - first);
+                            }
+                            ring_ = std::move(newRing);
+                            head_ = 0;
+                        }
+                        capacityBytes_ = static_cast<std::uint32_t>(newCap);
+                        continue;
+                    }
+                }
                 if (shape_ == DlnaStreamShape::FlacLive &&
                     !HasActiveReaderLocked(GetTickCount64())) {
                     // Broadcast semantics: a renderer that stopped reading

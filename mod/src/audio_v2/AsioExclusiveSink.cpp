@@ -363,7 +363,15 @@ HRESULT AsioExclusiveSink::Start(IIntegerPcmSource& source) noexcept {
     g_activeSink.store(this, std::memory_order_release);
     running_.store(true, std::memory_order_release);
 
-    const auto started = driver_->start();
+    auto started = driver_->start();
+    if (started != asio::ASE_OK) {
+        // Driver start may fail if the DAC or USB link suspended during a long pause.
+        // Try releasing and re-initializing the driver once.
+        ReleaseDriver();
+        if (SUCCEEDED(LoadDriver()) && SUCCEEDED(ApplySampleRate()) && SUCCEEDED(CreateDriverBuffers())) {
+            started = driver_->start();
+        }
+    }
     if (started != asio::ASE_OK) {
         running_.store(false, std::memory_order_release);
         g_activeSink.store(nullptr, std::memory_order_release);

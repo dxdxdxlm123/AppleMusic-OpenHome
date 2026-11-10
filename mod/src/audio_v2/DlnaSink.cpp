@@ -1292,7 +1292,7 @@ void DlnaSink::ProducerMain() noexcept {
         while (offsetFrames < written) {
             const bool trackBoundaryReached =
                 (trackFramesExact_ != 0 && sessionFramesProduced_ >= trackFramesExact_) ||
-                externalTrackBoundaryPending_.load(std::memory_order_acquire);
+                (trackFramesExact_ == 0 && externalTrackBoundaryPending_.load(std::memory_order_acquire));
             if (trackBoundaryReached) {
                 externalTrackBoundaryPending_.store(false, std::memory_order_release);
                 if (!AdvanceToNextTrack()) {

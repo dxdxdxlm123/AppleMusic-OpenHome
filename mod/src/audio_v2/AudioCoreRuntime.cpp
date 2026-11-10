@@ -310,28 +310,22 @@ void AudioCoreRuntime::SetOutputProfile(const OutputProfile& profile) noexcept {
     ControlScope lock(*this);
     if (requested.SameAs(current)) return;
 
-    const auto apply = [this](const OutputProfile& value) noexcept {
-        outputKind_ = value.kind;
-        dlnaTarget_ = value.dlna;
-        raatTarget_ = value.raat;
-        streamBufferMs_ = value.streamBufferMs;
-        wasapiDeviceId_ = value.wasapiDeviceId;
-        asioDriverClsid_ = value.asioDriverClsid;
-        asioDriverName_ = value.asioDriverName;
-    };
+    outputKind_ = requested.kind;
+    dlnaTarget_ = requested.dlna;
+    raatTarget_ = requested.raat;
+    streamBufferMs_ = requested.streamBufferMs;
+    wasapiDeviceId_ = requested.wasapiDeviceId;
+    asioDriverClsid_ = requested.asioDriverClsid;
+    asioDriverName_ = requested.asioDriverName;
+    outputChangePending_ = false;
 
-    if (graphBound_ || graphConverter_ ||
-        boundConverter_.load(std::memory_order_acquire) != nullptr ||
-        coordinator_.Phase() != AudioCoreGatePhase::Off) {
-        // The bridge cannot rebind an existing converter after its graph
-        // identity was cleared, so apply at the next natural converter item.
-        // A RestartCurrent request from the panel forces that boundary.
-        outputChangePending_ = true;
-        pendingProfile_ = requested;
-        Wake();
-        return;
+    if (graphBound_ || coordinator_.Phase() != AudioCoreGatePhase::Off) {
+        RetireCaptureLocked(true);
+        if (graphUnit_ && (graphConverter_ || graphSourceBits_ != 0)) {
+            TryBindGraphLocked();
+        }
     }
-    apply(requested);
+    Wake();
 }
 
 void AudioCoreRuntime::NotifyTrackChanged(std::uint64_t playerItem) noexcept {
@@ -1662,7 +1656,6 @@ DWORD AudioCoreRuntime::WorkerMain() noexcept {
             if (graphBound_ && coordinator_.SinkState() == WasapiSinkState::Faulted) {
                 HRESULT sinkError = coordinator_.SinkStats().lastError;
                 if (SUCCEEDED(sinkError)) sinkError = E_UNEXPECTED;
-                uiEnabled_.store(false, std::memory_order_release);
                 Emit(AudioCoreRuntimeEvent::Faulted, sinkError);
                 RetireCaptureLocked(false);
                 registry_.RetireAll();
@@ -1872,25 +1865,8 @@ AudioCoreRuntimeStats AudioCoreRuntime::Stats() const noexcept {
 }
 
 void AudioCoreRuntime::TryBindGraphLocked() noexcept {
-    bool outputTargetChanged = false;
-    if (outputChangePending_) {
-        outputKind_ = pendingProfile_.kind;
-        dlnaTarget_ = pendingProfile_.dlna;
-        raatTarget_ = pendingProfile_.raat;
-        streamBufferMs_ = pendingProfile_.streamBufferMs;
-        wasapiDeviceId_ = pendingProfile_.wasapiDeviceId;
-        asioDriverClsid_ = pendingProfile_.asioDriverClsid;
-        asioDriverName_ = pendingProfile_.asioDriverName;
-        outputChangePending_ = false;
-        outputTargetChanged = true;
-    }
     if (!UiEnabled() || !graphUnit_ || graphRate_ < 8000 || graphRate_ > 768000 ||
         graphChannels_ != 2) {
-        if (outputTargetChanged) {
-            if (coordinator_.Phase() != AudioCoreGatePhase::Off) {
-                coordinator_.Disable();
-            }
-        }
         return;
     }
     if (!graphConverter_ && graphSourceBits_ != 0) {
@@ -1898,11 +1874,6 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
                                 graphObservationId_, graphConverter_);
     }
     if (!graphConverter_) {
-        if (outputTargetChanged) {
-            if (coordinator_.Phase() != AudioCoreGatePhase::Off) {
-                coordinator_.Disable();
-            }
-        }
         return;
     }
 
@@ -1948,8 +1919,7 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
     // converter after the previous session has finished. A successor decoder
     // can also be prepared while the current live session is still active;
     // reopening then aborts audible PCM and immediately starts a new URL.
-    if (!outputTargetChanged &&
-        graphBound_ && boundConverter_.load(std::memory_order_acquire) == graphConverter_ &&
+    if (graphBound_ && boundConverter_.load(std::memory_order_acquire) == graphConverter_ &&
         coordinator_.Phase() != AudioCoreGatePhase::Faulted &&
         coordinator_.Phase() != AudioCoreGatePhase::Off) {
         if (!trackChangePending_) {
@@ -2088,7 +2058,6 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
         !registry_.Bind(graphConverter_, generation)) {
         coordinator_.Disable();
         const auto error = FAILED(enable) ? enable : E_UNEXPECTED;
-        uiEnabled_.store(false, std::memory_order_release);
         Emit(AudioCoreRuntimeEvent::Faulted, error);
         registry_.RetireAll();
         return;
@@ -2272,7 +2241,6 @@ void AudioCoreRuntime::TryActivateLocked() noexcept {
             nativeGraphHandoffPending_.store(false, std::memory_order_release);
         }
         nativeHandoffPending_.store(false, std::memory_order_release);
-        uiEnabled_.store(false, std::memory_order_release);
         Emit(AudioCoreRuntimeEvent::Faulted, graphHandoff);
         RetireCaptureLocked(false);
         registry_.RetireAll();
@@ -2290,7 +2258,6 @@ void AudioCoreRuntime::TryActivateLocked() noexcept {
             nativeGraphHandoffPending_.store(false, std::memory_order_release);
             if (SUCCEEDED(resume)) graphStarted_ = true;
         }
-        uiEnabled_.store(false, std::memory_order_release);
         Emit(AudioCoreRuntimeEvent::Faulted, handoff);
         RetireCaptureLocked(false);
         registry_.RetireAll();
@@ -2317,7 +2284,6 @@ void AudioCoreRuntime::TryActivateLocked() noexcept {
             if (SUCCEEDED(resume)) graphStarted_ = true;
         }
         const bool playbackRejected = ammod::audio::IsPlaybackRejection(open);
-        if (!playbackRejected) uiEnabled_.store(false, std::memory_order_release);
         Emit(AudioCoreRuntimeEvent::Faulted, open);
         RetireCaptureLocked(playbackRejected);
         if (!playbackRejected) registry_.RetireAll();
@@ -2341,7 +2307,6 @@ void AudioCoreRuntime::TryActivateLocked() noexcept {
             nativeGraphHandoffPending_.store(false, std::memory_order_release);
             if (SUCCEEDED(resume)) graphStarted_ = true;
         }
-        uiEnabled_.store(false, std::memory_order_release);
         Emit(AudioCoreRuntimeEvent::Faulted, start);
         RetireCaptureLocked(false);
         registry_.RetireAll();
