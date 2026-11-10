@@ -156,6 +156,19 @@ add_executable(am_exclusive_media_control src/MediaSessionControl.cpp)
 target_compile_definitions(am_exclusive_media_control PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(am_exclusive_media_control PRIVATE ole32 runtimeobject windowsapp)
 
+add_executable(am_exclusive_remote
+  src/remote/Main.cpp
+  src/remote/MediaController.cpp
+  src/remote/RemoteServer.cpp)
+target_include_directories(am_exclusive_remote PRIVATE
+  src
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cpp-httplib
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/nlohmann)
+target_compile_definitions(am_exclusive_remote PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(am_exclusive_remote PRIVATE ole32 oleaut32 runtimeobject windowsapp ws2_32 crypt32 winhttp)
+set_target_properties(am_exclusive_remote PROPERTIES OUTPUT_NAME "am-exclusive-remote")
+
 add_executable(am_exclusive_broker
   src/Broker.cpp
   src/DlnaDiscovery.cpp
@@ -177,6 +190,7 @@ if(MSVC)
   target_compile_options(am_exclusive_hook PRIVATE /W4 /permissive- /EHsc /guard:cf /wd4324)
   target_compile_options(am_exclusive_ui PRIVATE /W4 /permissive- /EHsc /guard:cf /utf-8)
   target_compile_options(am_exclusive_media_control PRIVATE /W4 /permissive- /EHsc /guard:cf)
+  target_compile_options(am_exclusive_remote PRIVATE /W4 /permissive- /EHsc /utf-8)
   target_compile_options(am_exclusive_broker PRIVATE /W4 /permissive- /EHsc /guard:cf /utf-8)
   target_compile_options(am_exclusive_audiohost PRIVATE /W4 /permissive- /EHsc /guard:cf /utf-8)
   target_link_options(am_exclusive_hook PRIVATE /guard:cf)
