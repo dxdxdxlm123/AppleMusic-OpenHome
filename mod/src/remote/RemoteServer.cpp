@@ -1,6 +1,7 @@
 #include "RemoteServer.h"
 #include "AmPluginClient.h"
 #include "WebRemoteHtml.h"
+#include "PlayQueueReader.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -13,6 +14,8 @@
 #include <iostream>
 #include <sstream>
 #include <iomanip>
+#include <unordered_map>
+#include <mutex>
 
 using json = nlohmann::json;
 
@@ -54,13 +57,76 @@ std::string UrlEncode(const std::string& value) {
     return escaped.str();
 }
 
-struct CachedTrackInfo {
+struct CachedResourceInfo {
     std::string name;
     std::string url;
 };
 
 std::mutex g_trackCacheMutex;
-std::unordered_map<std::string, CachedTrackInfo> g_trackCache;
+std::unordered_map<std::string, CachedResourceInfo> g_trackCache;
+std::unordered_map<std::string, CachedResourceInfo> g_albumCache;
+std::unordered_map<std::string, CachedResourceInfo> g_playlistCache;
+
+// Favorites persistence
+std::mutex g_favoritesMutex;
+json g_favorites = json::array();
+bool g_favoritesLoaded = false;
+
+std::wstring GetFavoritesFilePath() {
+    return L"C:\\Users\\Public\\AMExclusive\\am_favorites.json";
+}
+
+void LoadFavoritesIfNeeded() {
+    std::lock_guard lock(g_favoritesMutex);
+    if (g_favoritesLoaded) return;
+    g_favoritesLoaded = true;
+
+    std::wstring path = GetFavoritesFilePath();
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD size = GetFileSize(hFile, nullptr);
+        if (size > 0 && size < 10 * 1024 * 1024) {
+            std::string content(size, '\0');
+            DWORD read = 0;
+            ReadFile(hFile, content.data(), size, &read, nullptr);
+            try {
+                g_favorites = json::parse(content);
+            } catch (...) {}
+        }
+        CloseHandle(hFile);
+    }
+}
+
+void SaveFavorites() {
+    std::wstring path = GetFavoritesFilePath();
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        std::string s = g_favorites.dump(2);
+        DWORD written = 0;
+        WriteFile(hFile, s.data(), static_cast<DWORD>(s.size()), &written, nullptr);
+        CloseHandle(hFile);
+    }
+}
+
+bool ToggleFavorite(const json& item) {
+    LoadFavoritesIfNeeded();
+    std::lock_guard lock(g_favoritesMutex);
+    std::string name = item.value("name", "");
+    std::string artist = item.value("artist", "");
+    if (name.empty()) return false;
+
+    for (auto it = g_favorites.begin(); it != g_favorites.end(); ++it) {
+        if ((*it).value("name", "") == name && (*it).value("artist", "") == artist) {
+            g_favorites.erase(it);
+            SaveFavorites();
+            return false; // removed
+        }
+    }
+
+    g_favorites.push_back(item);
+    SaveFavorites();
+    return true; // added
+}
 
 json FetchAppleMusicApi(const std::string& path, const std::string& query = "") {
     HINTERNET hSession = WinHttpOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -114,7 +180,7 @@ json FetchAppleMusicApi(const std::string& path, const std::string& query = "") 
     }
 }
 
-CachedTrackInfo ResolveTrackInfo(const std::string& trackId) {
+CachedResourceInfo ResolveTrackInfo(const std::string& trackId) {
     if (trackId.empty()) return {};
     {
         std::lock_guard lock(g_trackCacheMutex);
@@ -131,13 +197,57 @@ CachedTrackInfo ResolveTrackInfo(const std::string& trackId) {
         std::string name = attrs.value("name", "");
         std::string url = attrs.value("url", "");
         if (!name.empty() && !url.empty()) {
-            CachedTrackInfo info{ name, url };
+            CachedResourceInfo info{ name, url };
             std::lock_guard lock(g_trackCacheMutex);
             g_trackCache[trackId] = info;
             return info;
         }
     }
     return {};
+}
+
+CachedResourceInfo ResolveAlbumInfo(const std::string& albumId) {
+    if (albumId.empty()) return {};
+    {
+        std::lock_guard lock(g_trackCacheMutex);
+        auto it = g_albumCache.find(albumId);
+        if (it != g_albumCache.end()) return it->second;
+    }
+    auto resp = FetchAppleMusicApi("/v1/catalog/cn/albums/" + albumId);
+    if (resp.contains("data") && resp["data"].is_array() && !resp["data"].empty()) {
+        const auto& attrs = resp["data"][0].value("attributes", json::object());
+        std::string name = attrs.value("name", "");
+        std::string url = attrs.value("url", "");
+        if (!url.empty()) {
+            CachedResourceInfo info{ name, url };
+            std::lock_guard lock(g_trackCacheMutex);
+            g_albumCache[albumId] = info;
+            return info;
+        }
+    }
+    return { "", "music://music.apple.com/album/" + albumId };
+}
+
+CachedResourceInfo ResolvePlaylistInfo(const std::string& playlistId) {
+    if (playlistId.empty()) return {};
+    {
+        std::lock_guard lock(g_trackCacheMutex);
+        auto it = g_playlistCache.find(playlistId);
+        if (it != g_playlistCache.end()) return it->second;
+    }
+    auto resp = FetchAppleMusicApi("/v1/catalog/cn/playlists/" + playlistId);
+    if (resp.contains("data") && resp["data"].is_array() && !resp["data"].empty()) {
+        const auto& attrs = resp["data"][0].value("attributes", json::object());
+        std::string name = attrs.value("name", "");
+        std::string url = attrs.value("url", "");
+        if (!url.empty()) {
+            CachedResourceInfo info{ name, url };
+            std::lock_guard lock(g_trackCacheMutex);
+            g_playlistCache[playlistId] = info;
+            return info;
+        }
+    }
+    return { "", "music://music.apple.com/playlist/" + playlistId };
 }
 
 json FetchAppleSearch(const std::string& term, const std::string& types, int limit) {
@@ -180,6 +290,128 @@ json FetchAppleSearch(const std::string& term, const std::string& types, int lim
             {"results", json::object()}
         }}
     };
+}
+
+json HandleLibraryApi(const std::string& path, const std::string& hostAddress, int port) {
+    LoadFavoritesIfNeeded();
+    auto recentItems = PlayQueueReader::ReadRecentItems();
+    auto recentAlbums = PlayQueueReader::ReadRecentAlbums();
+    auto recentArtists = PlayQueueReader::ReadRecentArtists();
+
+    std::string baseArtwork = "http://" + hostAddress + ":" + std::to_string(port) + "/api/v2/playback/artwork";
+
+    if (path.find("recently-added") != std::string::npos || path.find("albums") != std::string::npos) {
+        json dataArr = json::array();
+        for (size_t i = 0; i < recentAlbums.size() && i < 25; ++i) {
+            const auto& alb = recentAlbums[i];
+            std::string albId = alb.firstAdamId.empty() ? ("alb_" + std::to_string(i)) : alb.firstAdamId;
+            dataArr.push_back({
+                {"id", albId},
+                {"type", "library-albums"},
+                {"href", "/v1/me/library/albums/" + albId},
+                {"attributes", {
+                    {"name", alb.name},
+                    {"artistName", alb.artist},
+                    {"trackCount", alb.trackCount},
+                    {"playParams", {
+                        {"id", albId},
+                        {"kind", "album"},
+                        {"isLibrary", true}
+                    }},
+                    {"artwork", {
+                        {"url", baseArtwork}
+                    }}
+                }},
+                {"relationships", {
+                    {"catalog", {
+                        {"data", json::array({{{"id", albId}, {"type", "albums"}}})}
+                    }}
+                }}
+            });
+        }
+        return {{"data", dataArr}};
+    } else if (path.find("songs") != std::string::npos) {
+        json dataArr = json::array();
+        for (size_t i = 0; i < recentItems.size() && i < 50; ++i) {
+            const auto& it = recentItems[i];
+            std::string sId = it.adamId.empty() ? ("song_" + std::to_string(i)) : it.adamId;
+            dataArr.push_back({
+                {"id", sId},
+                {"type", "library-songs"},
+                {"href", "/v1/me/library/songs/" + sId},
+                {"attributes", {
+                    {"name", it.title},
+                    {"artistName", it.artist},
+                    {"albumName", it.album},
+                    {"playParams", {
+                        {"id", sId},
+                        {"kind", "song"},
+                        {"isLibrary", true}
+                    }},
+                    {"artwork", {
+                        {"url", baseArtwork}
+                    }}
+                }}
+            });
+        }
+        return {{"data", dataArr}};
+    } else if (path.find("playlists") != std::string::npos || path.find("pins") != std::string::npos) {
+        json dataArr = json::array();
+        dataArr.push_back({
+            {"id", "pl.recent"},
+            {"type", "library-playlists"},
+            {"href", "/v1/me/library/playlists/pl.recent"},
+            {"attributes", {
+                {"name", "最近播放 (Recently Played)"},
+                {"curatorName", "AMExclusive"},
+                {"trackCount", recentItems.size()},
+                {"playParams", {
+                    {"id", "recent"},
+                    {"kind", "playlist"},
+                    {"isLibrary", true}
+                }},
+                {"artwork", {{"url", baseArtwork}}}
+            }}
+        });
+        {
+            std::lock_guard lock(g_favoritesMutex);
+            if (!g_favorites.empty()) {
+                dataArr.push_back({
+                    {"id", "pl.favorites"},
+                    {"type", "library-playlists"},
+                    {"href", "/v1/me/library/playlists/pl.favorites"},
+                    {"attributes", {
+                        {"name", "我喜爱的音乐 (Favorites)"},
+                        {"curatorName", "AMExclusive"},
+                        {"trackCount", g_favorites.size()},
+                        {"playParams", {
+                            {"id", "favorites"},
+                            {"kind", "playlist"},
+                            {"isLibrary", true}
+                        }},
+                        {"artwork", {{"url", baseArtwork}}}
+                    }}
+                });
+            }
+        }
+        return {{"data", dataArr}};
+    } else if (path.find("artists") != std::string::npos) {
+        json dataArr = json::array();
+        for (size_t i = 0; i < recentArtists.size() && i < 25; ++i) {
+            const auto& art = recentArtists[i];
+            dataArr.push_back({
+                {"id", "art_" + std::to_string(i)},
+                {"type", "library-artists"},
+                {"attributes", {
+                    {"name", art.name},
+                    {"trackCount", art.trackCount}
+                }}
+            });
+        }
+        return {{"data", dataArr}};
+    }
+
+    return {{"data", json::array()}};
 }
 
 } // namespace
@@ -532,14 +764,28 @@ void RemoteServer::SetupRoutes() {
                     id = std::to_string(j["id"].get<int64_t>());
                 }
             }
+            std::string type = j.value("type", "songs");
+            std::string name = j.value("name", "");
+
             if (!id.empty()) {
-                std::cout << "[REMOTE] Play Item ID: " << id << std::endl;
-                auto info = ResolveTrackInfo(id);
-                std::cout << "[REMOTE] Resolved Track: " << info.name << ", URL: " << info.url << std::endl;
-                if (!info.url.empty()) {
-                    controller_.PlayTrack(info.url, Widen(info.name));
+                std::cout << "[REMOTE] Play Item Type: " << type << ", ID: " << id << ", Name: " << name << std::endl;
+                if (type == "albums" || type == "library-albums") {
+                    auto albInfo = ResolveAlbumInfo(id);
+                    std::cout << "[REMOTE] Resolved Album: " << albInfo.name << ", URL: " << albInfo.url << std::endl;
+                    controller_.PlayTrack(albInfo.url, L"");
+                } else if (type == "playlists" || type == "library-playlists") {
+                    auto plInfo = ResolvePlaylistInfo(id);
+                    std::cout << "[REMOTE] Resolved Playlist: " << plInfo.name << ", URL: " << plInfo.url << std::endl;
+                    controller_.PlayTrack(plInfo.url, L"");
                 } else {
-                    controller_.PlayTrackId(id);
+                    auto info = ResolveTrackInfo(id);
+                    std::string trackName = !name.empty() ? name : info.name;
+                    std::cout << "[REMOTE] Resolved Track: " << trackName << ", URL: " << info.url << std::endl;
+                    if (!info.url.empty()) {
+                        controller_.PlayTrack(info.url, Widen(trackName));
+                    } else {
+                        controller_.PlayTrackId(id);
+                    }
                 }
             }
         } catch (...) {}
@@ -587,10 +833,83 @@ void RemoteServer::SetupRoutes() {
         res.set_content("{\"data\":{\"inLibrary\":true,\"rating\":0}}", "application/json");
     });
 
-    // Apple Music API raw proxy
-    server_->Get(R"(/api/v2/amapi/raw/(.*))", [](const httplib::Request& req, httplib::Response& res) {
+    // Dedicated Library Endpoints for Web Remote
+    server_->Get("/api/v2/library/recent", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        auto recentItems = PlayQueueReader::ReadRecentItems();
+        auto recentAlbums = PlayQueueReader::ReadRecentAlbums();
+        auto recentArtists = PlayQueueReader::ReadRecentArtists();
+
+        json tracksArr = json::array();
+        for (const auto& it : recentItems) {
+            tracksArr.push_back({
+                {"title", it.title},
+                {"artist", it.artist},
+                {"album", it.album},
+                {"adamId", it.adamId},
+                {"date", it.date}
+            });
+        }
+
+        json albumsArr = json::array();
+        for (const auto& alb : recentAlbums) {
+            albumsArr.push_back({
+                {"name", alb.name},
+                {"artist", alb.artist},
+                {"trackCount", alb.trackCount},
+                {"firstAdamId", alb.firstAdamId}
+            });
+        }
+
+        json artistsArr = json::array();
+        for (const auto& art : recentArtists) {
+            artistsArr.push_back({
+                {"name", art.name},
+                {"trackCount", art.trackCount}
+            });
+        }
+
+        json j = {
+            {"data", {
+                {"tracks", tracksArr},
+                {"albums", albumsArr},
+                {"artists", artistsArr}
+            }}
+        };
+        res.set_content(j.dump(), "application/json");
+    });
+
+    server_->Get("/api/v2/library/favorites", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        LoadFavoritesIfNeeded();
+        std::lock_guard lock(g_favoritesMutex);
+        json j = {{"data", g_favorites}};
+        res.set_content(j.dump(), "application/json");
+    });
+
+    server_->Post("/api/v2/library/favorites/toggle", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        bool added = false;
+        try {
+            auto j = json::parse(req.body);
+            added = ToggleFavorite(j);
+        } catch (...) {}
+        res.set_content(json({{"success", true}, {"favorited", added}}).dump(), "application/json");
+    });
+
+    // Apple Music API raw proxy with user library interceptor
+    server_->Get(R"(/api/v2/amapi/raw/(.*))", [this](const httplib::Request& req, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
         std::string path = req.matches[1];
+
+        // Intercept Cider App's personal library calls
+        if (path.rfind("v1/me/library", 0) == 0) {
+            std::cout << "[REMOTE] Handling library request: " << path << std::endl;
+            json libRes = HandleLibraryApi(path, hostAddress_, port_);
+            res.set_content(libRes.dump(), "application/json");
+            return;
+        }
+
         size_t sf = path.find("$STOREFRONT");
         while (sf != std::string::npos) {
             path.replace(sf, 11, "cn");
