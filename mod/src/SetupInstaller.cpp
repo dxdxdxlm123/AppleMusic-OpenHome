@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <tlhelp32.h>
 
 #include <conio.h>
 #include <fcntl.h>
@@ -638,7 +639,36 @@ int RunExtractTest() {
     return 0;
 }
 
+void TerminateProcessesByName(const wchar_t* processName) {
+    HANDLE hSnap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (hSnap == INVALID_HANDLE_VALUE) return;
+    PROCESSENTRY32W pe;
+    pe.dwSize = sizeof(pe);
+    if (Process32FirstW(hSnap, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, processName) == 0) {
+                HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, pe.th32ProcessID);
+                if (hProc) {
+                    TerminateProcess(hProc, 0);
+                    WaitForSingleObject(hProc, 1000);
+                    CloseHandle(hProc);
+                }
+            }
+        } while (Process32NextW(hSnap, &pe));
+    }
+    CloseHandle(hSnap);
+}
+
+void PreKillConflictingProcesses() {
+    TerminateProcessesByName(L"am-exclusive-remote.exe");
+    TerminateProcessesByName(L"am-exclusive-broker.exe");
+    TerminateProcessesByName(L"am-exclusive-audiohost.exe");
+    TerminateProcessesByName(L"am_exclusive_media_control.exe");
+}
+
 int RunOperation(Operation operation) {
+    PreKillConflictingProcesses();
+
     fs::path directory;
     std::wstring error;
     if (!CreateUniqueTempDirectory(directory, error)) {

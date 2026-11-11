@@ -73,7 +73,7 @@ function Get-AmeRuntimeProcesses {
     $apple = @(Get-Process -Name 'AppleMusic', 'AMPLibraryAgent' -ErrorAction SilentlyContinue |
         Where-Object { $_.SessionId -eq $sessionId })
     $ours = @(Get-Process -Name 'am-exclusive-broker', 'am-exclusive-audiohost',
-                                 'am_exclusive_media_control' -ErrorAction SilentlyContinue)
+                                 'am_exclusive_media_control', 'am-exclusive-remote' -ErrorAction SilentlyContinue)
     return @($apple) + @($ours)
 }
 
@@ -85,6 +85,7 @@ function Stop-AppleMusicRuntime {
     $order = @{
         'AppleMusic' = 0
         'AMPLibraryAgent' = 0
+        'am-exclusive-remote' = 1
         'am-exclusive-broker' = 1
         'am-exclusive-audiohost' = 2
         'am_exclusive_media_control' = 2
