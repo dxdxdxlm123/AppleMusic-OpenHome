@@ -150,23 +150,60 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 12px 0;
+      padding: 13px 0;
       border-bottom: 1px solid var(--separator);
+      gap: 12px;
     }
     .setting-row:last-child {
       border-bottom: none;
     }
 
+    .setting-info {
+      flex: 1;
+      min-width: 0;
+    }
+
     .setting-label {
       font-size: 15px;
-      font-weight: 500;
+      font-weight: 600;
       color: var(--text);
+      line-height: 1.35;
     }
     .setting-desc {
       font-size: 12.5px;
       color: var(--subtext);
-      margin-top: 2px;
-      line-height: 1.4;
+      margin-top: 3px;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+
+    /* Stacked Form Row (Clean mobile wrapping - 该换行就换行!) */
+    .setting-row.stacked {
+      flex-direction: column;
+      align-items: stretch;
+      gap: 9px;
+    }
+    .setting-control-row {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      width: 100%;
+      box-sizing: border-box;
+    }
+    .setting-control-row select,
+    .setting-control-row input {
+      flex: 1;
+      min-width: 0;
+      box-sizing: border-box;
+    }
+    .setting-control-row .btn-action {
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    .setting-row.stacked > select,
+    .setting-row.stacked > input {
+      width: 100%;
+      box-sizing: border-box;
     }
 
     /* Switch (iOS Toggle) */
@@ -1201,12 +1238,12 @@
         </label>
       </div>
       <div class="setting-desc" id="lblStateDesc">运行状态: 正在同步配置...</div>
-      <div class="setting-row" style="margin-top:10px;padding-top:10px;">
-        <div>
+      <div class="setting-row stacked" style="margin-top:10px;padding-top:10px;">
+        <div class="setting-info">
           <div class="setting-label">当前流格式与端点</div>
           <div class="setting-desc" id="lblStreamFormat" style="color:var(--accent);font-weight:600;">--</div>
         </div>
-        <button class="btn-action" onclick="openTelemetryModal()">⚡ 流透视监视器</button>
+        <button class="btn-action" style="width:100%;padding:9px;" onclick="openTelemetryModal()">⚡ 流透视监视器</button>
       </div>
     </div>
 
@@ -1222,47 +1259,47 @@
       <div class="settings-group">
         <div class="settings-title">本地输出配置</div>
         
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">播放模式</div>
             <div class="setting-desc">AM 原生进程内 / 独立音频引擎</div>
           </div>
-          <select id="selPlayerMode">
+          <select id="selPlayerMode" style="width:100%;">
             <option value="am">AM 播放器（进程内）</option>
             <option value="hifi">HiFi 播放器（独立引擎）</option>
           </select>
         </div>
 
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">接口</div>
             <div class="setting-desc">Windows 独占底层接口</div>
           </div>
-          <select id="selLocalBackend" onchange="onLocalBackendChange(this.value)">
+          <select id="selLocalBackend" style="width:100%;" onchange="onLocalBackendChange(this.value)">
             <option value="wasapi">WASAPI (独占)</option>
             <option value="asio">ASIO (专业驱动)</option>
           </select>
         </div>
 
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">设备 / 驱动</div>
             <div class="setting-desc" id="lblLocalDeviceDesc">选择输出硬件 DAC 或声卡</div>
           </div>
-          <div style="display:flex;gap:6px;align-items:center;">
-            <select id="selLocalDevice" style="max-width:180px;">
+          <div class="setting-control-row">
+            <select id="selLocalDevice" style="flex:1;min-width:0;">
               <option value="">跟随 Apple Music 默认设备</option>
             </select>
             <button class="btn-action" onclick="triggerRefreshDevices()">刷新</button>
           </div>
         </div>
 
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">硬件缓冲区 / 周期</div>
             <div class="setting-desc">超低延迟与防爆音调节</div>
           </div>
-          <select id="selLocalBuffer">
+          <select id="selLocalBuffer" style="width:100%;">
             <option value="5">5 ms (极速超低延迟)</option>
             <option value="10">10 ms (极低延迟)</option>
             <option value="20" selected>20 ms (标准推荐)</option>
@@ -1272,7 +1309,7 @@
         </div>
 
         <div class="setting-row">
-          <div>
+          <div class="setting-info">
             <div class="setting-label">允许采样率重采样</div>
             <div class="setting-desc">当 DAC 不支持原始格式时允许回退重采样</div>
           </div>
@@ -1283,7 +1320,7 @@
         </div>
 
         <div class="setting-row">
-          <div>
+          <div class="setting-info">
             <div class="setting-label">强制 Hi-Res 格式请求</div>
             <div class="setting-desc">绕过 DAC 检测限制，始终请求最高 24/192 ALAC</div>
           </div>
@@ -1299,7 +1336,7 @@
         <div class="settings-title">本地播放优化 (JPLAY 风格)</div>
         
         <div class="setting-row">
-          <div>
+          <div class="setting-info">
             <div class="setting-label">深度优化</div>
             <div class="setting-desc">开启全轨内存预蓄水与音频优先级提升</div>
           </div>
@@ -1309,12 +1346,12 @@
           </label>
         </div>
 
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">内存储备</div>
             <div class="setting-desc">音频缓冲区目标深度</div>
           </div>
-          <select id="selLocalReservoir">
+          <select id="selLocalReservoir" style="width:100%;">
             <option value="100">0.1 秒</option>
             <option value="500">0.5 秒</option>
             <option value="2000" selected>2 秒 (推荐)</option>
@@ -1324,7 +1361,7 @@
         </div>
 
         <div class="setting-row">
-          <div>
+          <div class="setting-info">
             <div class="setting-label">系统级时序</div>
             <div class="setting-desc">0.5ms 系统定时器 + 专属核心 + 大页内存</div>
           </div>
@@ -1353,47 +1390,48 @@
       <div class="settings-group">
         <div class="settings-title">网播串流配置 (DLNA / OpenHome)</div>
 
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">网播设备</div>
             <div class="setting-desc">局域网数播 / UPnP 渲染器</div>
           </div>
-          <div style="display:flex;gap:6px;align-items:center;">
-            <select id="selNetworkDevice" style="max-width:180px;">
+          <div class="setting-control-row">
+            <select id="selNetworkDevice" style="flex:1;min-width:0;">
               <option value="">扫描设备中...</option>
             </select>
             <button class="btn-action" onclick="triggerRefreshDevices()">刷新设备</button>
           </div>
         </div>
 
-        <div class="setting-row">
-          <div style="width:100%;">
-            <div class="setting-label" style="margin-bottom:6px;">手动添加设备</div>
-            <div style="display:flex;gap:6px;">
-              <input type="text" id="txtManualDevice" class="setting-input" style="flex:1;" placeholder="http://IP:port/device.xml 或 IP:port">
-              <button class="btn-action" onclick="addManualDevice()">手动添加</button>
-            </div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
+            <div class="setting-label">手动添加设备</div>
+            <div class="setting-desc">直接输入数播 IP 或 XML 描述地址</div>
+          </div>
+          <div class="setting-control-row">
+            <input type="text" id="txtManualDevice" class="setting-input" style="flex:1;min-width:0;" placeholder="http://IP:port/device.xml 或 IP:port">
+            <button class="btn-action" onclick="addManualDevice()">手动添加</button>
           </div>
         </div>
 
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">流式</div>
             <div class="setting-desc">音频封包与传输形态</div>
           </div>
-          <select id="selStreamFormat">
+          <select id="selStreamFormat" style="width:100%;">
             <option value="wav">WAV（文件形态）</option>
             <option value="flac-file">FLAC（文件形态）</option>
             <option value="live">FLAC 实时流（标准）</option>
           </select>
         </div>
 
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">拉流缓冲</div>
             <div class="setting-desc">网播设备预缓冲深度</div>
           </div>
-          <select id="selDlnaBuffer">
+          <select id="selDlnaBuffer" style="width:100%;">
             <option value="1000">1 秒</option>
             <option value="3000" selected>3 秒 (推荐)</option>
             <option value="5000">5 秒</option>
@@ -1402,7 +1440,7 @@
         </div>
 
         <div class="setting-row">
-          <div>
+          <div class="setting-info">
             <div class="setting-label">遵循 SMTC 曲目时长</div>
             <div class="setting-desc">使渲染器显示精确曲目进度并支持拖动</div>
           </div>
@@ -1427,36 +1465,36 @@
       <div class="settings-group">
         <div class="settings-title">兼容 R 设备输出 (RAAT 协议)</div>
 
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">兼容 R 设备</div>
             <div class="setting-desc">SOOD 协议自动发现的终端</div>
           </div>
-          <div style="display:flex;gap:6px;align-items:center;">
-            <select id="selRoonDevice" style="max-width:180px;">
+          <div class="setting-control-row">
+            <select id="selRoonDevice" style="flex:1;min-width:0;">
               <option value="">扫描 R 设备中...</option>
             </select>
             <button class="btn-action" onclick="triggerRefreshDevices()">重新扫描</button>
           </div>
         </div>
 
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">Buffer look-ahead (ms)</div>
             <div class="setting-desc">起播预填充与设备侧超前缓冲</div>
           </div>
-          <input type="number" id="numRoonBuffer" class="setting-input" style="width:110px;" min="100" max="5000" step="100" value="1000">
+          <input type="number" id="numRoonBuffer" class="setting-input" style="width:100%;box-sizing:border-box;" min="100" max="5000" step="100" value="1000">
         </div>
         <div class="hint-box" style="margin-top:2px;margin-bottom:12px;">
           起播预填充 + 播放期间保持在设备侧领先播放位置的音频量。100–5000 ms；起播掉音时调大。
         </div>
 
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">Wire bits (传输位深)</div>
             <div class="setting-desc">线缆位深 (Off 为跟随音源)</div>
           </div>
-          <select id="selRoonBits">
+          <select id="selRoonBits" style="width:100%;">
             <option value="0">Off (auto)</option>
             <option value="16">16 bit</option>
             <option value="24">24 bit</option>
@@ -1464,20 +1502,20 @@
           </select>
         </div>
 
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">Start lead (ms)</div>
             <div class="setting-desc">起播前导延时 (300-4000)</div>
           </div>
-          <input type="number" id="numRoonLead" class="setting-input" style="width:110px;" min="300" max="4000" step="100" value="1000">
+          <input type="number" id="numRoonLead" class="setting-input" style="width:100%;box-sizing:border-box;" min="300" max="4000" step="100" value="1000">
         </div>
 
-        <div class="setting-row">
-          <div>
+        <div class="setting-row stacked">
+          <div class="setting-info">
             <div class="setting-label">SOOD port</div>
             <div class="setting-desc">0 = 默认 9003</div>
           </div>
-          <input type="number" id="numRoonSoodPort" class="setting-input" style="width:110px;" min="0" max="65535" value="0">
+          <input type="number" id="numRoonSoodPort" class="setting-input" style="width:100%;box-sizing:border-box;" min="0" max="65535" value="0">
         </div>
 
         <div style="margin-top:14px;">
