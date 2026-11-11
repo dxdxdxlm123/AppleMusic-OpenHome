@@ -164,14 +164,18 @@ add_executable(am_exclusive_remote
   src/remote/RemoteServer.cpp
   src/remote/AmPluginClient.cpp
   src/IpcTransport.cpp
-  src/LocalOutputDevices.cpp)
+  src/LocalOutputDevices.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tinf/tinflate.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tinf/adler32.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tinf/tinfzlib.c)
 target_include_directories(am_exclusive_remote PRIVATE
   src
   ${CMAKE_CURRENT_SOURCE_DIR}/../third_party
   ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/cpp-httplib
-  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/nlohmann)
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/nlohmann
+  ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tinf)
 target_compile_definitions(am_exclusive_remote PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(am_exclusive_remote PRIVATE advapi32 ole32 oleaut32 runtimeobject windowsapp ws2_32 crypt32 winhttp user32 shell32)
+target_link_libraries(am_exclusive_remote PRIVATE advapi32 ole32 oleaut32 runtimeobject windowsapp ws2_32 crypt32 winhttp user32 shell32 bcrypt)
 set_target_properties(am_exclusive_remote PROPERTIES OUTPUT_NAME "am-exclusive-remote")
 
 add_executable(am_exclusive_broker

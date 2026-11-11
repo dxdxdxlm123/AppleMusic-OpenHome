@@ -2678,16 +2678,7 @@
           const recAlbs = (json.data && json.data.albums) || [];
           recAlbs.forEach(ra => {
             const existing = albums.find(a => (a.id && ra.albumId && a.id === ra.albumId) || (a.name === ra.name));
-            if (!existing) {
-              albums.push({
-                id: ra.albumId || ra.firstAdamId || '',
-                name: ra.name,
-                artist: ra.artist,
-                artworkUrl: formatArt(ra.artworkUrl, '300'),
-                releaseDate: ra.releaseDate,
-                trackCount: ra.trackCount
-              });
-            } else {
+            if (existing) {
               if ((!existing.artworkUrl || existing.artworkUrl === '') && ra.artworkUrl) {
                 existing.artworkUrl = formatArt(ra.artworkUrl, '300');
               }

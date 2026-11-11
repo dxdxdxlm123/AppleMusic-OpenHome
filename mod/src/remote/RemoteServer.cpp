@@ -3,6 +3,7 @@
 #include "WebRemoteHtml.h"
 #include "PlayQueueReader.h"
 #include "AmExclusiveConfig.h"
+#include "MusicDbParser.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -169,27 +170,37 @@ std::wstring GetLibSongsFilePath() {
     return L"C:\\Users\\Public\\AMExclusive\\am_library_songs.json";
 }
 
+bool SyncLibraryFromMusicDb();
+
 void LoadLibSongsIfNeeded() {
-    std::lock_guard lock(g_libSongsMutex);
-    std::wstring path = GetLibSongsFilePath();
-    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile != INVALID_HANDLE_VALUE) {
-        DWORD size = GetFileSize(hFile, nullptr);
-        if (size > 0 && size < 10 * 1024 * 1024) {
-            std::string content(size, '\0');
-            DWORD read = 0;
-            ReadFile(hFile, content.data(), size, &read, nullptr);
-            try {
-                g_libSongs = json::parse(content);
-                g_libSongsLoaded = true;
-                CloseHandle(hFile);
-                return;
-            } catch (...) {}
+    {
+        std::lock_guard lock(g_libSongsMutex);
+        std::wstring path = GetLibSongsFilePath();
+        HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            DWORD size = GetFileSize(hFile, nullptr);
+            if (size > 0 && size < 10 * 1024 * 1024) {
+                std::string content(size, '\0');
+                DWORD read = 0;
+                ReadFile(hFile, content.data(), size, &read, nullptr);
+                try {
+                    g_libSongs = json::parse(content);
+                    if (!g_libSongs.empty()) {
+                        g_libSongsLoaded = true;
+                        CloseHandle(hFile);
+                        return;
+                    }
+                } catch (...) {}
+            }
+            CloseHandle(hFile);
         }
-        CloseHandle(hFile);
     }
 
-    if (g_libSongsLoaded && !g_libSongs.empty()) return;
+    if (SyncLibraryFromMusicDb()) {
+        return;
+    }
+
+    std::lock_guard lock(g_libSongsMutex);
     g_libSongsLoaded = true;
 
     if (g_libSongs.empty()) {
@@ -252,26 +263,34 @@ std::wstring GetLibAlbumsFilePath() {
 }
 
 void LoadLibAlbumsIfNeeded() {
-    std::lock_guard lock(g_libAlbumsMutex);
-    std::wstring path = GetLibAlbumsFilePath();
-    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (hFile != INVALID_HANDLE_VALUE) {
-        DWORD size = GetFileSize(hFile, nullptr);
-        if (size > 0 && size < 10 * 1024 * 1024) {
-            std::string content(size, '\0');
-            DWORD read = 0;
-            ReadFile(hFile, content.data(), size, &read, nullptr);
-            try {
-                g_libAlbums = json::parse(content);
-                g_libAlbumsLoaded = true;
-                CloseHandle(hFile);
-                return;
-            } catch (...) {}
+    {
+        std::lock_guard lock(g_libAlbumsMutex);
+        std::wstring path = GetLibAlbumsFilePath();
+        HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            DWORD size = GetFileSize(hFile, nullptr);
+            if (size > 0 && size < 10 * 1024 * 1024) {
+                std::string content(size, '\0');
+                DWORD read = 0;
+                ReadFile(hFile, content.data(), size, &read, nullptr);
+                try {
+                    g_libAlbums = json::parse(content);
+                    if (!g_libAlbums.empty()) {
+                        g_libAlbumsLoaded = true;
+                        CloseHandle(hFile);
+                        return;
+                    }
+                } catch (...) {}
+            }
+            CloseHandle(hFile);
         }
-        CloseHandle(hFile);
     }
 
-    if (g_libAlbumsLoaded && !g_libAlbums.empty()) return;
+    if (SyncLibraryFromMusicDb()) {
+        return;
+    }
+
+    std::lock_guard lock(g_libAlbumsMutex);
     g_libAlbumsLoaded = true;
 
     if (g_libAlbums.empty()) {
@@ -640,90 +659,144 @@ void PopulateRecentMetadata(const std::vector<AlbumItem>& albums, const std::vec
     }
 }
 
-void NativeSyncAndEnrichLibrary() {
-    LoadLibAlbumsIfNeeded();
-    LoadLibSongsIfNeeded();
+bool SyncLibraryFromMusicDb() {
+    std::vector<MusicDbAlbum> dbAlbums;
+    std::vector<MusicDbTrack> dbTracks;
+    if (!MusicDbParser::Parse(dbAlbums, dbTracks)) {
+        return false;
+    }
 
-    auto recentAlbums = PlayQueueReader::ReadRecentAlbums();
-    auto recentItems = PlayQueueReader::ReadRecentItems();
-    PopulateRecentMetadata(recentAlbums, recentItems);
+    LogDebugMsg(("MusicDbParser successfully parsed " + std::to_string(dbAlbums.size()) + 
+                 " albums and " + std::to_string(dbTracks.size()) + " tracks.").c_str());
 
-    std::lock_guard lock(g_libAlbumsMutex);
-    bool modified = false;
+    // Enrich albums with Apple Music Catalog API
+    for (auto& alb : dbAlbums) {
+        if (!alb.catalogId.starts_with("lib.alb.")) continue; // Already catalog ID
 
-    for (const auto& ra : recentAlbums) {
-        std::string albId = "";
-        std::string artUrl = ra.artworkUrl;
-        std::string relDate = ra.releaseDate;
-
+        // Check in-memory cache first
         {
-            std::lock_guard metaLock(g_albumMetaMutex);
-            if (!ra.firstAdamId.empty()) {
-                auto it = g_albumMetaCache.find(ra.firstAdamId);
-                if (it != g_albumMetaCache.end()) {
-                    if (!it->second.albumId.empty()) albId = it->second.albumId;
-                    if (artUrl.empty()) artUrl = it->second.artworkUrl;
-                    if (relDate.empty()) relDate = it->second.releaseDate;
-                }
-            }
-            if (albId.empty() || artUrl.empty()) {
-                auto it2 = g_albumMetaCache.find(ra.name + "|||" + ra.artist);
-                if (it2 != g_albumMetaCache.end()) {
-                    if (albId.empty() && !it2->second.albumId.empty()) albId = it2->second.albumId;
-                    if (artUrl.empty()) artUrl = it2->second.artworkUrl;
-                    if (relDate.empty()) relDate = it2->second.releaseDate;
-                }
+            std::lock_guard lock(g_albumMetaMutex);
+            auto it = g_albumMetaCache.find(alb.title + "|||" + alb.artist);
+            if (it != g_albumMetaCache.end() && !it->second.albumId.empty()) {
+                alb.catalogId = it->second.albumId;
+                if (alb.artworkUrl.empty()) alb.artworkUrl = it->second.artworkUrl;
+                if (alb.releaseDate.empty()) alb.releaseDate = it->second.releaseDate;
+                continue;
             }
         }
-        if (albId.empty() && !ra.albumId.empty() && !ra.albumId.starts_with("lib.alb.")) {
-            albId = ra.albumId;
-        }
-        if (albId.empty()) albId = ra.firstAdamId;
 
-        bool found = false;
-        for (auto& ea : g_libAlbums) {
-            std::string eaName = ea.value("name", "");
-            std::string eaArtist = ea.value("artist", "");
-            std::string eaId = ea.value("id", "");
-            if ((!eaId.empty() && !albId.empty() && eaId == albId) || (eaName == ra.name && eaArtist == ra.artist) || eaName == ra.name) {
-                found = true;
-                if (!albId.empty() && (eaId.empty() || eaId.starts_with("lib.alb."))) {
-                    ea["id"] = albId;
-                    ea["albumId"] = albId;
-                    modified = true;
+        // Query catalog search
+        auto srch = FetchAppleSearch(alb.title + " " + alb.artist, "albums", 5);
+        if (srch.contains("data") && srch["data"].contains("results") &&
+            srch["data"]["results"].contains("albums") && srch["data"]["results"]["albums"].contains("data") &&
+            !srch["data"]["results"]["albums"]["data"].empty()) {
+
+            auto normStr = [](std::string s) {
+                std::string out;
+                for (char c : s) {
+                    if (c >= 'A' && c <= 'Z') out += (c + 32);
+                    else if (c != ' ' && c != '\t' && c != '-' && c != '_' && c != '(' && c != ')' && c != '/') out += c;
                 }
-                if (ea.value("artworkUrl", "").empty() && !artUrl.empty()) {
-                    ea["artworkUrl"] = artUrl;
-                    modified = true;
-                }
-                if (ea.value("releaseDate", "").empty() && !relDate.empty()) {
-                    ea["releaseDate"] = relDate;
-                    modified = true;
-                }
-                if (ea.value("firstSongId", "").empty() && !ra.firstAdamId.empty()) {
-                    ea["firstSongId"] = ra.firstAdamId;
-                    modified = true;
-                }
-                break;
-            }
-        }
-        if (!found) {
-            json newAlb = {
-                {"id", albId.empty() ? ra.firstAdamId : albId},
-                {"albumId", albId},
-                {"firstSongId", ra.firstAdamId},
-                {"name", ra.name},
-                {"artist", ra.artist},
-                {"trackCount", ra.trackCount},
-                {"artworkUrl", artUrl},
-                {"releaseDate", relDate}
+                return out;
             };
-            g_libAlbums.push_back(newAlb);
-            modified = true;
+
+            std::string targetName = normStr(alb.title);
+            std::string targetArt = normStr(alb.artist);
+
+            const json* bestMatch = nullptr;
+            for (const auto& candidate : srch["data"]["results"]["albums"]["data"]) {
+                const auto& aAttrs = candidate.value("attributes", json::object());
+                std::string candName = normStr(aAttrs.value("name", ""));
+                std::string candArt = normStr(aAttrs.value("artistName", ""));
+                if ((candName == targetName || candName.find(targetName) != std::string::npos || targetName.find(candName) != std::string::npos) &&
+                    (targetArt.empty() || candArt == targetArt || candArt.find(targetArt) != std::string::npos || targetArt.find(candArt) != std::string::npos)) {
+                    bestMatch = &candidate;
+                    break;
+                }
+            }
+            if (!bestMatch) {
+                bestMatch = &srch["data"]["results"]["albums"]["data"][0];
+            }
+
+            std::string foundAlbId = bestMatch->value("id", "");
+            const auto& aAttrs = bestMatch->value("attributes", json::object());
+            std::string foundArtUrl = "";
+            if (aAttrs.contains("artwork") && aAttrs["artwork"].is_object()) {
+                foundArtUrl = aAttrs["artwork"].value("url", "");
+            }
+            std::string foundRelDate = aAttrs.value("releaseDate", "");
+            int foundTracks = aAttrs.value("trackCount", alb.trackCount);
+
+            if (!foundAlbId.empty()) alb.catalogId = foundAlbId;
+            if (alb.artworkUrl.empty() && !foundArtUrl.empty()) alb.artworkUrl = foundArtUrl;
+            if (alb.releaseDate.empty() && !foundRelDate.empty()) alb.releaseDate = foundRelDate;
+            if (foundTracks > 0) alb.trackCount = foundTracks;
+
+            std::lock_guard lock(g_albumMetaMutex);
+            CachedAlbumMeta meta{ alb.catalogId, alb.artworkUrl, alb.releaseDate };
+            g_albumMetaCache[alb.title + "|||" + alb.artist] = meta;
         }
     }
 
+    // Now build g_libAlbums and g_libSongs
+    json newAlbums = json::array();
+    for (const auto& alb : dbAlbums) {
+        newAlbums.push_back({
+            {"id", alb.catalogId},
+            {"albumId", alb.catalogId},
+            {"firstSongId", alb.firstSongId},
+            {"name", alb.title},
+            {"artist", alb.artist},
+            {"artworkUrl", alb.artworkUrl},
+            {"releaseDate", alb.releaseDate},
+            {"trackCount", alb.trackCount}
+        });
+    }
+
+    json newSongs = json::array();
+    for (const auto& tr : dbTracks) {
+        std::string songArt = tr.artworkUrl;
+        if (songArt.empty()) {
+            std::lock_guard lock(g_albumMetaMutex);
+            auto it = g_albumMetaCache.find(tr.album + "|||" + tr.artist);
+            if (it != g_albumMetaCache.end()) songArt = it->second.artworkUrl;
+        }
+        newSongs.push_back({
+            {"id", tr.songId.empty() ? ("lib.trk." + std::to_string(tr.itemId)) : tr.songId},
+            {"itemId", tr.itemId},
+            {"name", tr.title},
+            {"title", tr.title},
+            {"artist", tr.artist},
+            {"album", tr.album},
+            {"artworkUrl", songArt}
+        });
+    }
+
+    {
+        std::lock_guard lock(g_libAlbumsMutex);
+        g_libAlbums = std::move(newAlbums);
+        g_libAlbumsLoaded = true;
+        SaveLibAlbums();
+    }
+    {
+        std::lock_guard lock2(g_libSongsMutex);
+        g_libSongs = std::move(newSongs);
+        g_libSongsLoaded = true;
+        SaveLibSongs();
+    }
+
+    return true;
+}
+
+void NativeSyncAndEnrichLibrary() {
+    SyncLibraryFromMusicDb();
+
+    LoadLibAlbumsIfNeeded();
+    LoadLibSongsIfNeeded();
+
     // Enrich existing g_libAlbums items
+    std::lock_guard lock(g_libAlbumsMutex);
+    bool modified = false;
     for (auto& alb : g_libAlbums) {
         std::string aId = alb.value("albumId", alb.value("id", ""));
         std::string aArt = alb.value("artworkUrl", "");
@@ -950,14 +1023,15 @@ bool RemoteServer::Start() {
     std::thread([this]() {
         LogDebugMsg("Watcher thread starting");
         try {
-            wchar_t userProfile[MAX_PATH] = { 0 };
-            DWORD len = GetEnvironmentVariableW(L"USERPROFILE", userProfile, MAX_PATH);
-            if (len == 0) return;
-            std::wstring dbPath = std::wstring(userProfile) + L"\\Music\\Apple Music\\Apple Music Library.musiclibrary\\artwork.sqlite";
+            std::wstring libDir;
+            if (!MusicDbParser::GetLibraryDir(libDir)) return;
+            std::wstring dbPath = libDir + L"\\artwork.sqlite";
             std::wstring walPath = dbPath + L"-wal";
+            std::wstring musicDbPath = libDir + L"\\Library.musicdb";
 
             FILETIME lastDbTime = { 0, 0 };
             FILETIME lastWalTime = { 0, 0 };
+            FILETIME lastMusicDbTime = { 0, 0 };
 
             while (running_) {
                 std::this_thread::sleep_for(std::chrono::seconds(5));
@@ -983,8 +1057,17 @@ bool RemoteServer::Start() {
                     lastWalTime = fad.ftLastWriteTime;
                 }
 
+                if (GetFileAttributesExW(musicDbPath.c_str(), GetFileExInfoStandard, &fad)) {
+                    if (lastMusicDbTime.dwLowDateTime != 0 &&
+                        (fad.ftLastWriteTime.dwLowDateTime != lastMusicDbTime.dwLowDateTime ||
+                         fad.ftLastWriteTime.dwHighDateTime != lastMusicDbTime.dwHighDateTime)) {
+                        changed = true;
+                    }
+                    lastMusicDbTime = fad.ftLastWriteTime;
+                }
+
                 if (changed) {
-                    LogDebugMsg("Watcher detected artwork database change, running sync");
+                    LogDebugMsg("Watcher detected library/artwork database change, running sync");
                     std::thread([]() {
                         NativeSyncAndEnrichLibrary();
                     }).detach();
