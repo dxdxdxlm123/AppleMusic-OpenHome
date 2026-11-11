@@ -4,551 +4,267 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="AMExclusive">
-  <meta name="theme-color" content="#121214">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Apple Music">
+  <meta name="theme-color" content="#f2f2f7">
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/icon-192.png">
-  <title>AMExclusive Remote</title>
+  <title>Apple Music - AMExclusive</title>
   <style>
     :root {
-      --bg: #000000;
-      --card-bg: rgba(28, 28, 30, 0.78);
-      --card-hover: rgba(44, 44, 46, 0.9);
-      --card-border: rgba(255, 255, 255, 0.08);
+      --bg: #f2f2f7;
+      --card-bg: #ffffff;
+      --card-border: rgba(0, 0, 0, 0.08);
+      --card-shadow: 0 2px 10px rgba(0, 0, 0, 0.04);
+      --text: #000000;
+      --subtext: #8a8a8e;
+      --tertiary: #c7c7cc;
       --accent: #fa2d48;
-      --accent-glow: rgba(250, 45, 72, 0.35);
-      --text: #ffffff;
-      --subtext: #8e8e93;
-      --highlight: #30d158;
-      --gold: #ffd60a;
+      --accent-hover: #e0243d;
+      --accent-light: rgba(250, 45, 72, 0.1);
+      --green: #34c759;
+      --blue: #007aff;
+      --nav-bg: rgba(255, 255, 255, 0.92);
       --nav-height: 64px;
-      --mini-player-height: 56px;
+      --top-height: 52px;
+      --separator: #e5e5ea;
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+    }
+
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background-color: var(--bg);
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      background: var(--bg);
       color: var(--text);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       overflow-x: hidden;
-      padding-bottom: calc(var(--nav-height) + var(--mini-player-height) + 12px);
-      user-select: none;
+      padding-top: var(--top-height);
+      padding-bottom: calc(var(--nav-height) + 70px);
     }
 
-    /* Ambient Glow Background */
-    .ambient-glow {
+    /* Top Bar */
+    .top-bar {
       position: fixed;
-      top: -100px;
-      left: 50%;
-      transform: translateX(-50%);
-      width: 380px;
-      height: 380px;
-      background: radial-gradient(circle, rgba(250, 45, 72, 0.22) 0%, rgba(138, 43, 226, 0.12) 50%, transparent 80%);
-      filter: blur(60px);
-      pointer-events: none;
-      z-index: 0;
-      opacity: 0.8;
-      transition: all 1s ease;
-    }
-
-    /* Header */
-    .header {
-      padding: 14px 18px 10px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: var(--top-height);
+      background: var(--nav-bg);
       backdrop-filter: blur(25px);
       -webkit-backdrop-filter: blur(25px);
-      position: sticky;
-      top: 0;
+      border-bottom: 1px solid var(--separator);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 16px;
       z-index: 50;
-      border-bottom: 1px solid var(--card-border);
-      background: rgba(12, 12, 14, 0.72);
     }
-    .brand { font-size: 19px; font-weight: 700; letter-spacing: -0.5px; display: flex; align-items: center; gap: 6px; }
-    .brand span { color: var(--accent); }
+
+    .brand {
+      font-size: 19px;
+      font-weight: 700;
+      letter-spacing: -0.4px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--text);
+    }
+    .brand span {
+      color: var(--accent);
+      font-weight: 800;
+    }
+
     .status-badge {
-      font-size: 11px;
-      padding: 4px 10px;
-      border-radius: 12px;
-      background: rgba(255,255,255,0.08);
-      font-weight: 600;
       display: flex;
       align-items: center;
       gap: 6px;
-      cursor: pointer;
-    }
-    .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #ff453a; }
-    .status-dot.active { background: var(--highlight); box-shadow: 0 0 8px var(--highlight); }
-
-    /* Tab content views */
-    .tab-content { display: none; padding: 14px 16px; flex: 1; z-index: 1; position: relative; }
-    .tab-content.active { display: block; animation: fadeIn 0.25s ease; }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
-
-    /* ================================================= */
-    /* Tab 1: Now Playing View                           */
-    /* ================================================= */
-    .player-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 22px;
-      padding: 24px 20px 20px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      box-shadow: 0 10px 36px rgba(0,0,0,0.5);
-      margin-top: 6px;
-      position: relative;
-      overflow: hidden;
-    }
-    .cover-art-box {
-      position: relative;
-      width: 250px;
-      height: 250px;
-      margin-bottom: 20px;
-    }
-    .cover-art {
-      width: 100%;
-      height: 100%;
-      border-radius: 18px;
-      object-fit: cover;
-      box-shadow: 0 14px 32px rgba(0,0,0,0.65);
-      background: #1c1c1e;
-    }
-    .track-title { font-size: 21px; font-weight: 700; text-align: center; margin-bottom: 4px; max-width: 90%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -0.3px; }
-    .track-artist { font-size: 15px; color: var(--subtext); text-align: center; margin-bottom: 12px; max-width: 90%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .track-meta-row { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
-    .audio-quality-tag {
-      font-size: 11px;
-      background: rgba(250, 45, 72, 0.15);
-      color: #ff3b30;
-      padding: 3px 12px;
-      border-radius: 20px;
-      font-weight: 600;
-      border: 1px solid rgba(250, 45, 72, 0.3);
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      gap: 4px;
-    }
-    .btn-fav { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--subtext); transition: transform 0.15s; }
-    .btn-fav.active { color: var(--accent); transform: scale(1.15); }
-
-    .progress-bar-container { width: 100%; margin-bottom: 18px; }
-    .progress-slider {
-      width: 100%;
-      height: 6px;
-      -webkit-appearance: none;
-      background: rgba(255,255,255,0.18);
-      border-radius: 3px;
-      outline: none;
-    }
-    .progress-slider::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: #fff;
-      cursor: pointer;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.5);
-    }
-    .time-labels { display: flex; justify-content: space-between; font-size: 12px; color: var(--subtext); margin-top: 6px; }
-
-    .controls { display: flex; align-items: center; justify-content: center; gap: 34px; width: 100%; margin-top: 6px; }
-    .ctrl-btn { background: none; border: none; color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 26px; transition: transform 0.1s; }
-    .ctrl-btn:active { transform: scale(0.9); }
-    .play-btn {
-      width: 66px;
-      height: 66px;
-      background: #fff;
-      color: #000;
-      border-radius: 50%;
-      font-size: 28px;
-      box-shadow: 0 6px 20px rgba(255,255,255,0.22);
-    }
-    .device-pill {
-      font-size: 12px;
-      color: var(--subtext);
-      background: rgba(255,255,255,0.06);
-      padding: 6px 14px;
+      background: #e3e3e8;
+      padding: 5px 11px;
       border-radius: 14px;
-      margin-top: 20px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      cursor: pointer;
-    }
-
-    /* ================================================= */
-    /* Search Box & Category Filters                     */
-    /* ================================================= */
-    .search-input-box {
-      display: flex;
-      align-items: center;
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 12px;
-      padding: 8px 12px;
-      margin-bottom: 10px;
-      gap: 8px;
-    }
-    .search-input-box input {
-      background: transparent;
-      border: none;
-      outline: none;
-      color: #fff;
-      font-size: 16px;
-      flex: 1;
-    }
-    .btn-clear { background: none; border: none; color: var(--subtext); font-size: 16px; cursor: pointer; padding: 2px 6px; }
-    .btn-search {
-      background: var(--accent);
-      border: none;
-      color: #fff;
-      padding: 6px 14px;
-      border-radius: 8px;
-      font-weight: 600;
-      cursor: pointer;
-    }
-    .quick-history-bar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      overflow-x: auto;
-      scrollbar-width: none;
-      margin-bottom: 12px;
-    }
-    .quick-history-bar::-webkit-scrollbar { display: none; }
-    .quick-chip {
       font-size: 12px;
-      color: var(--subtext);
-      background: rgba(255,255,255,0.06);
-      padding: 4px 10px;
-      border-radius: 12px;
-      white-space: nowrap;
+      font-weight: 600;
+      color: #3a3a3c;
       cursor: pointer;
-    }
-    .chips-bar {
-      display: flex;
-      gap: 8px;
-      overflow-x: auto;
-      padding-bottom: 8px;
-      margin-bottom: 12px;
-      scrollbar-width: none;
-    }
-    .chips-bar::-webkit-scrollbar { display: none; }
-    .chip {
-      padding: 5px 14px;
-      border-radius: 16px;
-      background: rgba(255,255,255,0.08);
-      font-size: 13px;
-      font-weight: 500;
-      color: var(--subtext);
-      white-space: nowrap;
-      cursor: pointer;
-      border: 1px solid transparent;
       transition: all 0.2s;
     }
-    .chip.active {
-      background: var(--accent);
-      color: #fff;
-      font-weight: 600;
+    .status-badge:active {
+      transform: scale(0.96);
+    }
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #8e8e93;
+    }
+    .status-dot.active {
+      background: var(--green);
+      box-shadow: 0 0 8px rgba(52, 199, 89, 0.6);
     }
 
-    /* Section Headers */
-    .section-title {
+    /* Tab content views */
+    .tab-content {
+      display: none;
+      padding: 14px 16px;
+      flex: 1;
+      position: relative;
+    }
+    .tab-content.active {
+      display: block;
+      animation: fadeIn 0.2s ease-out;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(4px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* Cards / Grouped Tables (iOS style) */
+    .settings-group, .card-box {
+      background: var(--card-bg);
+      border-radius: 14px;
+      padding: 16px;
+      margin-bottom: 14px;
+      box-shadow: var(--card-shadow);
+      border: 1px solid var(--card-border);
+    }
+
+    .settings-title {
       font-size: 16px;
       font-weight: 700;
-      margin: 16px 0 10px;
+      letter-spacing: -0.2px;
+      margin-bottom: 12px;
       display: flex;
       align-items: center;
       justify-content: space-between;
-      letter-spacing: -0.2px;
+      color: var(--text);
     }
-    .section-title span { color: var(--subtext); font-size: 13px; font-weight: normal; }
 
-    /* Artists Card */
-    .artist-card {
+    .setting-row {
       display: flex;
+      justify-content: space-between;
       align-items: center;
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 14px;
-      padding: 12px 14px;
-      margin-bottom: 10px;
-      cursor: pointer;
-      gap: 14px;
-      transition: background 0.15s, transform 0.1s;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--separator);
     }
-    .artist-card:active { background: var(--card-hover); transform: scale(0.98); }
-    .artist-card img { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; }
-    .artist-card-info { flex: 1; overflow: hidden; }
-    .artist-card-name { font-size: 16px; font-weight: 600; }
-    .artist-card-desc { font-size: 13px; color: var(--subtext); margin-top: 3px; }
-    .arrow-icon { color: var(--subtext); font-size: 18px; }
+    .setting-row:last-child {
+      border-bottom: none;
+    }
 
-    /* Albums Grid */
-    .albums-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 12px;
-      margin-bottom: 14px;
-    }
-    .album-card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 14px;
-      padding: 10px;
-      cursor: pointer;
-      display: flex;
-      flex-direction: column;
-      transition: background 0.15s, transform 0.1s;
-    }
-    .album-card:active { background: var(--card-hover); transform: scale(0.97); }
-    .album-card img { width: 100%; aspect-ratio: 1; border-radius: 10px; object-fit: cover; margin-bottom: 8px; background: #222; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
-    .album-card-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .album-card-sub { font-size: 12px; color: var(--subtext); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-
-    /* Songs List */
-    .song-list { display: flex; flex-direction: column; gap: 8px; }
-    .song-item {
-      display: flex;
-      align-items: center;
-      padding: 9px 12px;
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 12px;
-      cursor: pointer;
-      gap: 12px;
-      transition: background 0.15s, transform 0.1s;
-    }
-    .song-item:active { background: var(--card-hover); transform: scale(0.98); }
-    .song-item img { width: 46px; height: 46px; border-radius: 8px; object-fit: cover; background: #222; }
-    .song-num { font-size: 13px; color: var(--subtext); width: 22px; text-align: center; }
-    .song-info { flex: 1; overflow: hidden; }
-    .song-title { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .song-sub { font-size: 12px; color: var(--subtext); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .song-actions { display: flex; align-items: center; gap: 10px; }
-    .song-play { color: var(--accent); font-size: 18px; }
-
-    /* ================================================= */
-    /* Detail View Container (Overlay / Sub-page)        */
-    /* ================================================= */
-    .detail-view { display: none; padding: 4px 0; }
-    .detail-view.active { display: block; animation: fadeIn 0.2s ease; }
-    .nav-back-bar {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      margin-bottom: 12px;
-      color: var(--accent);
-      cursor: pointer;
+    .setting-label {
       font-size: 15px;
-      font-weight: 600;
+      font-weight: 500;
+      color: var(--text);
     }
-    .detail-hero {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 18px;
-      padding: 16px;
-      display: flex;
-      gap: 16px;
-      align-items: center;
-      margin-bottom: 16px;
-    }
-    .detail-hero img { width: 104px; height: 104px; border-radius: 12px; object-fit: cover; box-shadow: 0 6px 18px rgba(0,0,0,0.5); }
-    .detail-hero-info { flex: 1; overflow: hidden; }
-    .detail-hero-title { font-size: 18px; font-weight: 700; margin-bottom: 4px; letter-spacing: -0.3px; }
-    .detail-hero-sub { font-size: 13px; color: var(--subtext); margin-bottom: 12px; }
-    .btn-play-all {
-      background: var(--accent);
-      border: none;
-      color: #fff;
-      padding: 7px 16px;
-      border-radius: 20px;
-      font-size: 13px;
-      font-weight: 600;
-      cursor: pointer;
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
+    .setting-desc {
+      font-size: 12.5px;
+      color: var(--subtext);
+      margin-top: 2px;
+      line-height: 1.4;
     }
 
-    /* ================================================= */
-    /* Telemetry Modal Sheet (Audiophile Path Inspector) */
-    /* ================================================= */
-    .modal-overlay {
-      position: fixed;
-      top: 0; left: 0; right: 0; bottom: 0;
-      background: rgba(0,0,0,0.7);
-      backdrop-filter: blur(10px);
-      z-index: 200;
-      display: none;
-      align-items: flex-end;
-    }
-    .modal-overlay.active { display: flex; }
-    .modal-sheet {
-      background: #1c1c1e;
-      border-top: 1px solid var(--card-border);
-      border-radius: 24px 24px 0 0;
-      padding: 22px 20px 34px;
-      width: 100%;
-      max-height: 80vh;
-      overflow-y: auto;
-      animation: slideUp 0.25s ease;
-    }
-    @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
-    .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
-    .modal-title { font-size: 18px; font-weight: 700; }
-    .modal-close { background: rgba(255,255,255,0.1); border: none; color: #fff; border-radius: 50%; width: 28px; height: 28px; font-size: 14px; cursor: pointer; }
-    .telemetry-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
-    .telemetry-label { font-size: 14px; color: var(--subtext); }
-    .telemetry-val { font-size: 14px; font-weight: 600; color: #fff; text-align: right; }
-
-    /* ================================================= */
-    /* Global Persistent Floating Mini-Player            */
-    /* ================================================= */
-    .mini-player {
-      position: fixed;
-      bottom: var(--nav-height);
-      left: 10px;
-      right: 10px;
-      height: var(--mini-player-height);
-      background: rgba(30, 30, 32, 0.88);
-      backdrop-filter: blur(25px);
-      -webkit-backdrop-filter: blur(25px);
-      border: 1px solid rgba(255,255,255,0.1);
-      border-radius: 14px;
-      display: flex;
-      align-items: center;
-      padding: 6px 14px 6px 8px;
-      z-index: 90;
-      box-shadow: 0 6px 20px rgba(0,0,0,0.5);
-      cursor: pointer;
-      transition: transform 0.2s;
-    }
-    .mini-player img { width: 42px; height: 42px; border-radius: 8px; object-fit: cover; margin-right: 10px; background: #222; }
-    .mini-player-info { flex: 1; overflow: hidden; }
-    .mini-player-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .mini-player-sub { font-size: 12px; color: var(--subtext); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
-    .mini-player-ctrls { display: flex; align-items: center; gap: 14px; }
-    .mini-btn { background: none; border: none; color: #fff; font-size: 20px; cursor: pointer; }
-
-    /* ================================================= */
-    /* Settings Tab                                      */
-    /* ================================================= */
-    .settings-group {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 16px;
-      padding: 18px;
-      margin-bottom: 14px;
-    }
-    .settings-title { font-size: 16px; font-weight: 700; margin-bottom: 14px; display: flex; align-items: center; justify-content: space-between; }
-    .setting-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
-    .setting-row:last-child { border-bottom: none; }
-    .setting-label { font-size: 15px; font-weight: 500; }
-    .setting-desc { font-size: 12px; color: var(--subtext); margin-top: 2px; }
-
-    /* Switch */
+    /* Switch (iOS Toggle) */
     .switch {
       position: relative;
       display: inline-block;
-      width: 48px;
-      height: 28px;
+      width: 50px;
+      height: 30px;
+      flex-shrink: 0;
     }
     .switch input { opacity: 0; width: 0; height: 0; }
     .slider {
       position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-      background-color: #39393d;
-      transition: .3s;
-      border-radius: 28px;
+      background-color: #e5e5ea;
+      transition: .25s ease;
+      border-radius: 30px;
     }
     .slider:before {
-      position: absolute; content: ""; height: 22px; width: 22px; left: 3px; bottom: 3px;
-      background-color: white;
-      transition: .3s;
+      position: absolute; content: ""; height: 26px; width: 26px; left: 2px; bottom: 2px;
+      background-color: #ffffff;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+      transition: .25s ease;
       border-radius: 50%;
     }
-    input:checked + .slider { background-color: var(--highlight); }
+    input:checked + .slider { background-color: var(--green); }
     input:checked + .slider:before { transform: translateX(20px); }
 
-    /* Select */
-    select {
-      background: #2c2c2e;
-      border: 1px solid var(--card-border);
-      color: #fff;
+    /* Inputs & Selects */
+    select, .setting-input {
+      background: #f2f2f7;
+      border: 1px solid var(--separator);
+      color: var(--text);
       padding: 8px 12px;
       border-radius: 8px;
       font-size: 14px;
       outline: none;
-      max-width: 220px;
+      font-family: inherit;
+    }
+    select:focus, .setting-input:focus {
+      border-color: var(--accent);
+      background: #ffffff;
     }
 
-    /* Sub-tabs inside Settings (三个切换) */
+    /* Sub-tabs inside Settings (iOS Segmented Control) */
     .sub-tab-strip {
       display: flex;
-      background: rgba(255, 255, 255, 0.08);
-      border-radius: 12px;
-      padding: 4px;
-      margin-bottom: 16px;
-      gap: 4px;
+      background: #e3e3e8;
+      border-radius: 10px;
+      padding: 3px;
+      margin-bottom: 14px;
+      gap: 2px;
     }
     .sub-tab-btn {
       flex: 1;
-      padding: 10px 4px;
+      padding: 8px 4px;
       border: none;
       background: transparent;
-      color: var(--subtext);
+      color: #3a3a3c;
       font-size: 13.5px;
-      font-weight: 600;
-      border-radius: 9px;
+      font-weight: 500;
+      border-radius: 8px;
       cursor: pointer;
       transition: all 0.2s cubic-bezier(0.2, 0.9, 0.4, 1);
       text-align: center;
       white-space: nowrap;
     }
     .sub-tab-btn.active {
-      background: #2c2c2e;
-      color: #fff;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+      background: #ffffff;
+      color: #000000;
+      font-weight: 600;
+      box-shadow: 0 2px 6px rgba(0,0,0,0.12);
     }
     .sub-tab-panel {
       display: none;
     }
     .sub-tab-panel.active {
       display: block;
-      animation: fadeIn 0.25s ease-out;
+      animation: fadeIn 0.2s ease-out;
     }
-    .setting-input {
-      background: #2c2c2e;
-      border: 1px solid var(--card-border);
-      color: #fff;
-      padding: 8px 12px;
-      border-radius: 8px;
-      font-size: 14px;
-      outline: none;
-      box-sizing: border-box;
-    }
+
+    /* Buttons */
     .btn-action {
-      background: rgba(255, 255, 255, 0.12);
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      color: #fff;
-      padding: 7px 14px;
+      background: #e5e5ea;
+      border: 1px solid #d1d1d6;
+      color: var(--text);
+      padding: 7px 13px;
       border-radius: 8px;
       font-size: 13px;
       font-weight: 600;
       cursor: pointer;
-      transition: background 0.2s;
+      transition: all 0.15s;
       white-space: nowrap;
     }
-    .btn-action:hover {
-      background: rgba(255, 255, 255, 0.2);
+    .btn-action:active {
+      background: #d8d8dc;
+      transform: scale(0.97);
     }
+
     .btn-row {
       display: flex;
       gap: 10px;
@@ -556,55 +272,66 @@
     }
     .btn-primary {
       flex: 1;
-      background: var(--highlight);
-      color: #fff;
+      background: var(--accent);
+      color: #ffffff;
       border: none;
       padding: 12px 16px;
-      border-radius: 10px;
+      border-radius: 12px;
       font-size: 14.5px;
       font-weight: 600;
       cursor: pointer;
-      transition: opacity 0.2s;
+      transition: all 0.15s;
+      box-shadow: 0 3px 10px rgba(250, 45, 72, 0.25);
     }
-    .btn-primary:active { opacity: 0.8; }
+    .btn-primary:active {
+      background: var(--accent-hover);
+      transform: scale(0.98);
+    }
+
     .btn-secondary {
       flex: 1;
-      background: #2c2c2e;
-      color: #fff;
-      border: 1px solid var(--card-border);
+      background: #e5e5ea;
+      color: var(--text);
+      border: 1px solid var(--separator);
       padding: 12px 16px;
-      border-radius: 10px;
+      border-radius: 12px;
       font-size: 14.5px;
       font-weight: 600;
       cursor: pointer;
-      transition: background 0.2s;
+      transition: all 0.15s;
     }
-    .btn-secondary:active { background: #38383a; }
+    .btn-secondary:active {
+      background: #d8d8dc;
+      transform: scale(0.98);
+    }
+
     .hint-box {
-      background: rgba(255, 255, 255, 0.04);
-      border-left: 3px solid var(--highlight);
+      background: #f8f8fa;
+      border-left: 3px solid var(--accent);
       padding: 10px 12px;
       border-radius: 6px;
       font-size: 12.5px;
-      color: #a0a0a5;
+      color: #555558;
       line-height: 1.5;
       margin-top: 10px;
     }
+
+    /* Toast */
     .toast {
       position: fixed;
-      top: 24px;
+      top: 20px;
       left: 50%;
-      transform: translateX(-50%) translateY(-30px);
-      background: rgba(30, 30, 32, 0.95);
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      color: #fff;
-      padding: 10px 20px;
-      border-radius: 20px;
+      transform: translateX(-50%) translateY(-40px);
+      background: rgba(255, 255, 255, 0.96);
+      border: 1px solid rgba(0, 0, 0, 0.1);
+      color: #000000;
+      padding: 10px 22px;
+      border-radius: 24px;
       font-size: 14px;
-      font-weight: 500;
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-      backdrop-filter: blur(20px);
-      -webkit-backdrop-filter: blur(20px);
+      font-weight: 600;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.14);
+      backdrop-filter: blur(25px);
+      -webkit-backdrop-filter: blur(25px);
       z-index: 9999;
       opacity: 0;
       pointer-events: none;
@@ -616,6 +343,482 @@
     }
 
     /* ================================================= */
+    /* Tab 1: Now Playing View (Apple Music iOS Style)   */
+    /* ================================================= */
+    .player-container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      max-width: 440px;
+      margin: 0 auto;
+      padding: 10px 4px;
+    }
+
+    .artwork-container {
+      width: 100%;
+      max-width: 320px;
+      aspect-ratio: 1;
+      border-radius: 18px;
+      box-shadow: 0 14px 34px rgba(0, 0, 0, 0.18);
+      overflow: hidden;
+      margin-bottom: 24px;
+      background: #e1e1e6;
+    }
+    .artwork-container img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+    }
+
+    .track-details {
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 12px;
+    }
+    .track-info-col {
+      flex: 1;
+      min-width: 0;
+      padding-right: 12px;
+    }
+    .track-title {
+      font-size: 21px;
+      font-weight: 700;
+      letter-spacing: -0.3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: var(--text);
+    }
+    .track-artist {
+      font-size: 16px;
+      color: var(--subtext);
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 3px;
+    }
+
+    .btn-fav {
+      background: none;
+      border: none;
+      font-size: 24px;
+      cursor: pointer;
+      padding: 4px;
+      transition: transform 0.2s;
+      flex-shrink: 0;
+    }
+    .btn-fav:active { transform: scale(1.2); }
+
+    .track-meta-row {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .audio-quality-tag {
+      background: #e3e3e8;
+      color: #3a3a3c;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 4px 9px;
+      border-radius: 6px;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      transition: all 0.2s;
+    }
+    .audio-quality-tag:active { background: #d0d0d6; }
+
+    /* Progress bar */
+    .progress-bar-container {
+      width: 100%;
+      margin-bottom: 22px;
+    }
+    .progress-slider {
+      width: 100%;
+      -webkit-appearance: none;
+      height: 5px;
+      border-radius: 5px;
+      background: #d1d1d6;
+      outline: none;
+      cursor: pointer;
+      transition: height 0.1s;
+    }
+    .progress-slider:active { height: 7px; }
+    .progress-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #000000;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+      cursor: pointer;
+    }
+    .time-labels {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--subtext);
+      margin-top: 6px;
+      font-variant-numeric: tabular-nums;
+      font-weight: 500;
+    }
+
+    /* Transport Controls */
+    .controls {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 36px;
+      margin-bottom: 24px;
+    }
+    .btn-control {
+      background: none;
+      border: none;
+      font-size: 26px;
+      color: #000000;
+      cursor: pointer;
+      transition: transform 0.15s, opacity 0.15s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .btn-control:active {
+      transform: scale(0.85);
+      opacity: 0.6;
+    }
+    .btn-play {
+      width: 66px;
+      height: 66px;
+      border-radius: 50%;
+      background: #000000;
+      color: #ffffff;
+      font-size: 28px;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
+    }
+    .btn-play:active {
+      background: #222224;
+      transform: scale(0.92);
+    }
+
+    /* Volume bar */
+    .volume-container {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 0 6px;
+      color: var(--subtext);
+      font-size: 14px;
+    }
+    .volume-slider {
+      flex: 1;
+      -webkit-appearance: none;
+      height: 5px;
+      border-radius: 5px;
+      background: #d1d1d6;
+      outline: none;
+    }
+    .volume-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      background: #ffffff;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+      cursor: pointer;
+    }
+
+    /* ================================================= */
+    /* Tab 2 & 3: Search, Chips, Library Lists           */
+    /* ================================================= */
+    .search-box {
+      display: flex;
+      align-items: center;
+      background: #e3e3e8;
+      border-radius: 12px;
+      padding: 9px 12px;
+      margin-bottom: 12px;
+      gap: 8px;
+    }
+    .search-input {
+      flex: 1;
+      border: none;
+      background: transparent;
+      font-size: 16px;
+      color: var(--text);
+      outline: none;
+      font-family: inherit;
+    }
+    .search-input::placeholder { color: #8a8a8e; }
+    .search-clear {
+      background: #8e8e93;
+      color: #fff;
+      border: none;
+      border-radius: 50%;
+      width: 18px;
+      height: 18px;
+      font-size: 11px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+
+    .chips-bar {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 6px;
+      margin-bottom: 14px;
+      scrollbar-width: none;
+    }
+    .chips-bar::-webkit-scrollbar { display: none; }
+    .chip {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      color: var(--subtext);
+      padding: 7px 15px;
+      border-radius: 18px;
+      font-size: 13.5px;
+      font-weight: 600;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: all 0.2s;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.03);
+    }
+    .chip.active {
+      background: var(--accent);
+      color: #ffffff;
+      border-color: var(--accent);
+      box-shadow: 0 2px 8px rgba(250, 45, 72, 0.28);
+    }
+
+    .section-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin: 18px 0 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .section-title span {
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--subtext);
+    }
+
+    /* List items */
+    .song-list {
+      background: var(--card-bg);
+      border-radius: 14px;
+      border: 1px solid var(--card-border);
+      box-shadow: var(--card-shadow);
+      overflow: hidden;
+      margin-bottom: 14px;
+    }
+    .song-item {
+      display: flex;
+      align-items: center;
+      padding: 11px 14px;
+      border-bottom: 1px solid var(--separator);
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    .song-item:last-child { border-bottom: none; }
+    .song-item:active { background: #f2f2f7; }
+    .song-item img {
+      width: 44px;
+      height: 44px;
+      border-radius: 8px;
+      object-fit: cover;
+      margin-right: 12px;
+      background: #e5e5ea;
+    }
+    .song-num {
+      width: 24px;
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--subtext);
+      text-align: center;
+      margin-right: 8px;
+    }
+    .song-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .song-title {
+      font-size: 15px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .song-sub {
+      font-size: 12.5px;
+      color: var(--subtext);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+    .song-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-left: 10px;
+      flex-shrink: 0;
+    }
+    .song-play {
+      color: var(--accent);
+      font-size: 15px;
+      font-weight: 700;
+    }
+
+    /* Albums Grid */
+    .albums-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 14px;
+      margin-bottom: 14px;
+    }
+    .album-card {
+      background: var(--card-bg);
+      border-radius: 14px;
+      padding: 10px;
+      border: 1px solid var(--card-border);
+      box-shadow: var(--card-shadow);
+      cursor: pointer;
+      transition: transform 0.15s;
+    }
+    .album-card:active { transform: scale(0.97); }
+    .album-card img {
+      width: 100%;
+      aspect-ratio: 1;
+      border-radius: 10px;
+      object-fit: cover;
+      background: #e5e5ea;
+      margin-bottom: 8px;
+    }
+    .album-card-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .album-card-sub {
+      font-size: 12px;
+      color: var(--subtext);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 2px;
+    }
+
+    /* Detail View */
+    .detail-view { display: none; padding: 4px 0; }
+    .detail-view.active { display: block; animation: fadeIn 0.2s ease-out; }
+    .detail-back {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--accent);
+      font-size: 15px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-bottom: 14px;
+    }
+    .detail-hero {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 18px;
+      align-items: center;
+    }
+    .detail-hero img {
+      width: 110px;
+      height: 110px;
+      border-radius: 12px;
+      object-fit: cover;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.12);
+      background: #e5e5ea;
+      flex-shrink: 0;
+    }
+    .detail-hero-info { flex: 1; min-width: 0; }
+    .detail-hero-title { font-size: 19px; font-weight: 700; color: var(--text); margin-bottom: 4px; }
+    .detail-hero-sub { font-size: 14px; color: var(--subtext); margin-bottom: 12px; }
+
+    /* ================================================= */
+    /* Floating Mini-Player                              */
+    /* ================================================= */
+    .mini-player {
+      position: fixed;
+      bottom: calc(var(--nav-height) + 8px);
+      left: 12px;
+      right: 12px;
+      height: 58px;
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(25px);
+      -webkit-backdrop-filter: blur(25px);
+      border-radius: 14px;
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      display: flex;
+      align-items: center;
+      padding: 6px 14px 6px 8px;
+      z-index: 90;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.08);
+      cursor: pointer;
+      transition: transform 0.15s;
+    }
+    .mini-player:active { transform: scale(0.99); }
+    .mini-player img {
+      width: 44px;
+      height: 44px;
+      border-radius: 8px;
+      object-fit: cover;
+      margin-right: 10px;
+      background: #e5e5ea;
+    }
+    .mini-player-info {
+      flex: 1;
+      min-width: 0;
+    }
+    .mini-player-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .mini-player-sub {
+      font-size: 12px;
+      color: var(--subtext);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .mini-player-btn {
+      background: none;
+      border: none;
+      font-size: 22px;
+      color: var(--text);
+      padding: 6px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* ================================================= */
     /* Bottom Navigation Bar                             */
     /* ================================================= */
     .nav-bar {
@@ -624,10 +827,10 @@
       left: 0;
       right: 0;
       height: var(--nav-height);
-      background: rgba(14, 14, 16, 0.94);
+      background: var(--nav-bg);
       backdrop-filter: blur(25px);
       -webkit-backdrop-filter: blur(25px);
-      border-top: 1px solid var(--card-border);
+      border-top: 1px solid var(--separator);
       display: flex;
       justify-content: space-around;
       align-items: center;
@@ -640,25 +843,86 @@
       justify-content: center;
       color: var(--subtext);
       cursor: pointer;
-      font-size: 11px;
+      font-size: 10.5px;
       font-weight: 600;
       gap: 3px;
       flex: 1;
-      height: 100%;
       transition: color 0.15s;
     }
-    .nav-item.active { color: var(--accent); }
-    .nav-icon { font-size: 19px; }
+    .nav-item.active {
+      color: var(--accent);
+    }
+    .nav-icon {
+      font-size: 21px;
+    }
+
+    /* Telemetry Modal Sheet */
+    .modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.4);
+      backdrop-filter: blur(8px);
+      z-index: 200;
+      display: none;
+      align-items: flex-end;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-sheet {
+      background: #ffffff;
+      border-radius: 20px 20px 0 0;
+      padding: 16px 20px 32px;
+      width: 100%;
+      max-height: 85vh;
+      overflow-y: auto;
+      animation: slideUp 0.25s ease-out;
+      box-shadow: 0 -8px 30px rgba(0,0,0,0.15);
+    }
+    @keyframes slideUp {
+      from { transform: translateY(100%); }
+      to { transform: translateY(0); }
+    }
+    .modal-grabber {
+      width: 36px;
+      height: 5px;
+      background: #d1d1d6;
+      border-radius: 3px;
+      margin: 0 auto 14px;
+    }
+    .modal-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    .modal-title { font-size: 17px; font-weight: 700; color: var(--text); }
+    .modal-close {
+      background: #e5e5ea;
+      border: none;
+      color: var(--text);
+      border-radius: 50%;
+      width: 28px;
+      height: 28px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .telemetry-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 12px 0;
+      border-bottom: 1px solid var(--separator);
+    }
+    .telemetry-row:last-child { border-bottom: none; }
+    .telemetry-label { font-size: 14px; color: var(--subtext); }
+    .telemetry-val { font-size: 14px; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
   </style>
 </head>
 <body>
 
-  <!-- Ambient Glow -->
-  <div class="ambient-glow" id="ambientGlow"></div>
-
-  <!-- Header -->
-  <div class="header">
-    <div class="brand">AM<span>Exclusive</span></div>
+  <!-- Top App Bar -->
+  <div class="top-bar">
+    <div class="brand">Apple<span>Music</span></div>
     <div class="status-badge" onclick="openTelemetryModal()">
       <div class="status-dot" id="statusDot"></div>
       <span id="statusText">检测中...</span>
@@ -669,15 +933,21 @@
   <!-- Tab 1: 正在播放 (Now Playing)                     -->
   <!-- ================================================= -->
   <div class="tab-content active" id="tab-player">
-    <div class="player-card">
-      <div class="cover-art-box">
-        <img src="/api/v2/playback/artwork" class="cover-art" id="playerCover" alt="Artwork" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'250\' height=\'250\' viewBox=\'0 0 250 250\'><rect fill=\'%231c1c1e\' width=\'250\' height=\'250\'/><text fill=\'%23555\' font-size=\'48\' x=\'50%25\' y=\'50%25\' dominant-baseline=\'middle\' text-anchor=\'middle\'>🎵</text></svg>'">
+    <div class="player-container">
+      <div class="artwork-container">
+        <img id="playerCover" src="/api/v2/playback/artwork" alt="Album Cover" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'320\' height=\'320\'><rect fill=\'%23e5e5ea\' width=\'320\' height=\'320\'/><text x=\'50%25\' y=\'50%25\' fill=\'%238a8a8e\' font-size=\'48\' text-anchor=\'middle\' dy=\'.3em\'>🎵</text></svg>'">
       </div>
-      <div class="track-title" id="playerTitle">未播放</div>
-      <div class="track-artist" id="playerArtist">打开 Apple Music 播放</div>
-      <div class="track-meta-row">
-        <div class="audio-quality-tag" id="playerQuality" onclick="openTelemetryModal()">⚡ Hi-Res Lossless</div>
+
+      <div class="track-details">
+        <div class="track-info-col">
+          <div class="track-title" id="playerTitle">未在播放</div>
+          <div class="track-artist" id="playerArtist">打开 Apple Music 播放音乐</div>
+        </div>
         <button class="btn-fav" id="btnPlayerFav" onclick="togglePlayerFavorite()">🤍</button>
+      </div>
+
+      <div class="track-meta-row">
+        <div class="audio-quality-tag" id="playerQuality" onclick="openTelemetryModal()">⚡ Lossless</div>
       </div>
 
       <div class="progress-bar-container">
@@ -689,40 +959,35 @@
       </div>
 
       <div class="controls">
-        <button class="ctrl-btn" onclick="apiControl('previous')">⏮</button>
-        <button class="ctrl-btn play-btn" id="btnPlay" onclick="apiControl('toggle')">▶</button>
-        <button class="ctrl-btn" onclick="apiControl('next')">⏭</button>
+        <button class="btn-control" onclick="apiControl('previous')">⏮</button>
+        <button class="btn-control btn-play" id="btnPlay" onclick="apiControl('playpause')">▶</button>
+        <button class="btn-control" onclick="apiControl('next')">⏭</button>
       </div>
 
-      <div class="device-pill" id="lblPlayerDevice" onclick="switchTab('settings', document.querySelectorAll('.nav-item')[3])">
-        <span>🔊</span><span id="lblPlayerDeviceName">正在加载输出设备...</span>
+      <div class="volume-container">
+        <span>🔈</span>
+        <input type="range" class="volume-slider" id="volumeSlider" min="0" max="100" value="100" onchange="setVolume(this.value)">
+        <span>🔊</span>
+      </div>
+
+      <div class="card-box" style="width:100%;margin-top:20px;padding:12px 14px;">
+        <div style="font-size:12px;color:var(--subtext);margin-bottom:2px;">物理独占输出链路</div>
+        <div style="font-size:14px;font-weight:600;color:var(--text);" id="lblPlayerDeviceName">正在加载 DAC...</div>
       </div>
     </div>
   </div>
 
   <!-- ================================================= -->
-  <!-- Tab 2: 曲库搜索 (Search)                           -->
+  <!-- Tab 2: 曲库搜索 (Search)                          -->
   <!-- ================================================= -->
   <div class="tab-content" id="tab-search">
     <div id="searchMainView">
-      <div class="search-input-box">
-        <span>🔍</span>
-        <input type="text" id="searchInput" placeholder="搜索五月天、周杰伦、Taylor Swift..." onkeydown="if(event.key==='Enter')doSearch()">
-        <button class="btn-clear" onclick="clearSearch()">✕</button>
-        <button class="btn-search" onclick="doSearch()">搜索</button>
+      <div class="search-box">
+        <span style="color:#8a8a8e;font-size:16px;">🔍</span>
+        <input type="text" class="search-input" id="searchInput" placeholder="搜索歌曲、专辑、艺人..." onkeydown="if(event.key==='Enter')doSearch()">
+        <button class="search-clear" onclick="clearSearch()">✕</button>
       </div>
 
-      <!-- Quick History Suggestions -->
-      <div class="quick-history-bar">
-        <span style="font-size:11px;color:var(--subtext);margin-right:2px;">常用:</span>
-        <div class="quick-chip" onclick="quickSearch('五月天')">五月天</div>
-        <div class="quick-chip" onclick="quickSearch('周杰伦')">周杰伦</div>
-        <div class="quick-chip" onclick="quickSearch('Taylor Swift')">Taylor Swift</div>
-        <div class="quick-chip" onclick="quickSearch('林宥嘉')">林宥嘉</div>
-        <div class="quick-chip" onclick="quickSearch('陈奕迅')">陈奕迅</div>
-      </div>
-
-      <!-- Category Filter Chips -->
       <div class="chips-bar">
         <div class="chip active" onclick="setSearchFilter('all', this)">全部</div>
         <div class="chip" onclick="setSearchFilter('songs', this)">单曲</div>
@@ -731,83 +996,82 @@
         <div class="chip" onclick="setSearchFilter('playlists', this)">歌单</div>
       </div>
 
-      <!-- Results Container -->
       <div id="searchResults">
-        <div style="text-align:center;color:var(--subtext);padding:40px 0;">输入歌手、歌曲或专辑搜索 Apple Music 无损曲库</div>
+        <div class="section-title">热门搜索推荐</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:20px;">
+          <button class="btn-action" onclick="quickSearch('五月天')">五月天</button>
+          <button class="btn-action" onclick="quickSearch('周杰伦')">周杰伦</button>
+          <button class="btn-action" onclick="quickSearch('Taylor Swift')">Taylor Swift</button>
+          <button class="btn-action" onclick="quickSearch('陈奕迅')">陈奕迅</button>
+          <button class="btn-action" onclick="quickSearch('Hans Zimmer')">Hans Zimmer</button>
+        </div>
       </div>
     </div>
 
-    <!-- Detail View: Album Tracks -->
+    <!-- Album Detail Sub-view -->
     <div class="detail-view" id="albumDetailView">
-      <div class="nav-back-bar" onclick="hideDetailView()">
-        <span>‹ 返回搜索</span>
-      </div>
+      <div class="detail-back" onclick="hideDetailView()">‹ 返回搜索</div>
       <div class="detail-hero">
-        <img id="albHeroCover" src="" alt="Album Cover">
+        <img id="albHeroCover" src="">
         <div class="detail-hero-info">
-          <div class="detail-hero-title" id="albHeroTitle">专辑名称</div>
-          <div class="detail-hero-sub" id="albHeroArtist">歌手 · 年份</div>
-          <button class="btn-play-all" onclick="playCurrentAlbum()">▶ 播放整张专辑</button>
+          <div class="detail-hero-title" id="albHeroTitle">专辑</div>
+          <div class="detail-hero-sub" id="albHeroArtist">艺人</div>
+          <button class="btn-primary" style="padding:8px 16px;font-size:13.5px;" onclick="playCurrentAlbum()">▶ 播放全部</button>
         </div>
       </div>
-      <div class="section-title">曲目列表 <span id="albTrackCount"></span></div>
+      <div class="section-title">曲目列表 <span id="albTrackCount">共 0 首</span></div>
       <div class="song-list" id="albTrackList"></div>
     </div>
 
-    <!-- Detail View: Playlist Tracks -->
+    <!-- Playlist Detail Sub-view -->
     <div class="detail-view" id="playlistDetailView">
-      <div class="nav-back-bar" onclick="hideDetailView()">
-        <span>‹ 返回搜索</span>
-      </div>
+      <div class="detail-back" onclick="hideDetailView()">‹ 返回搜索</div>
       <div class="detail-hero">
-        <img id="plHeroCover" src="" alt="Playlist Cover">
+        <img id="plHeroCover" src="">
         <div class="detail-hero-info">
-          <div class="detail-hero-title" id="plHeroTitle">歌单名称</div>
-          <div class="detail-hero-sub" id="plHeroCurator">策展方 · 曲目数</div>
-          <button class="btn-play-all" onclick="playCurrentPlaylist()">▶ 播放歌单</button>
+          <div class="detail-hero-title" id="plHeroTitle">歌单</div>
+          <div class="detail-hero-sub" id="plHeroCurator">Apple Music</div>
+          <button class="btn-primary" style="padding:8px 16px;font-size:13.5px;" onclick="playCurrentPlaylist()">▶ 播放全部</button>
         </div>
       </div>
-      <div class="section-title">歌单歌曲</div>
+      <div class="section-title">歌单曲目</div>
       <div class="song-list" id="plTrackList"></div>
     </div>
 
-    <!-- Detail View: Artist Page -->
+    <!-- Artist Detail Sub-view -->
     <div class="detail-view" id="artistDetailView">
-      <div class="nav-back-bar" onclick="hideDetailView()">
-        <span>‹ 返回搜索</span>
-      </div>
+      <div class="detail-back" onclick="hideDetailView()">‹ 返回搜索</div>
       <div class="detail-hero">
-        <img id="artHeroCover" style="border-radius:50%;" src="" alt="Artist Cover">
+        <img id="artHeroCover" src="" style="border-radius:50%;">
         <div class="detail-hero-info">
-          <div class="detail-hero-title" id="artHeroName">歌手名称</div>
-          <div class="detail-hero-sub" id="artHeroGenre">流派</div>
+          <div class="detail-hero-title" id="artHeroName">艺人</div>
+          <div class="detail-hero-sub" id="artHeroGenre">流行乐</div>
         </div>
       </div>
-      <div class="section-title">官方专辑列表 <span>点击进入专辑</span></div>
+      <div class="section-title">代表专辑</div>
       <div class="albums-grid" id="artAlbumsGrid"></div>
     </div>
   </div>
 
   <!-- ================================================= -->
-  <!-- Tab 3: 资料库 (Library)                           -->
+  <!-- Tab 3: 个人资料库 (Library)                       -->
   <!-- ================================================= -->
   <div class="tab-content" id="tab-library">
     <div class="chips-bar">
       <div class="chip active" onclick="switchLibrarySub('recent', this)">最近播放</div>
-      <div class="chip" onclick="switchLibrarySub('favorites', this)">我的收藏</div>
+      <div class="chip" onclick="switchLibrarySub('favorites', this)">我喜爱的音乐</div>
       <div class="chip" onclick="switchLibrarySub('albums', this)">历史专辑</div>
     </div>
-
     <div id="libContainer">
       <div style="text-align:center;color:var(--subtext);padding:30px 0;">正在同步个人资料库...</div>
     </div>
   </div>
 
   <!-- ================================================= -->
-  <!-- Tab 4: 独占设置 (Settings)                        -->
+  <!-- Tab 4: 独占设置 (Exclusive Settings)              -->
   <!-- ================================================= -->
   <div class="tab-content" id="tab-settings">
-    <!-- Header / Status Badge -->
+    <!-- Master Header Card -->
     <div class="settings-group">
       <div class="settings-title">
         <span>AMExclusive 独占音频引擎</span>
@@ -816,17 +1080,17 @@
           <span class="slider"></span>
         </label>
       </div>
-      <div class="setting-desc" id="lblStateDesc">状态: 正在同步配置...</div>
+      <div class="setting-desc" id="lblStateDesc">运行状态: 正在同步配置...</div>
       <div class="setting-row" style="margin-top:10px;padding-top:10px;">
         <div>
-          <div class="setting-label">当前端点与链路</div>
-          <div class="setting-desc" id="lblStreamFormat" style="color:var(--highlight);font-weight:600;">--</div>
+          <div class="setting-label">当前流格式与端点</div>
+          <div class="setting-desc" id="lblStreamFormat" style="color:var(--accent);font-weight:600;">--</div>
         </div>
         <button class="btn-action" onclick="openTelemetryModal()">⚡ 流透视监视器</button>
       </div>
     </div>
 
-    <!-- The Three Switches / Output Tabs (三个切换) -->
+    <!-- The Three Output Tabs (三个切换) -->
     <div class="sub-tab-strip">
       <button class="sub-tab-btn active" id="btnTabLocal" onclick="switchExclusiveTab(0)">● 本地播放</button>
       <button class="sub-tab-btn" id="btnTabNetwork" onclick="switchExclusiveTab(1)">网播播放</button>
@@ -1098,7 +1362,7 @@
 
         <div style="margin-top:14px;">
           <div class="setting-label" style="margin-bottom:6px;">已发现设备信息 (Discovered devices):</div>
-          <textarea id="txtRoonDiscovered" readonly rows="4" style="width:100%;box-sizing:border-box;background:#1e1e20;color:#aaa;border:1px solid #333;border-radius:8px;padding:8px;font-family:monospace;font-size:12px;resize:vertical;"></textarea>
+          <textarea id="txtRoonDiscovered" readonly rows="4" style="width:100%;box-sizing:border-box;background:#f8f8fa;color:#555;border:1px solid var(--separator);border-radius:8px;padding:8px;font-family:monospace;font-size:12px;resize:vertical;"></textarea>
         </div>
 
         <div class="btn-row">
@@ -1110,38 +1374,30 @@
 
     <!-- PWA Installation Instructions -->
     <div class="settings-group">
-      <div class="settings-title">独立 App 安装说明</div>
-      <div class="setting-desc" style="line-height:1.6;color:#ccc;">
-        • <b>iPhone / iPad (iOS)</b>：点击 Safari 浏览器底部的【分享】按钮，选择<b>「添加到主屏幕」</b>，即可作为独立 App 全屏运行，无任何浏览器地址栏。<br>
-        • <b>Android 手机</b>：点击浏览器菜单（右上角三点），选择<b>「安装应用」</b>或<b>「添加到主屏幕」</b>，桌面生成独立图标。
+      <div class="settings-title">添加到主屏幕 (独立 App 体验)</div>
+      <div class="setting-desc" style="line-height:1.6;color:#555;">
+        • <b>iPhone / iPad (iOS)</b>：点击 Safari 浏览器底部的【分享】按钮，选择<b>「添加到主屏幕」</b>，即可作为全屏独立 App 运行，享受沉浸式原生体验。<br>
+        • <b>Android 手机</b>：点击 Chrome / 浏览器右上角菜单，选择<b>「安装应用」</b>或<b>「添加到主屏幕」</b>。
       </div>
     </div>
   </div>
 
-  <div id="toastNotification" class="toast"></div>
-
-  <!-- ================================================= -->
-  <!-- Global Persistent Floating Mini-Player            -->
-  <!-- ================================================= -->
+  <!-- Global Persistent Floating Mini-Player -->
   <div class="mini-player" id="miniPlayer" style="display:none;" onclick="expandToPlayer()">
     <img id="miniCover" src="/api/v2/playback/artwork" alt="Mini Cover">
     <div class="mini-player-info">
       <div class="mini-player-title" id="miniTitle">未播放</div>
-      <div class="mini-player-sub" id="miniArtist">点击切换至完整播放器</div>
+      <div class="mini-player-sub" id="miniArtist">点击切换至播放器</div>
     </div>
-    <div class="mini-player-ctrls" onclick="event.stopPropagation()">
-      <button class="mini-btn" id="miniBtnPlay" onclick="apiControl('toggle')">▶</button>
-      <button class="mini-btn" onclick="apiControl('next')">⏭</button>
-    </div>
+    <button class="mini-player-btn" id="miniBtnPlay" onclick="event.stopPropagation(); apiControl('playpause')">▶</button>
   </div>
 
-  <!-- ================================================= -->
-  <!-- Audiophile Telemetry Sheet Modal                  -->
-  <!-- ================================================= -->
+  <!-- Audiophile Telemetry Sheet Modal -->
   <div class="modal-overlay" id="telemetryModal" onclick="closeTelemetryModal()">
     <div class="modal-sheet" onclick="event.stopPropagation()">
+      <div class="modal-grabber"></div>
       <div class="modal-header">
-        <div class="modal-title">⚡ 独占音频流透视监视器</div>
+        <div class="modal-title">⚡ 物理独占音频流透视监视器</div>
         <button class="modal-close" onclick="closeTelemetryModal()">✕</button>
       </div>
       <div class="telemetry-row">
@@ -1150,7 +1406,7 @@
       </div>
       <div class="telemetry-row">
         <div class="telemetry-label">实时流采样规格</div>
-        <div class="telemetry-val" id="telFormat" style="color:var(--highlight);">192,000 Hz / 24-bit</div>
+        <div class="telemetry-val" id="telFormat" style="color:var(--accent);">192,000 Hz / 24-bit</div>
       </div>
       <div class="telemetry-row">
         <div class="telemetry-label">独占输出引擎</div>
@@ -1166,33 +1422,34 @@
       </div>
       <div class="telemetry-row">
         <div class="telemetry-label">信号传输模式</div>
-        <div class="telemetry-val" style="color:var(--gold);">Bit-Perfect 直通 (无损)</div>
+        <div class="telemetry-val" style="color:var(--green);">Bit-Perfect 直通 (物理独占)</div>
       </div>
       <div class="telemetry-row">
         <div class="telemetry-label">Windows 混音器</div>
-        <div class="telemetry-val" style="color:var(--highlight);">已完全绕过 (物理独占)</div>
+        <div class="telemetry-val" style="color:var(--green);">已完全绕过 (无重采样/无音染)</div>
       </div>
     </div>
   </div>
 
-  <!-- ================================================= -->
-  <!-- Bottom Navigation                                 -->
-  <!-- ================================================= -->
+  <!-- Global Toast -->
+  <div id="toastNotification" class="toast"></div>
+
+  <!-- Bottom Navigation -->
   <div class="nav-bar">
     <div class="nav-item active" onclick="switchTab('player', this)">
-      <div class="nav-icon">▶</div>
+      <div class="nav-icon">🎵</div>
       <span>正在播放</span>
     </div>
     <div class="nav-item" onclick="switchTab('search', this)">
       <div class="nav-icon">🔍</div>
-      <span>曲库搜索</span>
+      <span>搜索</span>
     </div>
     <div class="nav-item" onclick="switchTab('library', this)">
       <div class="nav-icon">📚</div>
       <span>资料库</span>
     </div>
     <div class="nav-item" onclick="switchTab('settings', this)">
-      <div class="nav-icon">⚙</div>
+      <div class="nav-icon">⚙️</div>
       <span>独占设置</span>
     </div>
   </div>
@@ -1209,6 +1466,17 @@
     let favoriteList = [];
     let currentTab = 'player';
     let currentPluginStatus = null;
+    let currentAmConfig = null;
+    let activeExclusiveTab = 0; // 0: Local, 1: Network, 2: Roon
+
+    function showToast(msg) {
+      const t = document.getElementById('toastNotification');
+      if (!t) return;
+      t.textContent = msg;
+      t.classList.add('show');
+      clearTimeout(t._timer);
+      t._timer = setTimeout(() => t.classList.remove('show'), 2400);
+    }
 
     function switchTab(name, elem) {
       currentTab = name;
@@ -1217,7 +1485,6 @@
       document.getElementById('tab-' + name).classList.add('active');
       if (elem) elem.classList.add('active');
 
-      // Update Mini Player visibility
       const mini = document.getElementById('miniPlayer');
       if (name === 'player') {
         mini.style.display = 'none';
@@ -1225,7 +1492,7 @@
         mini.style.display = 'flex';
       }
 
-      if (name === 'settings') refreshSettings();
+      if (name === 'settings') loadAmExclusiveConfig();
       if (name === 'library') loadLibrary('recent');
     }
 
@@ -1254,6 +1521,14 @@
       fetchNowPlaying();
     }
 
+    async function setVolume(val) {
+      await fetch('/api/v2/playback/volume', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ volume: parseInt(val) })
+      });
+    }
+
     async function fetchNowPlaying() {
       try {
         const res = await fetch('/api/v2/playback');
@@ -1263,15 +1538,15 @@
         currentTrackSnapshot = np;
 
         // Player Tab
-        document.getElementById('playerTitle').textContent = np.name || '未播放';
-        document.getElementById('playerArtist').textContent = (np.artistName ? np.artistName + (np.albumName ? ' — ' + np.albumName : '') : '打开 Apple Music 播放');
+        document.getElementById('playerTitle').textContent = np.name || '未在播放';
+        document.getElementById('playerArtist').textContent = (np.artistName ? np.artistName + (np.albumName ? ' — ' + np.albumName : '') : '打开 Apple Music 播放音乐');
         
         const isPlaying = data.state === 'playing';
         document.getElementById('btnPlay').textContent = isPlaying ? '⏸' : '▶';
         document.getElementById('miniBtnPlay').textContent = isPlaying ? '⏸' : '▶';
 
         // Mini Player
-        document.getElementById('miniTitle').textContent = np.name || '未播放';
+        document.getElementById('miniTitle').textContent = np.name || '未在播放';
         document.getElementById('miniArtist').textContent = np.artistName || 'Apple Music';
         const mini = document.getElementById('miniPlayer');
         if (currentTab !== 'player' && np.name) {
@@ -1284,7 +1559,7 @@
         const qRes = await fetch('/api/v2/playback/audio-quality');
         const qData = await qRes.json();
         const qLabel = qData.data.flavorLabel || 'Lossless';
-        document.getElementById('playerQuality').textContent = qLabel;
+        document.getElementById('playerQuality').textContent = '⚡ ' + qLabel;
 
         const cur = data.time ? data.time.currentTime : 0;
         const dur = data.time ? data.time.duration : 0;
@@ -1305,13 +1580,13 @@
         const isFav = favoriteList.some(f => f.name === np.name && f.artist === np.artistName);
         const favBtn = document.getElementById('btnPlayerFav');
         favBtn.textContent = isFav ? '❤️' : '🤍';
-        favBtn.className = 'btn-fav ' + (isFav ? 'active' : '');
       } catch (e) {}
     }
 
-    document.getElementById('progressSlider').addEventListener('mousedown', () => isDraggingSlider = true);
-    document.getElementById('progressSlider').addEventListener('touchstart', () => isDraggingSlider = true);
-    document.getElementById('progressSlider').addEventListener('change', async (e) => {
+    const progSlider = document.getElementById('progressSlider');
+    progSlider.addEventListener('mousedown', () => isDraggingSlider = true);
+    progSlider.addEventListener('touchstart', () => isDraggingSlider = true);
+    progSlider.addEventListener('change', async (e) => {
       isDraggingSlider = false;
       if (currentDuration > 0) {
         const targetSec = (e.target.value / 100) * currentDuration;
@@ -1351,9 +1626,7 @@
       } catch (e) {}
     }
 
-    // ==========================================
     // Telemetry Modal
-    // ==========================================
     function openTelemetryModal() {
       const m = document.getElementById('telemetryModal');
       m.classList.add('active');
@@ -1370,9 +1643,7 @@
       document.getElementById('telemetryModal').classList.remove('active');
     }
 
-    // ==========================================
-    // Search Functions & Category Navigation
-    // ==========================================
+    // Search Functions
     function clearSearch() {
       document.getElementById('searchInput').value = '';
       document.getElementById('searchInput').focus();
@@ -1423,30 +1694,35 @@
 
       resDiv.innerHTML = '';
 
-      // 1. Artists Section
+      // 1. Artists
       if ((currentSearchFilter === 'all' || currentSearchFilter === 'artists') && artists.length > 0) {
         const aSec = document.createElement('div');
         aSec.innerHTML = '<div class="section-title">艺人 / 歌手</div>';
+        const aList = document.createElement('div');
+        aList.className = 'song-list';
         artists.slice(0, currentSearchFilter === 'all' ? 2 : 12).forEach(art => {
           const a = art.attributes;
           const artUrl = formatArt(a.artwork ? a.artwork.url : '', '160');
-          const card = document.createElement('div');
-          card.className = 'artist-card';
-          card.innerHTML = `
-            <img src="${artUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'56\\' height=\\'56\\'><rect fill=\\'%23333\\' width=\\'56\\' height=\\'56\\'/></svg>'">
-            <div class="artist-card-info">
-              <div class="artist-card-name">${a.name}</div>
-              <div class="artist-card-desc">${(a.genreNames || []).join(' · ') || 'Apple Music 认证艺人'}</div>
+          const row = document.createElement('div');
+          row.className = 'song-item';
+          row.innerHTML = `
+            <img src="${artUrl}" style="border-radius:50%;" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><circle cx=\\'22\\' cy=\\'22\\' r=\\'22\\' fill=\\'%23e5e5ea\\'/></svg>'">
+            <div class="song-info">
+              <div class="song-title">${a.name}</div>
+              <div class="song-sub">${(a.genreNames || []).join(' · ') || 'Apple Music 认证艺人'}</div>
             </div>
-            <div class="arrow-icon">›</div>
+            <div class="song-actions">
+              <span style="color:#8a8a8e;font-size:18px;">›</span>
+            </div>
           `;
-          card.onclick = () => showArtistDetail(art.id, a.name, artUrl, (a.genreNames || []).join(' · '));
-          aSec.appendChild(card);
+          row.onclick = () => showArtistDetail(art.id, a.name, artUrl, (a.genreNames || []).join(' · '));
+          aList.appendChild(row);
         });
+        aSec.appendChild(aList);
         resDiv.appendChild(aSec);
       }
 
-      // 2. Albums Section
+      // 2. Albums
       if ((currentSearchFilter === 'all' || currentSearchFilter === 'albums') && albums.length > 0) {
         const albSec = document.createElement('div');
         albSec.innerHTML = '<div class="section-title">专辑 <span>点击查看曲目列表</span></div>';
@@ -1458,7 +1734,7 @@
           const card = document.createElement('div');
           card.className = 'album-card';
           card.innerHTML = `
-            <img src="${covUrl}" onerror="this.style.background='#333'">
+            <img src="${covUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'160\\' height=\\'160\\'><rect fill=\\'%23e5e5ea\\' width=\\'160\\' height=\\'160\\'/></svg>'">
             <div class="album-card-title">${a.name}</div>
             <div class="album-card-sub">${a.artistName || ''} · ${(a.releaseDate || '').substring(0,4)}</div>
           `;
@@ -1469,7 +1745,7 @@
         resDiv.appendChild(albSec);
       }
 
-      // 3. Playlists Section
+      // 3. Playlists
       if ((currentSearchFilter === 'all' || currentSearchFilter === 'playlists') && playlists.length > 0) {
         const plSec = document.createElement('div');
         plSec.innerHTML = '<div class="section-title">精选歌单</div>';
@@ -1481,7 +1757,7 @@
           const card = document.createElement('div');
           card.className = 'album-card';
           card.innerHTML = `
-            <img src="${covUrl}" onerror="this.style.background='#333'">
+            <img src="${covUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'160\\' height=\\'160\\'/></svg>'">
             <div class="album-card-title">${a.name}</div>
             <div class="album-card-sub">${a.curatorName || 'Apple Music'}</div>
           `;
@@ -1492,7 +1768,7 @@
         resDiv.appendChild(plSec);
       }
 
-      // 4. Songs Section
+      // 4. Songs
       if ((currentSearchFilter === 'all' || currentSearchFilter === 'songs') && songs.length > 0) {
         const sSec = document.createElement('div');
         sSec.innerHTML = '<div class="section-title">热门单曲</div>';
@@ -1504,7 +1780,7 @@
           const item = document.createElement('div');
           item.className = 'song-item';
           item.innerHTML = `
-            <img src="${art}" onerror="this.style.display='none'">
+            <img src="${art}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><rect fill=\\'%23e5e5ea\\' width=\\'44\\' height=\\'44\\'/></svg>'">
             <div class="song-info">
               <div class="song-title">${a.name}</div>
               <div class="song-sub">${a.artistName} · ${a.albumName || ''}</div>
@@ -1527,15 +1803,14 @@
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ type: 'songs', id: id, name: name })
       });
+      showToast('正在播放: ' + name);
       setTimeout(() => {
         switchTab('player', document.querySelectorAll('.nav-bar .nav-item')[0]);
         fetchNowPlaying();
       }, 700);
     }
 
-    // ==========================================
-    // Detail Views (Album, Playlist, Artist)
-    // ==========================================
+    // Detail Views
     function hideDetailView() {
       document.querySelectorAll('.detail-view').forEach(d => d.classList.remove('active'));
       document.getElementById('searchMainView').style.display = 'block';
@@ -1594,6 +1869,7 @@
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ type: 'albums', id: currentAlbumId })
       });
+      showToast('正在开始播放整张专辑...');
       setTimeout(() => {
         switchTab('player', document.querySelectorAll('.nav-bar .nav-item')[0]);
         fetchNowPlaying();
@@ -1627,7 +1903,7 @@
           const row = document.createElement('div');
           row.className = 'song-item';
           row.innerHTML = `
-            <img src="${art}" onerror="this.style.display='none'">
+            <img src="${art}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><rect fill=\\'%23e5e5ea\\' width=\\'44\\' height=\\'44\\'/></svg>'">
             <div class="song-info">
               <div class="song-title">${a.name}</div>
               <div class="song-sub">${a.artistName} · ${a.albumName || ''}</div>
@@ -1651,6 +1927,7 @@
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ type: 'playlists', id: currentPlaylistId })
       });
+      showToast('正在开始播放歌单...');
       setTimeout(() => {
         switchTab('player', document.querySelectorAll('.nav-bar .nav-item')[0]);
         fetchNowPlaying();
@@ -1682,7 +1959,7 @@
           const card = document.createElement('div');
           card.className = 'album-card';
           card.innerHTML = `
-            <img src="${covUrl}" onerror="this.style.background='#333'">
+            <img src="${covUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'160\\' height=\\'160\\'/></svg>'">
             <div class="album-card-title">${a.name}</div>
             <div class="album-card-sub">${(a.releaseDate || '').substring(0,4)} · 共 ${a.trackCount || 0} 首</div>
           `;
@@ -1694,9 +1971,7 @@
       }
     }
 
-    // ==========================================
-    // Library Functions (Recent, Favorites, Albums)
-    // ==========================================
+    // Library Functions
     function switchLibrarySub(sub, elem) {
       document.querySelectorAll('#tab-library .chip').forEach(c => c.classList.remove('active'));
       elem.classList.add('active');
@@ -1763,7 +2038,7 @@
                 <div class="song-sub">${t.artist} · ${t.album || ''}</div>
               </div>
               <div class="song-actions">
-                <span style="font-size:16px;color:var(--accent);">❤️</span>
+                <span style="font-size:16px;">❤️</span>
                 <span class="song-play">▶</span>
               </div>
             `;
@@ -1792,7 +2067,7 @@
             const card = document.createElement('div');
             card.className = 'album-card';
             card.innerHTML = `
-              <div style="width:100%;aspect-ratio:1;border-radius:10px;background:rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;font-size:36px;margin-bottom:8px;">💿</div>
+              <div style="width:100%;aspect-ratio:1;border-radius:10px;background:#e5e5ea;display:flex;align-items:center;justify-content:center;font-size:36px;margin-bottom:8px;">💿</div>
               <div class="album-card-title">${alb.name}</div>
               <div class="album-card-sub">${alb.artist} · ${alb.trackCount} 首</div>
             `;
@@ -1813,19 +2088,6 @@
     // ==========================================
     // Exclusive Settings & Audio Devices (Full 3-Tab Sync)
     // ==========================================
-    let currentAmConfig = null;
-    let activeExclusiveTab = 0; // 0: Local, 1: Network, 2: Roon
-    let allDevices = [];
-
-    function showToast(msg) {
-      const t = document.getElementById('toastNotification');
-      if (!t) return;
-      t.textContent = msg;
-      t.classList.add('show');
-      clearTimeout(t._timer);
-      t._timer = setTimeout(() => t.classList.remove('show'), 2400);
-    }
-
     function switchExclusiveTab(idx) {
       activeExclusiveTab = idx;
       const btnLocal = document.getElementById('btnTabLocal');
@@ -1883,13 +2145,24 @@
 
     async function loadAmExclusiveConfig() {
       try {
-        const [cfgRes, devRes] = await Promise.all([
+        const [cfgRes, devRes, stRes] = await Promise.all([
           fetch('/api/v2/amexclusive/config'),
-          fetch('/api/v2/amexclusive/devices')
+          fetch('/api/v2/amexclusive/devices'),
+          fetch('/api/v2/amexclusive/status')
         ]);
         currentAmConfig = await cfgRes.json();
         const devData = await devRes.json();
         allDevices = devData.devices || [];
+        currentPluginStatus = await stRes.json();
+
+        // Update Status Monitor
+        const st = currentPluginStatus;
+        document.getElementById('statusDot').className = 'status-dot ' + (st.connected ? 'active' : '');
+        document.getElementById('statusText').textContent = st.connected ? (st.stateName === 'Active' ? '独占中 · 极高保真' : st.stateName) : '离线';
+        document.getElementById('chkExclusive').checked = st.enabled;
+        document.getElementById('lblStateDesc').textContent = '运行状态: ' + (st.stateName === 'Active' ? 'Bit-Perfect 独占中' : st.stateName) + (st.detail ? ' (' + st.detail + ')' : '');
+        document.getElementById('lblStreamFormat').textContent = (st.endpointName || '跟随默认') + ' · ' + (st.format || '等待音频流');
+        document.getElementById('lblPlayerDeviceName').textContent = (st.endpointName || '系统默认音频设备') + (st.format ? ' · ' + st.format : '');
 
         // Determine active tab
         const tabStr = (currentAmConfig.mod && currentAmConfig.mod.output_tab) || 'local';
@@ -2090,7 +2363,7 @@
         } else {
           showToast('⚠️ 设置保存出现异常，请检查连接');
         }
-        setTimeout(refreshSettings, 500);
+        setTimeout(loadAmExclusiveConfig, 500);
       } catch (e) {
         showToast('保存失败: ' + e.message);
       }
@@ -2108,7 +2381,7 @@
         } else {
           showToast('⚠️ 重开曲目失败');
         }
-        setTimeout(refreshSettings, 600);
+        setTimeout(loadAmExclusiveConfig, 600);
       } catch (e) {
         showToast('请求失败: ' + e.message);
       }
@@ -2158,29 +2431,13 @@
         body: JSON.stringify({ enabled: val })
       });
       showToast(val ? '✓ 已开启独占模式' : '已关闭独占模式');
-      setTimeout(refreshSettings, 300);
+      setTimeout(loadAmExclusiveConfig, 300);
     }
 
-    async function refreshSettings() {
-      try {
-        const res = await fetch('/api/v2/amexclusive/status');
-        const st = await res.json();
-        currentPluginStatus = st;
-
-        document.getElementById('statusDot').className = 'status-dot ' + (st.connected ? 'active' : '');
-        document.getElementById('statusText').textContent = st.connected ? (st.stateName === 'Active' ? '独占中 · 极高保真' : st.stateName) : '离线';
-
-        document.getElementById('chkExclusive').checked = st.enabled;
-        document.getElementById('lblStateDesc').textContent = '运行状态: ' + (st.stateName === 'Active' ? 'Bit-Perfect 独占中' : st.stateName) + (st.detail ? ' (' + st.detail + ')' : '');
-        document.getElementById('lblStreamFormat').textContent = (st.endpointName || '跟随默认') + ' · ' + (st.format || '等待音频流');
-        document.getElementById('lblPlayerDeviceName').textContent = st.endpointName || '系统默认音频设备';
-      } catch (e) {}
-    }
-
+    // Init
     setInterval(fetchNowPlaying, 1000);
     loadFavoritesList();
     loadAmExclusiveConfig();
-    refreshSettings();
     fetchNowPlaying();
   </script>
 </body>
