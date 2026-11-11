@@ -193,6 +193,22 @@ void AmPluginClient::HandleDeviceMessage(const ipc::Message& msg, bool found) {
     std::string name = Narrow(msg.endpointName);
     std::string loc = Narrow(msg.detail);
     std::string type = (msg.reserved[3] == 1u) ? "raat" : "dlna";
+    std::string addr;
+    std::string version;
+    uint16_t port = 0;
+    if (type == "raat") {
+        auto sep = loc.find('|');
+        if (sep != std::string::npos) {
+            addr = loc.substr(0, sep);
+            version = loc.substr(sep + 1);
+        } else {
+            addr = loc;
+        }
+        std::string portStr = Narrow(msg.format);
+        if (!portStr.empty()) {
+            port = static_cast<uint16_t>(std::atoi(portStr.c_str()));
+        }
+    }
 
     auto it = std::find_if(devices_.begin(), devices_.end(),
                            [&id](const DeviceInfo& d) { return d.id == id; });
@@ -201,8 +217,11 @@ void AmPluginClient::HandleDeviceMessage(const ipc::Message& msg, bool found) {
         if (!name.empty()) it->name = name;
         if (!loc.empty()) it->location = loc;
         it->type = type;
+        if (!addr.empty()) it->address = addr;
+        if (port != 0) it->port = port;
+        if (!version.empty()) it->raatVersion = version;
     } else if (found && !id.empty()) {
-        devices_.push_back({ id, name, type, true, loc });
+        devices_.push_back({ id, name, type, true, loc, addr, port, version, "" });
     }
 }
 
@@ -288,30 +307,49 @@ bool AmPluginClient::SetOutputTarget(uint8_t kind, const std::wstring& id, const
     return ipc::WriteMessage(pipe_, msg);
 }
 
+bool AmPluginClient::RequestRestartCurrent() {
+    std::lock_guard lock(pipeMutex_);
+    if (pipe_ == INVALID_HANDLE_VALUE) return false;
+
+    auto msg = ipc::NewMessage(ipc::MessageType::RestartCurrent, ipc::Role::Controller);
+    msg.senderPid = GetCurrentProcessId();
+    return ipc::WriteMessage(pipe_, msg);
+}
+
+bool AmPluginClient::AddManualDevice(const std::wstring& url) {
+    std::lock_guard lock(pipeMutex_);
+    if (pipe_ == INVALID_HANDLE_VALUE) return false;
+
+    auto msg = ipc::NewMessage(ipc::MessageType::AddDevice, ipc::Role::Controller);
+    msg.senderPid = GetCurrentProcessId();
+    wcsncpy_s(msg.detail, url.c_str(), _TRUNCATE);
+    return ipc::WriteMessage(pipe_, msg);
+}
+
 void AmPluginClient::RefreshDevices() {
     // Reload local devices
     {
         std::lock_guard lock(stateMutex_);
-        // Retain online DLNA devices
-        std::vector<DeviceInfo> dlnaDevices;
+        // Retain online DLNA and RAAT devices
+        std::vector<DeviceInfo> remoteDevices;
         for (const auto& d : devices_) {
-            if (d.type == "dlna") dlnaDevices.push_back(d);
+            if (d.type == "dlna" || d.type == "raat") remoteDevices.push_back(d);
         }
         devices_.clear();
         const auto wasapi = local_devices::EnumerateWasapi();
         for (const auto& d : wasapi) {
-            devices_.push_back({ Narrow(d.id), Narrow(d.name), "wasapi", true, "" });
+            devices_.push_back({ Narrow(d.id), Narrow(d.name), "wasapi", true, "", "", 0, "", "" });
         }
         const auto asio = local_devices::EnumerateAsio();
         for (const auto& d : asio) {
-            devices_.push_back({ Narrow(d.id), Narrow(d.name), "asio", d.usable, Narrow(d.note) });
+            devices_.push_back({ Narrow(d.id), Narrow(d.name), "asio", d.usable, "", "", 0, "", Narrow(d.note) });
         }
-        for (const auto& d : dlnaDevices) {
+        for (const auto& d : remoteDevices) {
             devices_.push_back(d);
         }
     }
 
-    // Request DLNA refresh from Broker
+    // Request DLNA and RAAT refresh from Broker
     std::lock_guard lock(pipeMutex_);
     if (pipe_ != INVALID_HANDLE_VALUE) {
         auto msg = ipc::NewMessage(ipc::MessageType::RefreshDevices, ipc::Role::Controller);

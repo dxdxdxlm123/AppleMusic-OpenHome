@@ -486,7 +486,133 @@
       border-radius: 8px;
       font-size: 14px;
       outline: none;
-      max-width: 180px;
+      max-width: 220px;
+    }
+
+    /* Sub-tabs inside Settings (三个切换) */
+    .sub-tab-strip {
+      display: flex;
+      background: rgba(255, 255, 255, 0.08);
+      border-radius: 12px;
+      padding: 4px;
+      margin-bottom: 16px;
+      gap: 4px;
+    }
+    .sub-tab-btn {
+      flex: 1;
+      padding: 10px 4px;
+      border: none;
+      background: transparent;
+      color: var(--subtext);
+      font-size: 13.5px;
+      font-weight: 600;
+      border-radius: 9px;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.2, 0.9, 0.4, 1);
+      text-align: center;
+      white-space: nowrap;
+    }
+    .sub-tab-btn.active {
+      background: #2c2c2e;
+      color: #fff;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+    .sub-tab-panel {
+      display: none;
+    }
+    .sub-tab-panel.active {
+      display: block;
+      animation: fadeIn 0.25s ease-out;
+    }
+    .setting-input {
+      background: #2c2c2e;
+      border: 1px solid var(--card-border);
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 8px;
+      font-size: 14px;
+      outline: none;
+      box-sizing: border-box;
+    }
+    .btn-action {
+      background: rgba(255, 255, 255, 0.12);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #fff;
+      padding: 7px 14px;
+      border-radius: 8px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+    .btn-action:hover {
+      background: rgba(255, 255, 255, 0.2);
+    }
+    .btn-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 16px;
+    }
+    .btn-primary {
+      flex: 1;
+      background: var(--highlight);
+      color: #fff;
+      border: none;
+      padding: 12px 16px;
+      border-radius: 10px;
+      font-size: 14.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: opacity 0.2s;
+    }
+    .btn-primary:active { opacity: 0.8; }
+    .btn-secondary {
+      flex: 1;
+      background: #2c2c2e;
+      color: #fff;
+      border: 1px solid var(--card-border);
+      padding: 12px 16px;
+      border-radius: 10px;
+      font-size: 14.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    .btn-secondary:active { background: #38383a; }
+    .hint-box {
+      background: rgba(255, 255, 255, 0.04);
+      border-left: 3px solid var(--highlight);
+      padding: 10px 12px;
+      border-radius: 6px;
+      font-size: 12.5px;
+      color: #a0a0a5;
+      line-height: 1.5;
+      margin-top: 10px;
+    }
+    .toast {
+      position: fixed;
+      top: 24px;
+      left: 50%;
+      transform: translateX(-50%) translateY(-30px);
+      background: rgba(30, 30, 32, 0.95);
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      color: #fff;
+      padding: 10px 20px;
+      border-radius: 20px;
+      font-size: 14px;
+      font-weight: 500;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      z-index: 9999;
+      opacity: 0;
+      pointer-events: none;
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .toast.show {
+      transform: translateX(-50%) translateY(0);
+      opacity: 1;
     }
 
     /* ================================================= */
@@ -681,65 +807,308 @@
   <!-- Tab 4: 独占设置 (Settings)                        -->
   <!-- ================================================= -->
   <div class="tab-content" id="tab-settings">
+    <!-- Header / Status Badge -->
     <div class="settings-group">
       <div class="settings-title">
-        <span>独占模式 (Bit-Perfect)</span>
+        <span>AMExclusive 独占音频引擎</span>
         <label class="switch">
           <input type="checkbox" id="chkExclusive" onchange="toggleExclusive(this.checked)">
           <span class="slider"></span>
         </label>
       </div>
-      <div class="setting-desc" id="lblStateDesc">状态: 正在检测...</div>
-    </div>
-
-    <div class="settings-group">
-      <div class="settings-title">音频输出硬件 (DAC / 声卡)</div>
-      <div class="setting-row">
+      <div class="setting-desc" id="lblStateDesc">状态: 正在同步配置...</div>
+      <div class="setting-row" style="margin-top:10px;padding-top:10px;">
         <div>
-          <div class="setting-label">当前输出设备</div>
-          <div class="setting-desc" id="lblCurrentDevice">跟随系统默认</div>
+          <div class="setting-label">当前端点与链路</div>
+          <div class="setting-desc" id="lblStreamFormat" style="color:var(--highlight);font-weight:600;">--</div>
         </div>
-        <select id="selDevice" onchange="selectDevice(this.value)">
-          <option value="">加载设备列表中...</option>
-        </select>
-      </div>
-      <div class="setting-row">
-        <div>
-          <div class="setting-label">硬件缓冲区 (Buffer)</div>
-          <div class="setting-desc">超低延迟与防爆音调节</div>
-        </div>
-        <select id="selBuffer" onchange="setBuffer(this.value)">
-          <option value="5">5 ms (极速)</option>
-          <option value="10">10 ms (极低)</option>
-          <option value="20">20 ms (标准推荐)</option>
-          <option value="50">50 ms (稳定)</option>
-          <option value="100">100 ms (高容错)</option>
-        </select>
-      </div>
-      <div class="setting-row">
-        <div>
-          <div class="setting-label">允许采样率重采样</div>
-          <div class="setting-desc">关闭以强制点对点无损输出</div>
-        </div>
-        <label class="switch">
-          <input type="checkbox" id="chkResample" onchange="toggleResample(this.checked)">
-          <span class="slider"></span>
-        </label>
+        <button class="btn-action" onclick="openTelemetryModal()">⚡ 流透视监视器</button>
       </div>
     </div>
 
-    <div class="settings-group">
-      <div class="settings-title">实时音频链路监视</div>
-      <div class="setting-row">
-        <div class="setting-label">当前流格式</div>
-        <div class="setting-desc" id="lblStreamFormat" style="color:var(--highlight);font-weight:600;">--</div>
+    <!-- The Three Switches / Output Tabs (三个切换) -->
+    <div class="sub-tab-strip">
+      <button class="sub-tab-btn active" id="btnTabLocal" onclick="switchExclusiveTab(0)">● 本地播放</button>
+      <button class="sub-tab-btn" id="btnTabNetwork" onclick="switchExclusiveTab(1)">网播播放</button>
+      <button class="sub-tab-btn" id="btnTabRoon" onclick="switchExclusiveTab(2)">兼容 R 设备</button>
+    </div>
+
+    <!-- Panel 0: 本地播放 (Local Playback) -->
+    <div class="sub-tab-panel active" id="panel-exclusive-local">
+      <div class="settings-group">
+        <div class="settings-title">本地输出配置</div>
+        
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">播放模式</div>
+            <div class="setting-desc">AM 原生进程内 / 独立音频引擎</div>
+          </div>
+          <select id="selPlayerMode">
+            <option value="am">AM 播放器（进程内）</option>
+            <option value="hifi">HiFi 播放器（独立引擎）</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">接口</div>
+            <div class="setting-desc">Windows 独占底层接口</div>
+          </div>
+          <select id="selLocalBackend" onchange="onLocalBackendChange(this.value)">
+            <option value="wasapi">WASAPI (独占)</option>
+            <option value="asio">ASIO (专业驱动)</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">设备 / 驱动</div>
+            <div class="setting-desc" id="lblLocalDeviceDesc">选择输出硬件 DAC 或声卡</div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <select id="selLocalDevice" style="max-width:180px;">
+              <option value="">跟随 Apple Music 默认设备</option>
+            </select>
+            <button class="btn-action" onclick="triggerRefreshDevices()">刷新</button>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">硬件缓冲区 / 周期</div>
+            <div class="setting-desc">超低延迟与防爆音调节</div>
+          </div>
+          <select id="selLocalBuffer">
+            <option value="5">5 ms (极速超低延迟)</option>
+            <option value="10">10 ms (极低延迟)</option>
+            <option value="20" selected>20 ms (标准推荐)</option>
+            <option value="50">50 ms (稳定容错)</option>
+            <option value="100">100 ms (高容错)</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">允许采样率重采样</div>
+            <div class="setting-desc">当 DAC 不支持原始格式时允许回退重采样</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="chkAllowResampling">
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">强制 Hi-Res 格式请求</div>
+            <div class="setting-desc">绕过 DAC 检测限制，始终请求最高 24/192 ALAC</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="chkForceHires" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
       </div>
-      <div class="setting-row">
-        <div class="setting-label">DAC 硬件端点</div>
-        <div class="setting-desc" id="lblEndpointName">--</div>
+
+      <!-- JPLAY-style Tuning -->
+      <div class="settings-group">
+        <div class="settings-title">本地播放优化 (JPLAY 风格)</div>
+        
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">深度优化</div>
+            <div class="setting-desc">开启全轨内存预蓄水与音频优先级提升</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="chkLocalTuning">
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">内存储备</div>
+            <div class="setting-desc">音频缓冲区目标深度</div>
+          </div>
+          <select id="selLocalReservoir">
+            <option value="100">0.1 秒</option>
+            <option value="500">0.5 秒</option>
+            <option value="2000" selected>2 秒 (推荐)</option>
+            <option value="5000">5 秒</option>
+            <option value="10000">10 秒</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">系统级时序</div>
+            <div class="setting-desc">0.5ms 系统定时器 + 专属核心 + 大页内存</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="chkLocalSystem">
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="hint-box">
+          开启后：整轨深储备、0.5ms 定时器、专属核心、大页内存。默认关闭，只作用于 WASAPI / ASIO，网播不受影响；出现爆音或进度异常时关掉即可回退。
+        </div>
+
+        <div class="btn-row">
+          <button class="btn-primary" onclick="saveAndApply('local')">保存并应用</button>
+          <button class="btn-secondary" onclick="restartCurrentTrack()">重开当前曲目</button>
+        </div>
+        <div class="setting-desc" style="margin-top:10px;text-align:center;">
+          ASIO 会独占驱动，其他程序不能同时使用；采样率按曲目自动跟随。
+        </div>
       </div>
     </div>
 
+    <!-- Panel 1: 网播播放 (Network / DLNA & OpenHome) -->
+    <div class="sub-tab-panel" id="panel-exclusive-network">
+      <div class="settings-group">
+        <div class="settings-title">网播串流配置 (DLNA / OpenHome)</div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">网播设备</div>
+            <div class="setting-desc">局域网数播 / UPnP 渲染器</div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <select id="selNetworkDevice" style="max-width:180px;">
+              <option value="">扫描设备中...</option>
+            </select>
+            <button class="btn-action" onclick="triggerRefreshDevices()">刷新设备</button>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div style="width:100%;">
+            <div class="setting-label" style="margin-bottom:6px;">手动添加设备</div>
+            <div style="display:flex;gap:6px;">
+              <input type="text" id="txtManualDevice" class="setting-input" style="flex:1;" placeholder="http://IP:port/device.xml 或 IP:port">
+              <button class="btn-action" onclick="addManualDevice()">手动添加</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">流式</div>
+            <div class="setting-desc">音频封包与传输形态</div>
+          </div>
+          <select id="selStreamFormat">
+            <option value="wav">WAV（文件形态）</option>
+            <option value="flac-file">FLAC（文件形态）</option>
+            <option value="live">FLAC 实时流（标准）</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">拉流缓冲</div>
+            <div class="setting-desc">网播设备预缓冲深度</div>
+          </div>
+          <select id="selDlnaBuffer">
+            <option value="1000">1 秒</option>
+            <option value="3000" selected>3 秒 (推荐)</option>
+            <option value="5000">5 秒</option>
+            <option value="8000">8 秒</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">遵循 SMTC 曲目时长</div>
+            <div class="setting-desc">使渲染器显示精确曲目进度并支持拖动</div>
+          </div>
+          <label class="switch">
+            <input type="checkbox" id="chkFollowTrackDuration" checked>
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn-primary" onclick="saveAndApply('network')">保存并应用</button>
+          <button class="btn-secondary" onclick="restartCurrentTrack()">立即重开当前曲目</button>
+        </div>
+        <div class="setting-desc" style="margin-top:10px;text-align:center;">
+          兼容 AURALiC LightningPlayer、Linn OpenHome、BubbleUPnP 等数播。
+        </div>
+      </div>
+    </div>
+
+    <!-- Panel 2: 兼容 R 设备 (Roon / RAAT) -->
+    <div class="sub-tab-panel" id="panel-exclusive-roon">
+      <div class="settings-group">
+        <div class="settings-title">兼容 R 设备输出 (RAAT 协议)</div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">兼容 R 设备</div>
+            <div class="setting-desc">SOOD 协议自动发现的终端</div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:center;">
+            <select id="selRoonDevice" style="max-width:180px;">
+              <option value="">扫描 R 设备中...</option>
+            </select>
+            <button class="btn-action" onclick="triggerRefreshDevices()">重新扫描</button>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Buffer look-ahead (ms)</div>
+            <div class="setting-desc">起播预填充与设备侧超前缓冲</div>
+          </div>
+          <input type="number" id="numRoonBuffer" class="setting-input" style="width:110px;" min="100" max="5000" step="100" value="1000">
+        </div>
+        <div class="hint-box" style="margin-top:2px;margin-bottom:12px;">
+          起播预填充 + 播放期间保持在设备侧领先播放位置的音频量。100–5000 ms；起播掉音时调大。
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Wire bits (传输位深)</div>
+            <div class="setting-desc">线缆位深 (Off 为跟随音源)</div>
+          </div>
+          <select id="selRoonBits">
+            <option value="0">Off (auto)</option>
+            <option value="16">16 bit</option>
+            <option value="24">24 bit</option>
+            <option value="32">32 bit</option>
+          </select>
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">Start lead (ms)</div>
+            <div class="setting-desc">起播前导延时 (300-4000)</div>
+          </div>
+          <input type="number" id="numRoonLead" class="setting-input" style="width:110px;" min="300" max="4000" step="100" value="1000">
+        </div>
+
+        <div class="setting-row">
+          <div>
+            <div class="setting-label">SOOD port</div>
+            <div class="setting-desc">0 = 默认 9003</div>
+          </div>
+          <input type="number" id="numRoonSoodPort" class="setting-input" style="width:110px;" min="0" max="65535" value="0">
+        </div>
+
+        <div style="margin-top:14px;">
+          <div class="setting-label" style="margin-bottom:6px;">已发现设备信息 (Discovered devices):</div>
+          <textarea id="txtRoonDiscovered" readonly rows="4" style="width:100%;box-sizing:border-box;background:#1e1e20;color:#aaa;border:1px solid #333;border-radius:8px;padding:8px;font-family:monospace;font-size:12px;resize:vertical;"></textarea>
+        </div>
+
+        <div class="btn-row">
+          <button class="btn-primary" onclick="saveAndApply('roon')">保存并应用</button>
+          <button class="btn-secondary" onclick="restartCurrentTrack()">重开当前曲目</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- PWA Installation Instructions -->
     <div class="settings-group">
       <div class="settings-title">独立 App 安装说明</div>
       <div class="setting-desc" style="line-height:1.6;color:#ccc;">
@@ -748,6 +1117,8 @@
       </div>
     </div>
   </div>
+
+  <div id="toastNotification" class="toast"></div>
 
   <!-- ================================================= -->
   <!-- Global Persistent Floating Mini-Player            -->
@@ -1440,8 +1811,356 @@
     }
 
     // ==========================================
-    // Exclusive Settings & Audio Devices
+    // Exclusive Settings & Audio Devices (Full 3-Tab Sync)
     // ==========================================
+    let currentAmConfig = null;
+    let activeExclusiveTab = 0; // 0: Local, 1: Network, 2: Roon
+    let allDevices = [];
+
+    function showToast(msg) {
+      const t = document.getElementById('toastNotification');
+      if (!t) return;
+      t.textContent = msg;
+      t.classList.add('show');
+      clearTimeout(t._timer);
+      t._timer = setTimeout(() => t.classList.remove('show'), 2400);
+    }
+
+    function switchExclusiveTab(idx) {
+      activeExclusiveTab = idx;
+      const btnLocal = document.getElementById('btnTabLocal');
+      const btnNet = document.getElementById('btnTabNetwork');
+      const btnRoon = document.getElementById('btnTabRoon');
+      
+      btnLocal.classList.toggle('active', idx === 0);
+      btnNet.classList.toggle('active', idx === 1);
+      btnRoon.classList.toggle('active', idx === 2);
+
+      btnLocal.textContent = idx === 0 ? '● 本地播放' : '本地播放';
+      btnNet.textContent = idx === 1 ? '● 网播播放' : '网播播放';
+      btnRoon.textContent = idx === 2 ? '● 兼容 R 设备' : '兼容 R 设备';
+
+      document.getElementById('panel-exclusive-local').classList.toggle('active', idx === 0);
+      document.getElementById('panel-exclusive-network').classList.toggle('active', idx === 1);
+      document.getElementById('panel-exclusive-roon').classList.toggle('active', idx === 2);
+    }
+
+    function onLocalBackendChange(backend) {
+      const sel = document.getElementById('selLocalDevice');
+      const desc = document.getElementById('lblLocalDeviceDesc');
+      sel.innerHTML = '';
+
+      if (backend === 'asio') {
+        desc.textContent = '选择 64 位 ASIO 驱动';
+        const asioDevs = allDevices.filter(d => d.type === 'asio');
+        if (asioDevs.length === 0) {
+          sel.innerHTML = '<option value="">未检测到 64 位 ASIO 驱动</option>';
+        } else {
+          asioDevs.forEach(d => {
+            const opt = document.createElement('option');
+            opt.value = d.id;
+            opt.textContent = d.name + (d.note ? ' (' + d.note + ')' : '');
+            if (!d.online) opt.disabled = true;
+            sel.appendChild(opt);
+          });
+        }
+      } else {
+        desc.textContent = '选择输出硬件 DAC 或声卡';
+        const wasapiDevs = allDevices.filter(d => d.type === 'wasapi');
+        const defOpt = document.createElement('option');
+        defOpt.value = '';
+        defOpt.textContent = '跟随 Apple Music 默认设备';
+        sel.appendChild(defOpt);
+
+        wasapiDevs.forEach(d => {
+          const opt = document.createElement('option');
+          opt.value = d.id;
+          opt.textContent = d.name;
+          sel.appendChild(opt);
+        });
+      }
+    }
+
+    async function loadAmExclusiveConfig() {
+      try {
+        const [cfgRes, devRes] = await Promise.all([
+          fetch('/api/v2/amexclusive/config'),
+          fetch('/api/v2/amexclusive/devices')
+        ]);
+        currentAmConfig = await cfgRes.json();
+        const devData = await devRes.json();
+        allDevices = devData.devices || [];
+
+        // Determine active tab
+        const tabStr = (currentAmConfig.mod && currentAmConfig.mod.output_tab) || 'local';
+        if (tabStr === 'network' || tabStr === '1') {
+          switchExclusiveTab(1);
+        } else if (tabStr === 'r_device' || tabStr === 'roon' || tabStr === '2') {
+          switchExclusiveTab(2);
+        } else {
+          switchExclusiveTab(0);
+        }
+
+        // --- Tab 1: Local Settings ---
+        if (currentAmConfig.mod) {
+          const mod = currentAmConfig.mod;
+          document.getElementById('selPlayerMode').value = mod.player_mode || 'am';
+          const backend = (mod.output === 'asio') ? 'asio' : 'wasapi';
+          document.getElementById('selLocalBackend').value = backend;
+          onLocalBackendChange(backend);
+
+          const selLocDev = document.getElementById('selLocalDevice');
+          if (backend === 'asio') {
+            if (mod.asio_driver) selLocDev.value = mod.asio_driver;
+          } else {
+            selLocDev.value = mod.wasapi_device || '';
+          }
+
+          document.getElementById('selLocalBuffer').value = String(mod.buffer_ms || 20);
+          document.getElementById('chkAllowResampling').checked = (mod.allow_resampling == 1);
+          document.getElementById('chkForceHires').checked = (mod.force_hires != 0);
+        }
+
+        if (currentAmConfig.local) {
+          const loc = currentAmConfig.local;
+          document.getElementById('chkLocalTuning').checked = (loc.enabled == 1);
+          document.getElementById('selLocalReservoir').value = String(loc.reservoir_ms || 2000);
+          document.getElementById('chkLocalSystem').checked = (loc.system_timing == 1);
+        }
+
+        // --- Tab 2: Network / DLNA Settings ---
+        const netSel = document.getElementById('selNetworkDevice');
+        netSel.innerHTML = '';
+        const dlnaDevs = allDevices.filter(d => d.type === 'dlna');
+        if (dlnaDevs.length === 0) {
+          netSel.innerHTML = '<option value="">未发现局域网网播设备 (请点击刷新)</option>';
+        } else {
+          dlnaDevs.forEach(d => {
+            const opt = document.createElement('option');
+            opt.value = d.id;
+            opt.dataset.location = d.location || '';
+            opt.dataset.name = d.name;
+            opt.textContent = (d.online ? '● ' : '○ ') + d.name;
+            netSel.appendChild(opt);
+          });
+        }
+        if (currentAmConfig.dlna) {
+          const dlna = currentAmConfig.dlna;
+          if (dlna.device_udn) {
+            netSel.value = dlna.device_udn;
+          } else if (dlna.device_name) {
+            for (let i = 0; i < netSel.options.length; i++) {
+              if (netSel.options[i].text.includes(dlna.device_name)) {
+                netSel.selectedIndex = i;
+                break;
+              }
+            }
+          }
+          document.getElementById('selStreamFormat').value = dlna.stream_format || 'wav';
+          document.getElementById('selDlnaBuffer').value = String(dlna.buffer_ms || 3000);
+          document.getElementById('chkFollowTrackDuration').checked = (dlna.follow_track_duration != 0);
+          if (dlna.manual_urls) {
+            document.getElementById('txtManualDevice').value = dlna.manual_urls;
+          }
+        }
+
+        // --- Tab 3: Roon / RAAT Settings ---
+        const roonSel = document.getElementById('selRoonDevice');
+        roonSel.innerHTML = '';
+        const raatDevs = allDevices.filter(d => d.type === 'raat');
+        if (raatDevs.length === 0) {
+          roonSel.innerHTML = '<option value="">未发现兼容 R 设备 (点击重新扫描)</option>';
+        } else {
+          raatDevs.forEach(d => {
+            const opt = document.createElement('option');
+            opt.value = d.id;
+            opt.dataset.address = d.address || '';
+            opt.dataset.port = d.port || '';
+            opt.dataset.version = d.raatVersion || '';
+            opt.dataset.name = d.name;
+            opt.textContent = (d.online ? '● ' : '○ ') + d.name + (d.address ? ' (' + d.address + ')' : '');
+            roonSel.appendChild(opt);
+          });
+        }
+        if (currentAmConfig.roon) {
+          const roon = currentAmConfig.roon;
+          if (roon.device_id) {
+            roonSel.value = roon.device_id;
+          } else if (roon.device_name) {
+            for (let i = 0; i < roonSel.options.length; i++) {
+              if (roonSel.options[i].text.includes(roon.device_name)) {
+                roonSel.selectedIndex = i;
+                break;
+              }
+            }
+          }
+          document.getElementById('numRoonBuffer').value = roon.buffer_ms || 1000;
+          document.getElementById('selRoonBits').value = String(roon.wire_bits || 0);
+          document.getElementById('numRoonLead').value = roon.start_lead_ms || 1000;
+          document.getElementById('numRoonSoodPort').value = roon.sood_port || 0;
+        }
+
+        // Update Roon Discovered textarea
+        const txtDiscovered = document.getElementById('txtRoonDiscovered');
+        if (raatDevs.length > 0) {
+          txtDiscovered.value = raatDevs.map(d => 
+            `设备: ${d.name}\nID: ${d.id}\n地址: ${d.address || 'N/A'}:${d.port || 'N/A'}\n固件版本: ${d.raatVersion || 'RAAT'}\n状态: ${d.online ? '在线' : '离线'}`
+          ).join('\n----------------------------------------\n');
+        } else {
+          txtDiscovered.value = '暂未探测到活跃的 Roon / RAAT 设备。请确认解码器/数播已开启 RAAT 且处于同一局域网内，然后点击「重新扫描」。';
+        }
+
+      } catch (e) {
+        console.error('Failed to load AMExclusive config:', e);
+      }
+    }
+
+    async function saveAndApply(target) {
+      try {
+        const payload = {
+          apply: true,
+          active_tab: target,
+          mod: {
+            output_tab: target === 'local' ? 'local' : (target === 'network' ? 'network' : 'r_device'),
+            output: target === 'local' 
+              ? document.getElementById('selLocalBackend').value 
+              : (target === 'network' ? 'dlna' : 'r_device'),
+            player_mode: document.getElementById('selPlayerMode').value,
+            buffer_ms: parseInt(document.getElementById('selLocalBuffer').value) || 20,
+            allow_resampling: document.getElementById('chkAllowResampling').checked ? 1 : 0,
+            force_hires: document.getElementById('chkForceHires').checked ? 1 : 0
+          },
+          local: {
+            enabled: document.getElementById('chkLocalTuning').checked ? 1 : 0,
+            reservoir_ms: parseInt(document.getElementById('selLocalReservoir').value) || 2000,
+            system_timing: document.getElementById('chkLocalSystem').checked ? 1 : 0
+          },
+          dlna: {
+            stream_format: document.getElementById('selStreamFormat').value,
+            buffer_ms: parseInt(document.getElementById('selDlnaBuffer').value) || 3000,
+            follow_track_duration: document.getElementById('chkFollowTrackDuration').checked ? 1 : 0
+          },
+          roon: {
+            buffer_ms: parseInt(document.getElementById('numRoonBuffer').value) || 1000,
+            wire_bits: parseInt(document.getElementById('selRoonBits').value) || 0,
+            start_lead_ms: parseInt(document.getElementById('numRoonLead').value) || 1000,
+            sood_port: parseInt(document.getElementById('numRoonSoodPort').value) || 0
+          }
+        };
+
+        if (target === 'local') {
+          const backend = document.getElementById('selLocalBackend').value;
+          const selLoc = document.getElementById('selLocalDevice');
+          const opt = selLoc.selectedOptions[0];
+          if (backend === 'asio') {
+            payload.mod.asio_driver = selLoc.value;
+            payload.mod.asio_name = opt ? opt.textContent : '';
+          } else {
+            payload.mod.wasapi_device = selLoc.value;
+            payload.mod.wasapi_name = opt ? opt.textContent : '';
+          }
+        } else if (target === 'network') {
+          const selNet = document.getElementById('selNetworkDevice');
+          const opt = selNet.selectedOptions[0];
+          if (opt && opt.value) {
+            payload.dlna.device_udn = opt.value;
+            payload.dlna.device_name = opt.dataset.name || opt.textContent.replace(/^[●○]\s*/, '');
+            payload.dlna.location = opt.dataset.location || '';
+          }
+        } else if (target === 'roon') {
+          const selRoon = document.getElementById('selRoonDevice');
+          const opt = selRoon.selectedOptions[0];
+          if (opt && opt.value) {
+            payload.roon.device_id = opt.value;
+            payload.roon.device_name = opt.dataset.name || opt.textContent.replace(/^[●○]\s*/, '');
+            payload.roon.address = opt.dataset.address || '';
+            payload.roon.port = parseInt(opt.dataset.port) || 0;
+            payload.roon.raat_version = opt.dataset.version || '';
+          }
+        }
+
+        const res = await fetch('/api/v2/amexclusive/config', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const ret = await res.json();
+        if (ret.success) {
+          showToast('✓ 独占设置已保存并生效！');
+        } else {
+          showToast('⚠️ 设置保存出现异常，请检查连接');
+        }
+        setTimeout(refreshSettings, 500);
+      } catch (e) {
+        showToast('保存失败: ' + e.message);
+      }
+    }
+
+    async function restartCurrentTrack() {
+      try {
+        const res = await fetch('/api/v2/amexclusive/restart-current', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'}
+        });
+        const ret = await res.json();
+        if (ret.success) {
+          showToast('✓ 正在重开当前曲目以应用设置...');
+        } else {
+          showToast('⚠️ 重开曲目失败');
+        }
+        setTimeout(refreshSettings, 600);
+      } catch (e) {
+        showToast('请求失败: ' + e.message);
+      }
+    }
+
+    async function addManualDevice() {
+      const input = document.getElementById('txtManualDevice');
+      const url = (input.value || '').trim();
+      if (!url) {
+        showToast('请输入有效的设备 URL 或 IP:port');
+        return;
+      }
+      try {
+        const res = await fetch('/api/v2/amexclusive/add-device', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ url: url })
+        });
+        const ret = await res.json();
+        if (ret.success) {
+          showToast('✓ 已发送添加设备请求，正在探测...');
+          setTimeout(triggerRefreshDevices, 800);
+        } else {
+          showToast('添加失败');
+        }
+      } catch (e) {
+        showToast('请求失败: ' + e.message);
+      }
+    }
+
+    async function triggerRefreshDevices() {
+      showToast('正在扫描局域网与音频设备...');
+      try {
+        await fetch('/api/v2/amexclusive/refresh-devices', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'}
+        });
+      } catch (e) {}
+      setTimeout(loadAmExclusiveConfig, 600);
+      setTimeout(loadAmExclusiveConfig, 2000);
+    }
+
+    async function toggleExclusive(val) {
+      await fetch('/api/v2/amexclusive/set-enabled', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ enabled: val })
+      });
+      showToast(val ? '✓ 已开启独占模式' : '已关闭独占模式');
+      setTimeout(refreshSettings, 300);
+    }
+
     async function refreshSettings() {
       try {
         const res = await fetch('/api/v2/amexclusive/status');
@@ -1452,76 +2171,15 @@
         document.getElementById('statusText').textContent = st.connected ? (st.stateName === 'Active' ? '独占中 · 极高保真' : st.stateName) : '离线';
 
         document.getElementById('chkExclusive').checked = st.enabled;
-        document.getElementById('lblStateDesc').textContent = '状态: ' + st.stateName + (st.detail ? ' (' + st.detail + ')' : '');
-        document.getElementById('selBuffer').value = String(st.hardwareBufferMs || 20);
-        document.getElementById('chkResample').checked = st.allowResampling;
-        document.getElementById('lblStreamFormat').textContent = st.format || '等待音频流...';
-        document.getElementById('lblEndpointName').textContent = st.endpointName || '系统默认音频设备';
-        document.getElementById('lblCurrentDevice').textContent = st.endpointName || '系统默认音频设备';
+        document.getElementById('lblStateDesc').textContent = '运行状态: ' + (st.stateName === 'Active' ? 'Bit-Perfect 独占中' : st.stateName) + (st.detail ? ' (' + st.detail + ')' : '');
+        document.getElementById('lblStreamFormat').textContent = (st.endpointName || '跟随默认') + ' · ' + (st.format || '等待音频流');
         document.getElementById('lblPlayerDeviceName').textContent = st.endpointName || '系统默认音频设备';
-
-        // Load devices
-        const devRes = await fetch('/api/v2/amexclusive/devices');
-        const devData = await devRes.json();
-        allDevices = devData.devices || [];
-        const sel = document.getElementById('selDevice');
-        sel.innerHTML = '<option value="">跟随 Apple Music 默认设备</option>';
-        allDevices.forEach(d => {
-          const opt = document.createElement('option');
-          opt.value = d.id;
-          const tag = d.type === 'asio' ? '[ASIO] ' : d.type === 'dlna' ? '[DLNA] ' : (d.type === 'raat' || d.type === 'roon') ? '[Roon RAAT] ' : '[WASAPI] ';
-          opt.textContent = tag + d.name;
-          if (st.endpointId && st.endpointId === d.id) opt.selected = true;
-          sel.appendChild(opt);
-        });
       } catch (e) {}
-    }
-
-    async function toggleExclusive(val) {
-      await fetch('/api/v2/amexclusive/set-enabled', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ enabled: val })
-      });
-      setTimeout(refreshSettings, 300);
-    }
-
-    async function setBuffer(val) {
-      await fetch('/api/v2/amexclusive/set-buffer', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ bufferMs: parseInt(val) })
-      });
-    }
-
-    async function toggleResample(val) {
-      await fetch('/api/v2/amexclusive/set-resampling', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ allow: val })
-      });
-    }
-
-    async function selectDevice(id) {
-      const dev = allDevices.find(d => d.id === id);
-      if (!dev) {
-        await fetch('/api/v2/amexclusive/set-device', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ type: 'wasapi', id: '', name: '跟随 Apple Music 默认设备' })
-        });
-      } else {
-        await fetch('/api/v2/amexclusive/set-device', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ type: dev.type, id: dev.id, name: dev.name, location: dev.location })
-        });
-      }
-      setTimeout(refreshSettings, 400);
     }
 
     setInterval(fetchNowPlaying, 1000);
     loadFavoritesList();
+    loadAmExclusiveConfig();
     refreshSettings();
     fetchNowPlaying();
   </script>

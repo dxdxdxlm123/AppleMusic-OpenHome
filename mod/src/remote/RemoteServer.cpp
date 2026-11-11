@@ -2,6 +2,7 @@
 #include "AmPluginClient.h"
 #include "WebRemoteHtml.h"
 #include "PlayQueueReader.h"
+#include "AmExclusiveConfig.h"
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -1002,7 +1003,7 @@ void RemoteServer::SetupRoutes() {
         res.set_content(j.dump(), "application/json");
     });
 
-    // Audio Output Devices (WASAPI DACs, ASIO drivers, DLNA renderers)
+    // Audio Output Devices (WASAPI DACs, ASIO drivers, DLNA renderers, Roon endpoints)
     server_->Get("/api/v2/amexclusive/devices", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
         auto devices = AmPluginClient::Instance().GetDevices();
@@ -1013,11 +1014,100 @@ void RemoteServer::SetupRoutes() {
                 {"name", d.name},
                 {"type", d.type},
                 {"online", d.online},
-                {"location", d.location}
+                {"location", d.location},
+                {"address", d.address},
+                {"port", d.port},
+                {"raatVersion", d.raatVersion},
+                {"note", d.note}
             });
         }
         json j = {{"devices", arr}};
         res.set_content(j.dump(), "application/json");
+    });
+
+    // Get full AMExclusive configuration from am-exclusive.ini
+    server_->Get("/api/v2/amexclusive/config", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        auto config = ReadFullAmExclusiveConfig();
+        res.set_content(config.dump(), "application/json");
+    });
+
+    // Save AMExclusive configuration to am-exclusive.ini and optionally apply
+    server_->Post("/api/v2/amexclusive/config", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        bool ok = false;
+        try {
+            auto j = json::parse(req.body);
+            ok = SaveFullAmExclusiveConfig(j);
+            bool apply = j.value("apply", false);
+            if (apply) {
+                std::string activeTab = j.value("active_tab", "");
+                if (activeTab.empty() && j.contains("mod") && j["mod"].contains("output_tab")) {
+                    activeTab = j["mod"]["output_tab"].get<std::string>();
+                }
+                if (activeTab == "local" || activeTab == "0") {
+                    std::string output = "wasapi";
+                    if (j.contains("mod") && j["mod"].contains("output")) {
+                        output = j["mod"]["output"].get<std::string>();
+                    }
+                    if (output == "asio") {
+                        std::string clsid = j.contains("mod") ? j["mod"].value("asio_driver", "") : "";
+                        std::string name = j.contains("mod") ? j["mod"].value("asio_name", "") : "";
+                        AmPluginClient::Instance().SetOutputTarget(2, Widen(clsid), Widen(name), L"");
+                    } else {
+                        std::string id = j.contains("mod") ? j["mod"].value("wasapi_device", "") : "";
+                        std::string name = j.contains("mod") ? j["mod"].value("wasapi_name", "") : "";
+                        AmPluginClient::Instance().SetOutputTarget(0, Widen(id), Widen(name), L"");
+                    }
+                } else if (activeTab == "network" || activeTab == "1") {
+                    std::string udn = j.contains("dlna") ? j["dlna"].value("device_udn", "") : "";
+                    std::string name = j.contains("dlna") ? j["dlna"].value("device_name", "") : "";
+                    std::string loc = j.contains("dlna") ? j["dlna"].value("location", "") : "";
+                    AmPluginClient::Instance().SetOutputTarget(1, Widen(udn), Widen(name), Widen(loc));
+                } else if (activeTab == "r_device" || activeTab == "roon" || activeTab == "2") {
+                    std::string id = j.contains("roon") ? j["roon"].value("device_id", "") : "";
+                    std::string name = j.contains("roon") ? j["roon"].value("device_name", "") : "";
+                    std::string addr = j.contains("roon") ? j["roon"].value("address", "") : "";
+                    AmPluginClient::Instance().SetOutputTarget(3, Widen(id), Widen(name), Widen(addr));
+                }
+                if (j.contains("mod")) {
+                    if (j["mod"].contains("allow_resampling")) {
+                        int v = j["mod"]["allow_resampling"].is_boolean() ? (j["mod"]["allow_resampling"].get<bool>() ? 1 : 0) : j["mod"]["allow_resampling"].get<int>();
+                        AmPluginClient::Instance().SetAllowResampling(v == 1);
+                    }
+                    if (j["mod"].contains("buffer_ms")) {
+                        int ms = j["mod"]["buffer_ms"].get<int>();
+                        AmPluginClient::Instance().SetHardwareBuffer(static_cast<uint32_t>(ms));
+                    }
+                }
+                // Restart current track to apply output changes immediately
+                AmPluginClient::Instance().RequestRestartCurrent();
+            }
+        } catch (...) {
+            ok = false;
+        }
+        res.set_content(json({{"success", ok}}).dump(), "application/json");
+    });
+
+    // Restart current playing track
+    server_->Post("/api/v2/amexclusive/restart-current", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        bool ok = AmPluginClient::Instance().RequestRestartCurrent();
+        res.set_content(json({{"success", ok}}).dump(), "application/json");
+    });
+
+    // Manually add network device URL
+    server_->Post("/api/v2/amexclusive/add-device", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        bool ok = false;
+        try {
+            auto j = json::parse(req.body);
+            std::string url = j.value("url", "");
+            if (!url.empty()) {
+                ok = AmPluginClient::Instance().AddManualDevice(Widen(url));
+            }
+        } catch (...) {}
+        res.set_content(json({{"success", ok}}).dump(), "application/json");
     });
 
     // Toggle Exclusive Mode
@@ -1056,7 +1146,7 @@ void RemoteServer::SetupRoutes() {
         res.set_content(json({{"success", ok}}).dump(), "application/json");
     });
 
-    // Select Active Audio Output Target (DAC / ASIO / DLNA)
+    // Select Active Audio Output Target (DAC / ASIO / DLNA / Roon)
     server_->Post("/api/v2/amexclusive/set-device", [](const httplib::Request& req, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
         bool ok = false;

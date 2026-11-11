@@ -322,7 +322,7 @@ void BroadcastRaatDevice(const ammod::raat::RaatDevice& device) {
     {
         std::lock_guard lock(g_mutex);
         for (const auto& client : g_clients) {
-            if (client.role != Role::Ui || client.minor < 3) continue;
+            if ((client.role != Role::Ui && client.role != Role::Controller) || client.minor < 3) continue;
             HANDLE duplicate{};
             if (DuplicateHandle(GetCurrentProcess(), client.pipe, GetCurrentProcess(),
                                 &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) {

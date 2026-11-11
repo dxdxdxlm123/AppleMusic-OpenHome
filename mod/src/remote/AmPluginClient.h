@@ -33,9 +33,13 @@ struct PluginStatus {
 struct DeviceInfo {
     std::string id;
     std::string name;
-    std::string type; // "wasapi", "asio", "dlna"
+    std::string type; // "wasapi", "asio", "dlna", "raat"
     bool online{true};
     std::string location;
+    std::string address;
+    uint16_t port{0};
+    std::string raatVersion;
+    std::string note;
 };
 
 class AmPluginClient {
@@ -52,6 +56,8 @@ public:
     bool SetHardwareBuffer(uint32_t ms);
     bool SetAllowResampling(bool allow);
     bool SetOutputTarget(uint8_t kind, const std::wstring& id, const std::wstring& name, const std::wstring& location = L"");
+    bool RequestRestartCurrent();
+    bool AddManualDevice(const std::wstring& url);
     void RefreshDevices();
 
 private:
