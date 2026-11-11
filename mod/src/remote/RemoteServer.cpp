@@ -593,6 +593,38 @@ void RemoteServer::SetupRoutes() {
         res.set_content(html.data(), html.size(), "text/html; charset=utf-8");
     });
 
+    // PWA Manifest
+    server_->Get("/manifest.json", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        json j = {
+            {"name", "AMExclusive 遥控器"},
+            {"short_name", "AMExclusive"},
+            {"start_url", "/"},
+            {"display", "standalone"},
+            {"background_color", "#000000"},
+            {"theme_color", "#121214"},
+            {"orientation", "portrait"},
+            {"icons", json::array({
+                {{"src", "/icon-192.png"}, {"sizes", "192x192"}, {"type", "image/png"}},
+                {{"src", "/icon-512.png"}, {"sizes", "512x512"}, {"type", "image/png"}}
+            })}
+        };
+        res.set_content(j.dump(2), "application/manifest+json");
+    });
+
+    // PWA Icon
+    server_->Get("/icon-192.png", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        auto icon = GetAppIconPng();
+        res.set_content(icon.data(), icon.size(), "image/png");
+    });
+
+    server_->Get("/icon-512.png", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        auto icon = GetAppIconPng();
+        res.set_content(icon.data(), icon.size(), "image/png");
+    });
+
     // Health check
     server_->Get("/api/v1/playback/active", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");

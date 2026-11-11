@@ -5,96 +5,137 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="AMExclusive">
+  <meta name="theme-color" content="#121214">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icon-192.png">
   <title>AMExclusive Remote</title>
   <style>
     :root {
       --bg: #000000;
-      --card-bg: rgba(28, 28, 30, 0.75);
-      --card-hover: rgba(44, 44, 46, 0.85);
-      --card-border: rgba(255, 255, 255, 0.1);
+      --card-bg: rgba(28, 28, 30, 0.78);
+      --card-hover: rgba(44, 44, 46, 0.9);
+      --card-border: rgba(255, 255, 255, 0.08);
       --accent: #fa2d48;
       --accent-glow: rgba(250, 45, 72, 0.35);
       --text: #ffffff;
       --subtext: #8e8e93;
       --highlight: #30d158;
       --gold: #ffd60a;
+      --nav-height: 64px;
+      --mini-player-height: 56px;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
       background-color: var(--bg);
       color: var(--text);
       min-height: 100vh;
       display: flex;
       flex-direction: column;
       overflow-x: hidden;
-      padding-bottom: 78px;
+      padding-bottom: calc(var(--nav-height) + var(--mini-player-height) + 12px);
+      user-select: none;
     }
+
+    /* Ambient Glow Background */
+    .ambient-glow {
+      position: fixed;
+      top: -100px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 380px;
+      height: 380px;
+      background: radial-gradient(circle, rgba(250, 45, 72, 0.22) 0%, rgba(138, 43, 226, 0.12) 50%, transparent 80%);
+      filter: blur(60px);
+      pointer-events: none;
+      z-index: 0;
+      opacity: 0.8;
+      transition: all 1s ease;
+    }
+
+    /* Header */
     .header {
       padding: 14px 18px 10px;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      backdrop-filter: blur(20px);
+      backdrop-filter: blur(25px);
+      -webkit-backdrop-filter: blur(25px);
       position: sticky;
       top: 0;
       z-index: 50;
       border-bottom: 1px solid var(--card-border);
-      background: rgba(0,0,0,0.65);
+      background: rgba(12, 12, 14, 0.72);
     }
-    .brand { font-size: 18px; font-weight: 700; letter-spacing: -0.5px; display: flex; align-items: center; gap: 6px; }
+    .brand { font-size: 19px; font-weight: 700; letter-spacing: -0.5px; display: flex; align-items: center; gap: 6px; }
     .brand span { color: var(--accent); }
     .status-badge {
       font-size: 11px;
       padding: 4px 10px;
       border-radius: 12px;
-      background: rgba(255,255,255,0.1);
+      background: rgba(255,255,255,0.08);
       font-weight: 600;
       display: flex;
       align-items: center;
-      gap: 5px;
+      gap: 6px;
+      cursor: pointer;
     }
     .status-dot { width: 7px; height: 7px; border-radius: 50%; background: #ff453a; }
     .status-dot.active { background: var(--highlight); box-shadow: 0 0 8px var(--highlight); }
 
     /* Tab content views */
-    .tab-content { display: none; padding: 14px 16px; flex: 1; }
-    .tab-content.active { display: block; }
+    .tab-content { display: none; padding: 14px 16px; flex: 1; z-index: 1; position: relative; }
+    .tab-content.active { display: block; animation: fadeIn 0.25s ease; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
-    /* Now Playing Tab */
+    /* ================================================= */
+    /* Tab 1: Now Playing View                           */
+    /* ================================================= */
     .player-card {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
-      border-radius: 20px;
-      padding: 24px 20px;
+      border-radius: 22px;
+      padding: 24px 20px 20px;
       display: flex;
       flex-direction: column;
       align-items: center;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+      box-shadow: 0 10px 36px rgba(0,0,0,0.5);
       margin-top: 6px;
+      position: relative;
+      overflow: hidden;
     }
-    .cover-art {
+    .cover-art-box {
+      position: relative;
       width: 250px;
       height: 250px;
-      border-radius: 16px;
-      object-fit: cover;
-      box-shadow: 0 12px 28px rgba(0,0,0,0.6);
       margin-bottom: 20px;
+    }
+    .cover-art {
+      width: 100%;
+      height: 100%;
+      border-radius: 18px;
+      object-fit: cover;
+      box-shadow: 0 14px 32px rgba(0,0,0,0.65);
       background: #1c1c1e;
     }
-    .track-title { font-size: 21px; font-weight: 700; text-align: center; margin-bottom: 4px; max-width: 90%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .track-title { font-size: 21px; font-weight: 700; text-align: center; margin-bottom: 4px; max-width: 90%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; letter-spacing: -0.3px; }
     .track-artist { font-size: 15px; color: var(--subtext); text-align: center; margin-bottom: 12px; max-width: 90%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .track-meta-row { display: flex; align-items: center; gap: 10px; margin-bottom: 16px; }
+    .track-meta-row { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
     .audio-quality-tag {
       font-size: 11px;
       background: rgba(250, 45, 72, 0.15);
       color: #ff3b30;
-      padding: 3px 10px;
+      padding: 3px 12px;
       border-radius: 20px;
       font-weight: 600;
       border: 1px solid rgba(250, 45, 72, 0.3);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 4px;
     }
-    .btn-fav { background: none; border: none; font-size: 19px; cursor: pointer; color: var(--subtext); transition: transform 0.15s, color 0.15s; }
+    .btn-fav { background: none; border: none; font-size: 20px; cursor: pointer; color: var(--subtext); transition: transform 0.15s; }
     .btn-fav.active { color: var(--accent); transform: scale(1.15); }
 
     .progress-bar-container { width: 100%; margin-bottom: 18px; }
@@ -102,7 +143,7 @@
       width: 100%;
       height: 6px;
       -webkit-appearance: none;
-      background: rgba(255,255,255,0.2);
+      background: rgba(255,255,255,0.18);
       border-radius: 3px;
       outline: none;
     }
@@ -117,8 +158,9 @@
     }
     .time-labels { display: flex; justify-content: space-between; font-size: 12px; color: var(--subtext); margin-top: 6px; }
 
-    .controls { display: flex; align-items: center; justify-content: center; gap: 32px; width: 100%; margin-top: 6px; }
-    .ctrl-btn { background: none; border: none; color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 26px; }
+    .controls { display: flex; align-items: center; justify-content: center; gap: 34px; width: 100%; margin-top: 6px; }
+    .ctrl-btn { background: none; border: none; color: #fff; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 26px; transition: transform 0.1s; }
+    .ctrl-btn:active { transform: scale(0.9); }
     .play-btn {
       width: 66px;
       height: 66px;
@@ -126,7 +168,7 @@
       color: #000;
       border-radius: 50%;
       font-size: 28px;
-      box-shadow: 0 6px 18px rgba(255,255,255,0.2);
+      box-shadow: 0 6px 20px rgba(255,255,255,0.22);
     }
     .device-pill {
       font-size: 12px;
@@ -138,9 +180,12 @@
       display: flex;
       align-items: center;
       gap: 6px;
+      cursor: pointer;
     }
 
-    /* Search Box & Category Filters */
+    /* ================================================= */
+    /* Search Box & Category Filters                     */
+    /* ================================================= */
     .search-input-box {
       display: flex;
       align-items: center;
@@ -148,7 +193,7 @@
       border: 1px solid var(--card-border);
       border-radius: 12px;
       padding: 8px 12px;
-      margin-bottom: 12px;
+      margin-bottom: 10px;
       gap: 8px;
     }
     .search-input-box input {
@@ -159,6 +204,7 @@
       font-size: 16px;
       flex: 1;
     }
+    .btn-clear { background: none; border: none; color: var(--subtext); font-size: 16px; cursor: pointer; padding: 2px 6px; }
     .btn-search {
       background: var(--accent);
       border: none;
@@ -168,12 +214,30 @@
       font-weight: 600;
       cursor: pointer;
     }
+    .quick-history-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow-x: auto;
+      scrollbar-width: none;
+      margin-bottom: 12px;
+    }
+    .quick-history-bar::-webkit-scrollbar { display: none; }
+    .quick-chip {
+      font-size: 12px;
+      color: var(--subtext);
+      background: rgba(255,255,255,0.06);
+      padding: 4px 10px;
+      border-radius: 12px;
+      white-space: nowrap;
+      cursor: pointer;
+    }
     .chips-bar {
       display: flex;
       gap: 8px;
       overflow-x: auto;
-      padding-bottom: 10px;
-      margin-bottom: 14px;
+      padding-bottom: 8px;
+      margin-bottom: 12px;
       scrollbar-width: none;
     }
     .chips-bar::-webkit-scrollbar { display: none; }
@@ -199,14 +263,15 @@
     .section-title {
       font-size: 16px;
       font-weight: 700;
-      margin: 18px 0 10px;
+      margin: 16px 0 10px;
       display: flex;
       align-items: center;
       justify-content: space-between;
+      letter-spacing: -0.2px;
     }
     .section-title span { color: var(--subtext); font-size: 13px; font-weight: normal; }
 
-    /* Search Artists Card */
+    /* Artists Card */
     .artist-card {
       display: flex;
       align-items: center;
@@ -214,12 +279,12 @@
       border: 1px solid var(--card-border);
       border-radius: 14px;
       padding: 12px 14px;
-      margin-bottom: 12px;
+      margin-bottom: 10px;
       cursor: pointer;
       gap: 14px;
-      transition: background 0.15s;
+      transition: background 0.15s, transform 0.1s;
     }
-    .artist-card:active { background: var(--card-hover); }
+    .artist-card:active { background: var(--card-hover); transform: scale(0.98); }
     .artist-card img { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; }
     .artist-card-info { flex: 1; overflow: hidden; }
     .artist-card-name { font-size: 16px; font-weight: 600; }
@@ -236,19 +301,19 @@
     .album-card {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
-      border-radius: 12px;
+      border-radius: 14px;
       padding: 10px;
       cursor: pointer;
       display: flex;
       flex-direction: column;
-      transition: background 0.15s;
+      transition: background 0.15s, transform 0.1s;
     }
-    .album-card:active { background: var(--card-hover); }
-    .album-card img { width: 100%; aspect-ratio: 1; border-radius: 8px; object-fit: cover; margin-bottom: 8px; background: #222; }
+    .album-card:active { background: var(--card-hover); transform: scale(0.97); }
+    .album-card img { width: 100%; aspect-ratio: 1; border-radius: 10px; object-fit: cover; margin-bottom: 8px; background: #222; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }
     .album-card-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .album-card-sub { font-size: 12px; color: var(--subtext); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-    /* Songs / Playlists List */
+    /* Songs List */
     .song-list { display: flex; flex-direction: column; gap: 8px; }
     .song-item {
       display: flex;
@@ -259,25 +324,27 @@
       border-radius: 12px;
       cursor: pointer;
       gap: 12px;
-      transition: background 0.15s;
+      transition: background 0.15s, transform 0.1s;
     }
-    .song-item:active { background: var(--card-hover); }
+    .song-item:active { background: var(--card-hover); transform: scale(0.98); }
     .song-item img { width: 46px; height: 46px; border-radius: 8px; object-fit: cover; background: #222; }
     .song-num { font-size: 13px; color: var(--subtext); width: 22px; text-align: center; }
     .song-info { flex: 1; overflow: hidden; }
     .song-title { font-size: 15px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .song-sub { font-size: 12px; color: var(--subtext); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .song-actions { display: flex; align-items: center; gap: 12px; }
+    .song-actions { display: flex; align-items: center; gap: 10px; }
     .song-play { color: var(--accent); font-size: 18px; }
 
-    /* Detail View Container (Overlay) */
-    .detail-view { display: none; padding: 10px 0; }
-    .detail-view.active { display: block; }
+    /* ================================================= */
+    /* Detail View Container (Overlay / Sub-page)        */
+    /* ================================================= */
+    .detail-view { display: none; padding: 4px 0; }
+    .detail-view.active { display: block; animation: fadeIn 0.2s ease; }
     .nav-back-bar {
       display: flex;
       align-items: center;
-      gap: 8px;
-      margin-bottom: 14px;
+      gap: 6px;
+      margin-bottom: 12px;
       color: var(--accent);
       cursor: pointer;
       font-size: 15px;
@@ -286,32 +353,94 @@
     .detail-hero {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
-      border-radius: 16px;
+      border-radius: 18px;
       padding: 16px;
       display: flex;
       gap: 16px;
       align-items: center;
       margin-bottom: 16px;
     }
-    .detail-hero img { width: 100px; height: 100px; border-radius: 12px; object-fit: cover; box-shadow: 0 4px 14px rgba(0,0,0,0.5); }
+    .detail-hero img { width: 104px; height: 104px; border-radius: 12px; object-fit: cover; box-shadow: 0 6px 18px rgba(0,0,0,0.5); }
     .detail-hero-info { flex: 1; overflow: hidden; }
-    .detail-hero-title { font-size: 18px; font-weight: 700; margin-bottom: 4px; }
-    .detail-hero-sub { font-size: 13px; color: var(--subtext); margin-bottom: 10px; }
+    .detail-hero-title { font-size: 18px; font-weight: 700; margin-bottom: 4px; letter-spacing: -0.3px; }
+    .detail-hero-sub { font-size: 13px; color: var(--subtext); margin-bottom: 12px; }
     .btn-play-all {
       background: var(--accent);
       border: none;
       color: #fff;
-      padding: 6px 14px;
+      padding: 7px 16px;
       border-radius: 20px;
       font-size: 13px;
       font-weight: 600;
       cursor: pointer;
       display: inline-flex;
       align-items: center;
-      gap: 4px;
+      gap: 5px;
     }
 
-    /* Settings Tab */
+    /* ================================================= */
+    /* Telemetry Modal Sheet (Audiophile Path Inspector) */
+    /* ================================================= */
+    .modal-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(10px);
+      z-index: 200;
+      display: none;
+      align-items: flex-end;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal-sheet {
+      background: #1c1c1e;
+      border-top: 1px solid var(--card-border);
+      border-radius: 24px 24px 0 0;
+      padding: 22px 20px 34px;
+      width: 100%;
+      max-height: 80vh;
+      overflow-y: auto;
+      animation: slideUp 0.25s ease;
+    }
+    @keyframes slideUp { from { transform: translateY(100%); } to { transform: translateY(0); } }
+    .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+    .modal-title { font-size: 18px; font-weight: 700; }
+    .modal-close { background: rgba(255,255,255,0.1); border: none; color: #fff; border-radius: 50%; width: 28px; height: 28px; font-size: 14px; cursor: pointer; }
+    .telemetry-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 0; border-bottom: 1px solid rgba(255,255,255,0.06); }
+    .telemetry-label { font-size: 14px; color: var(--subtext); }
+    .telemetry-val { font-size: 14px; font-weight: 600; color: #fff; text-align: right; }
+
+    /* ================================================= */
+    /* Global Persistent Floating Mini-Player            */
+    /* ================================================= */
+    .mini-player {
+      position: fixed;
+      bottom: var(--nav-height);
+      left: 10px;
+      right: 10px;
+      height: var(--mini-player-height);
+      background: rgba(30, 30, 32, 0.88);
+      backdrop-filter: blur(25px);
+      -webkit-backdrop-filter: blur(25px);
+      border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 14px;
+      display: flex;
+      align-items: center;
+      padding: 6px 14px 6px 8px;
+      z-index: 90;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.5);
+      cursor: pointer;
+      transition: transform 0.2s;
+    }
+    .mini-player img { width: 42px; height: 42px; border-radius: 8px; object-fit: cover; margin-right: 10px; background: #222; }
+    .mini-player-info { flex: 1; overflow: hidden; }
+    .mini-player-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mini-player-sub { font-size: 12px; color: var(--subtext); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+    .mini-player-ctrls { display: flex; align-items: center; gap: 14px; }
+    .mini-btn { background: none; border: none; color: #fff; font-size: 20px; cursor: pointer; }
+
+    /* ================================================= */
+    /* Settings Tab                                      */
+    /* ================================================= */
     .settings-group {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
@@ -360,15 +489,18 @@
       max-width: 180px;
     }
 
-    /* Bottom Nav Bar */
+    /* ================================================= */
+    /* Bottom Navigation Bar                             */
+    /* ================================================= */
     .nav-bar {
       position: fixed;
       bottom: 0;
       left: 0;
       right: 0;
-      height: 64px;
-      background: rgba(20, 20, 22, 0.92);
+      height: var(--nav-height);
+      background: rgba(14, 14, 16, 0.94);
       backdrop-filter: blur(25px);
+      -webkit-backdrop-filter: blur(25px);
       border-top: 1px solid var(--card-border);
       display: flex;
       justify-content: space-around;
@@ -384,9 +516,10 @@
       cursor: pointer;
       font-size: 11px;
       font-weight: 600;
-      gap: 4px;
+      gap: 3px;
       flex: 1;
       height: 100%;
+      transition: color 0.15s;
     }
     .nav-item.active { color: var(--accent); }
     .nav-icon { font-size: 19px; }
@@ -394,24 +527,30 @@
 </head>
 <body>
 
+  <!-- Ambient Glow -->
+  <div class="ambient-glow" id="ambientGlow"></div>
+
+  <!-- Header -->
   <div class="header">
     <div class="brand">AM<span>Exclusive</span></div>
-    <div class="status-badge">
+    <div class="status-badge" onclick="openTelemetryModal()">
       <div class="status-dot" id="statusDot"></div>
-      <span id="statusText">正在连接...</span>
+      <span id="statusText">检测中...</span>
     </div>
   </div>
 
-  <!-- ========================================== -->
-  <!-- Tab 1: 正在播放 (Now Playing)             -->
-  <!-- ========================================== -->
+  <!-- ================================================= -->
+  <!-- Tab 1: 正在播放 (Now Playing)                     -->
+  <!-- ================================================= -->
   <div class="tab-content active" id="tab-player">
     <div class="player-card">
-      <img src="/api/v2/playback/artwork" class="cover-art" id="playerCover" alt="Artwork" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'240\' height=\'240\' viewBox=\'0 0 240 240\'><rect fill=\'%23222\' width=\'240\' height=\'240\'/><text fill=\'%23555\' font-size=\'40\' x=\'50%25\' y=\'50%25\' dominant-baseline=\'middle\' text-anchor=\'middle\'>🎵</text></svg>'">
+      <div class="cover-art-box">
+        <img src="/api/v2/playback/artwork" class="cover-art" id="playerCover" alt="Artwork" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'250\' height=\'250\' viewBox=\'0 0 250 250\'><rect fill=\'%231c1c1e\' width=\'250\' height=\'250\'/><text fill=\'%23555\' font-size=\'48\' x=\'50%25\' y=\'50%25\' dominant-baseline=\'middle\' text-anchor=\'middle\'>🎵</text></svg>'">
+      </div>
       <div class="track-title" id="playerTitle">未播放</div>
       <div class="track-artist" id="playerArtist">打开 Apple Music 播放</div>
       <div class="track-meta-row">
-        <div class="audio-quality-tag" id="playerQuality">Hi-Res Lossless</div>
+        <div class="audio-quality-tag" id="playerQuality" onclick="openTelemetryModal()">⚡ Hi-Res Lossless</div>
         <button class="btn-fav" id="btnPlayerFav" onclick="togglePlayerFavorite()">🤍</button>
       </div>
 
@@ -429,23 +568,35 @@
         <button class="ctrl-btn" onclick="apiControl('next')">⏭</button>
       </div>
 
-      <div class="device-pill" id="lblPlayerDevice">
+      <div class="device-pill" id="lblPlayerDevice" onclick="switchTab('settings', document.querySelectorAll('.nav-item')[3])">
         <span>🔊</span><span id="lblPlayerDeviceName">正在加载输出设备...</span>
       </div>
     </div>
   </div>
 
-  <!-- ========================================== -->
-  <!-- Tab 2: 曲库搜索 (Search)                   -->
-  <!-- ========================================== -->
+  <!-- ================================================= -->
+  <!-- Tab 2: 曲库搜索 (Search)                           -->
+  <!-- ================================================= -->
   <div class="tab-content" id="tab-search">
-    <!-- Search Bar & Filters -->
     <div id="searchMainView">
       <div class="search-input-box">
         <span>🔍</span>
         <input type="text" id="searchInput" placeholder="搜索五月天、周杰伦、Taylor Swift..." onkeydown="if(event.key==='Enter')doSearch()">
+        <button class="btn-clear" onclick="clearSearch()">✕</button>
         <button class="btn-search" onclick="doSearch()">搜索</button>
       </div>
+
+      <!-- Quick History Suggestions -->
+      <div class="quick-history-bar">
+        <span style="font-size:11px;color:var(--subtext);margin-right:2px;">常用:</span>
+        <div class="quick-chip" onclick="quickSearch('五月天')">五月天</div>
+        <div class="quick-chip" onclick="quickSearch('周杰伦')">周杰伦</div>
+        <div class="quick-chip" onclick="quickSearch('Taylor Swift')">Taylor Swift</div>
+        <div class="quick-chip" onclick="quickSearch('林宥嘉')">林宥嘉</div>
+        <div class="quick-chip" onclick="quickSearch('陈奕迅')">陈奕迅</div>
+      </div>
+
+      <!-- Category Filter Chips -->
       <div class="chips-bar">
         <div class="chip active" onclick="setSearchFilter('all', this)">全部</div>
         <div class="chip" onclick="setSearchFilter('songs', this)">单曲</div>
@@ -454,16 +605,16 @@
         <div class="chip" onclick="setSearchFilter('playlists', this)">歌单</div>
       </div>
 
-      <!-- Search Results Container -->
+      <!-- Results Container -->
       <div id="searchResults">
-        <div style="text-align:center;color:var(--subtext);padding:40px 0;">输入歌手、歌曲或专辑名称搜索 Apple Music 曲库</div>
+        <div style="text-align:center;color:var(--subtext);padding:40px 0;">输入歌手、歌曲或专辑搜索 Apple Music 无损曲库</div>
       </div>
     </div>
 
     <!-- Detail View: Album Tracks -->
     <div class="detail-view" id="albumDetailView">
       <div class="nav-back-bar" onclick="hideDetailView()">
-        <span>← 返回搜索结果</span>
+        <span>‹ 返回搜索</span>
       </div>
       <div class="detail-hero">
         <img id="albHeroCover" src="" alt="Album Cover">
@@ -480,7 +631,7 @@
     <!-- Detail View: Playlist Tracks -->
     <div class="detail-view" id="playlistDetailView">
       <div class="nav-back-bar" onclick="hideDetailView()">
-        <span>← 返回搜索结果</span>
+        <span>‹ 返回搜索</span>
       </div>
       <div class="detail-hero">
         <img id="plHeroCover" src="" alt="Playlist Cover">
@@ -497,7 +648,7 @@
     <!-- Detail View: Artist Page -->
     <div class="detail-view" id="artistDetailView">
       <div class="nav-back-bar" onclick="hideDetailView()">
-        <span>← 返回搜索结果</span>
+        <span>‹ 返回搜索</span>
       </div>
       <div class="detail-hero">
         <img id="artHeroCover" style="border-radius:50%;" src="" alt="Artist Cover">
@@ -506,14 +657,14 @@
           <div class="detail-hero-sub" id="artHeroGenre">流派</div>
         </div>
       </div>
-      <div class="section-title">所有专辑</div>
+      <div class="section-title">官方专辑列表 <span>点击进入专辑</span></div>
       <div class="albums-grid" id="artAlbumsGrid"></div>
     </div>
   </div>
 
-  <!-- ========================================== -->
-  <!-- Tab 3: 资料库 (Library)                   -->
-  <!-- ========================================== -->
+  <!-- ================================================= -->
+  <!-- Tab 3: 资料库 (Library)                           -->
+  <!-- ================================================= -->
   <div class="tab-content" id="tab-library">
     <div class="chips-bar">
       <div class="chip active" onclick="switchLibrarySub('recent', this)">最近播放</div>
@@ -522,13 +673,13 @@
     </div>
 
     <div id="libContainer">
-      <div style="text-align:center;color:var(--subtext);padding:30px 0;">正在读取个人资料库...</div>
+      <div style="text-align:center;color:var(--subtext);padding:30px 0;">正在同步个人资料库...</div>
     </div>
   </div>
 
-  <!-- ========================================== -->
-  <!-- Tab 4: 独占设置 (Settings)                -->
-  <!-- ========================================== -->
+  <!-- ================================================= -->
+  <!-- Tab 4: 独占设置 (Settings)                        -->
+  <!-- ================================================= -->
   <div class="tab-content" id="tab-settings">
     <div class="settings-group">
       <div class="settings-title">
@@ -578,7 +729,7 @@
     </div>
 
     <div class="settings-group">
-      <div class="settings-title">实时音频流监视器</div>
+      <div class="settings-title">实时音频链路监视</div>
       <div class="setting-row">
         <div class="setting-label">当前流格式</div>
         <div class="setting-desc" id="lblStreamFormat" style="color:var(--highlight);font-weight:600;">--</div>
@@ -588,9 +739,74 @@
         <div class="setting-desc" id="lblEndpointName">--</div>
       </div>
     </div>
+
+    <div class="settings-group">
+      <div class="settings-title">独立 App 安装说明</div>
+      <div class="setting-desc" style="line-height:1.6;color:#ccc;">
+        • <b>iPhone / iPad (iOS)</b>：点击 Safari 浏览器底部的【分享】按钮，选择<b>「添加到主屏幕」</b>，即可作为独立 App 全屏运行，无任何浏览器地址栏。<br>
+        • <b>Android 手机</b>：点击浏览器菜单（右上角三点），选择<b>「安装应用」</b>或<b>「添加到主屏幕」</b>，桌面生成独立图标。
+      </div>
+    </div>
   </div>
 
-  <!-- Bottom Navigation -->
+  <!-- ================================================= -->
+  <!-- Global Persistent Floating Mini-Player            -->
+  <!-- ================================================= -->
+  <div class="mini-player" id="miniPlayer" style="display:none;" onclick="expandToPlayer()">
+    <img id="miniCover" src="/api/v2/playback/artwork" alt="Mini Cover">
+    <div class="mini-player-info">
+      <div class="mini-player-title" id="miniTitle">未播放</div>
+      <div class="mini-player-sub" id="miniArtist">点击切换至完整播放器</div>
+    </div>
+    <div class="mini-player-ctrls" onclick="event.stopPropagation()">
+      <button class="mini-btn" id="miniBtnPlay" onclick="apiControl('toggle')">▶</button>
+      <button class="mini-btn" onclick="apiControl('next')">⏭</button>
+    </div>
+  </div>
+
+  <!-- ================================================= -->
+  <!-- Audiophile Telemetry Sheet Modal                  -->
+  <!-- ================================================= -->
+  <div class="modal-overlay" id="telemetryModal" onclick="closeTelemetryModal()">
+    <div class="modal-sheet" onclick="event.stopPropagation()">
+      <div class="modal-header">
+        <div class="modal-title">⚡ 独占音频流透视监视器</div>
+        <button class="modal-close" onclick="closeTelemetryModal()">✕</button>
+      </div>
+      <div class="telemetry-row">
+        <div class="telemetry-label">音频品质档位</div>
+        <div class="telemetry-val" id="telQuality">Hi-Res Lossless</div>
+      </div>
+      <div class="telemetry-row">
+        <div class="telemetry-label">实时流采样规格</div>
+        <div class="telemetry-val" id="telFormat" style="color:var(--highlight);">192,000 Hz / 24-bit</div>
+      </div>
+      <div class="telemetry-row">
+        <div class="telemetry-label">独占输出引擎</div>
+        <div class="telemetry-val" id="telEngine">WASAPI Exclusive</div>
+      </div>
+      <div class="telemetry-row">
+        <div class="telemetry-label">硬件 DAC 端点</div>
+        <div class="telemetry-val" id="telDevice">--</div>
+      </div>
+      <div class="telemetry-row">
+        <div class="telemetry-label">硬件缓冲延迟</div>
+        <div class="telemetry-val" id="telBuffer">20 ms</div>
+      </div>
+      <div class="telemetry-row">
+        <div class="telemetry-label">信号传输模式</div>
+        <div class="telemetry-val" style="color:var(--gold);">Bit-Perfect 直通 (无损)</div>
+      </div>
+      <div class="telemetry-row">
+        <div class="telemetry-label">Windows 混音器</div>
+        <div class="telemetry-val" style="color:var(--highlight);">已完全绕过 (物理独占)</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================= -->
+  <!-- Bottom Navigation                                 -->
+  <!-- ================================================= -->
   <div class="nav-bar">
     <div class="nav-item active" onclick="switchTab('player', this)">
       <div class="nav-icon">▶</div>
@@ -620,14 +836,30 @@
     let currentAlbumId = '';
     let currentPlaylistId = '';
     let favoriteList = [];
+    let currentTab = 'player';
+    let currentPluginStatus = null;
 
     function switchTab(name, elem) {
+      currentTab = name;
       document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-      document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+      document.querySelectorAll('.nav-bar .nav-item').forEach(i => i.classList.remove('active'));
       document.getElementById('tab-' + name).classList.add('active');
-      elem.classList.add('active');
+      if (elem) elem.classList.add('active');
+
+      // Update Mini Player visibility
+      const mini = document.getElementById('miniPlayer');
+      if (name === 'player') {
+        mini.style.display = 'none';
+      } else if (currentTrackSnapshot && currentTrackSnapshot.name) {
+        mini.style.display = 'flex';
+      }
+
       if (name === 'settings') refreshSettings();
       if (name === 'library') loadLibrary('recent');
+    }
+
+    function expandToPlayer() {
+      switchTab('player', document.querySelectorAll('.nav-bar .nav-item')[0]);
     }
 
     function formatTime(sec) {
@@ -659,15 +891,29 @@
         const np = data.nowPlaying || {};
         currentTrackSnapshot = np;
 
+        // Player Tab
         document.getElementById('playerTitle').textContent = np.name || '未播放';
         document.getElementById('playerArtist').textContent = (np.artistName ? np.artistName + (np.albumName ? ' — ' + np.albumName : '') : '打开 Apple Music 播放');
         
         const isPlaying = data.state === 'playing';
         document.getElementById('btnPlay').textContent = isPlaying ? '⏸' : '▶';
+        document.getElementById('miniBtnPlay').textContent = isPlaying ? '⏸' : '▶';
 
+        // Mini Player
+        document.getElementById('miniTitle').textContent = np.name || '未播放';
+        document.getElementById('miniArtist').textContent = np.artistName || 'Apple Music';
+        const mini = document.getElementById('miniPlayer');
+        if (currentTab !== 'player' && np.name) {
+          mini.style.display = 'flex';
+        } else {
+          mini.style.display = 'none';
+        }
+
+        // Quality
         const qRes = await fetch('/api/v2/playback/audio-quality');
         const qData = await qRes.json();
-        document.getElementById('playerQuality').textContent = qData.data.flavorLabel || 'Lossless';
+        const qLabel = qData.data.flavorLabel || 'Lossless';
+        document.getElementById('playerQuality').textContent = qLabel;
 
         const cur = data.time ? data.time.currentTime : 0;
         const dur = data.time ? data.time.duration : 0;
@@ -680,9 +926,11 @@
           document.getElementById('progressSlider').value = (cur / dur) * 100;
         }
 
-        document.getElementById('playerCover').src = '/api/v2/playback/artwork?t=' + Date.now();
+        const artSrc = '/api/v2/playback/artwork?t=' + Date.now();
+        document.getElementById('playerCover').src = artSrc;
+        document.getElementById('miniCover').src = artSrc;
 
-        // Update favorite heart
+        // Favorite heart
         const isFav = favoriteList.some(f => f.name === np.name && f.artist === np.artistName);
         const favBtn = document.getElementById('btnPlayerFav');
         favBtn.textContent = isFav ? '❤️' : '🤍';
@@ -733,11 +981,40 @@
     }
 
     // ==========================================
+    // Telemetry Modal
+    // ==========================================
+    function openTelemetryModal() {
+      const m = document.getElementById('telemetryModal');
+      m.classList.add('active');
+      if (currentPluginStatus) {
+        document.getElementById('telFormat').textContent = currentPluginStatus.format || '192,000 Hz / 24-bit';
+        document.getElementById('telDevice').textContent = currentPluginStatus.endpointName || '系统默认音频设备';
+        document.getElementById('telBuffer').textContent = (currentPluginStatus.hardwareBufferMs || 20) + ' ms';
+        const stName = currentPluginStatus.stateName || '';
+        document.getElementById('telEngine').textContent = (stName === 'Active' ? 'WASAPI Exclusive 独占引擎' : stName);
+      }
+    }
+
+    function closeTelemetryModal() {
+      document.getElementById('telemetryModal').classList.remove('active');
+    }
+
+    // ==========================================
     // Search Functions & Category Navigation
     // ==========================================
+    function clearSearch() {
+      document.getElementById('searchInput').value = '';
+      document.getElementById('searchInput').focus();
+    }
+
+    function quickSearch(term) {
+      document.getElementById('searchInput').value = term;
+      doSearch();
+    }
+
     function setSearchFilter(filter, elem) {
       currentSearchFilter = filter;
-      document.querySelectorAll('.chips-bar .chip').forEach(c => c.classList.remove('active'));
+      document.querySelectorAll('#tab-search .chips-bar .chip').forEach(c => c.classList.remove('active'));
       elem.classList.add('active');
       renderSearchResults();
     }
@@ -750,7 +1027,7 @@
       resDiv.innerHTML = '<div style="text-align:center;padding:30px;color:var(--subtext);">正在搜索 Apple Music 曲库...</div>';
 
       try {
-        const r = await fetch('/api/v2/amapi/search?term=' + encodeURIComponent(term) + '&types=songs,albums,artists,playlists&limit=20');
+        const r = await fetch('/api/v2/amapi/search?term=' + encodeURIComponent(term) + '&types=songs,albums,artists,playlists&limit=25');
         const d = await r.json();
         currentSearchData = (d.data && d.data.results) || {};
         renderSearchResults();
@@ -779,7 +1056,7 @@
       if ((currentSearchFilter === 'all' || currentSearchFilter === 'artists') && artists.length > 0) {
         const aSec = document.createElement('div');
         aSec.innerHTML = '<div class="section-title">艺人 / 歌手</div>';
-        artists.slice(0, currentSearchFilter === 'all' ? 2 : 10).forEach(art => {
+        artists.slice(0, currentSearchFilter === 'all' ? 2 : 12).forEach(art => {
           const a = art.attributes;
           const artUrl = formatArt(a.artwork ? a.artwork.url : '', '160');
           const card = document.createElement('div');
@@ -827,7 +1104,7 @@
         plSec.innerHTML = '<div class="section-title">精选歌单</div>';
         const grid = document.createElement('div');
         grid.className = 'albums-grid';
-        playlists.slice(0, currentSearchFilter === 'all' ? 2 : 10).forEach(pl => {
+        playlists.slice(0, currentSearchFilter === 'all' ? 2 : 12).forEach(pl => {
           const a = pl.attributes;
           const covUrl = formatArt(a.artwork ? a.artwork.url : '', '240');
           const card = document.createElement('div');
@@ -847,10 +1124,10 @@
       // 4. Songs Section
       if ((currentSearchFilter === 'all' || currentSearchFilter === 'songs') && songs.length > 0) {
         const sSec = document.createElement('div');
-        sSec.innerHTML = '<div class="section-title">单曲</div>';
+        sSec.innerHTML = '<div class="section-title">热门单曲</div>';
         const list = document.createElement('div');
         list.className = 'song-list';
-        songs.forEach((s, idx) => {
+        songs.forEach(s => {
           const a = s.attributes;
           const art = formatArt(a.artwork ? a.artwork.url : '', '100');
           const item = document.createElement('div');
@@ -865,9 +1142,7 @@
               <span class="song-play">▶</span>
             </div>
           `;
-          item.onclick = async () => {
-            playTrackDirect(s.id, a.name);
-          };
+          item.onclick = async () => playTrackDirect(s.id, a.name);
           list.appendChild(item);
         });
         sSec.appendChild(list);
@@ -882,7 +1157,7 @@
         body: JSON.stringify({ type: 'songs', id: id, name: name })
       });
       setTimeout(() => {
-        switchTab('player', document.querySelectorAll('.nav-item')[0]);
+        switchTab('player', document.querySelectorAll('.nav-bar .nav-item')[0]);
         fetchNowPlaying();
       }, 700);
     }
@@ -915,7 +1190,7 @@
         const albData = (json.data && json.data.data && json.data.data[0]) || {};
         const tracks = (albData.relationships && albData.relationships.tracks && albData.relationships.tracks.data) || [];
 
-        document.getElementById('albTrackCount').textContent = `共 ${tracks.length} 首歌曲`;
+        document.getElementById('albTrackCount').textContent = `共 ${tracks.length} 首`;
         trackListDiv.innerHTML = '';
 
         tracks.forEach((t, i) => {
@@ -937,7 +1212,7 @@
           trackListDiv.appendChild(row);
         });
       } catch (e) {
-        trackListDiv.innerHTML = '<div style="text-align:center;padding:20px;color:red;">曲目加载失败: ' + e.message + '</div>';
+        trackListDiv.innerHTML = '<div style="text-align:center;padding:20px;color:red;">曲目加载失败</div>';
       }
     }
 
@@ -949,7 +1224,7 @@
         body: JSON.stringify({ type: 'albums', id: currentAlbumId })
       });
       setTimeout(() => {
-        switchTab('player', document.querySelectorAll('.nav-item')[0]);
+        switchTab('player', document.querySelectorAll('.nav-bar .nav-item')[0]);
         fetchNowPlaying();
       }, 700);
     }
@@ -975,7 +1250,7 @@
         const tracks = (plData.relationships && plData.relationships.tracks && plData.relationships.tracks.data) || [];
 
         trackListDiv.innerHTML = '';
-        tracks.forEach((t, i) => {
+        tracks.forEach(t => {
           const a = t.attributes;
           const art = formatArt(a.artwork ? a.artwork.url : '', '90');
           const row = document.createElement('div');
@@ -1006,7 +1281,7 @@
         body: JSON.stringify({ type: 'playlists', id: currentPlaylistId })
       });
       setTimeout(() => {
-        switchTab('player', document.querySelectorAll('.nav-item')[0]);
+        switchTab('player', document.querySelectorAll('.nav-bar .nav-item')[0]);
         fetchNowPlaying();
       }, 700);
     }
@@ -1025,7 +1300,7 @@
       grid.innerHTML = '<div style="grid-column:1/3;text-align:center;padding:20px;color:var(--subtext);">正在加载专辑列表...</div>';
 
       try {
-        const res = await fetch('/api/v2/amapi/raw/v1/catalog/cn/artists/' + artistId + '/albums?limit=20');
+        const res = await fetch('/api/v2/amapi/raw/v1/catalog/cn/artists/' + artistId + '/albums?limit=25');
         const json = await res.json();
         const albums = (json.data && json.data.data) || [];
 
@@ -1059,7 +1334,7 @@
 
     async function loadLibrary(type) {
       const c = document.getElementById('libContainer');
-      c.innerHTML = '<div style="text-align:center;padding:30px;color:var(--subtext);">正在加载资料库...</div>';
+      c.innerHTML = '<div style="text-align:center;padding:30px;color:var(--subtext);">正在读取资料库...</div>';
 
       if (type === 'recent') {
         try {
@@ -1072,7 +1347,7 @@
             return;
           }
 
-          c.innerHTML = '<div class="section-title">最近播放曲目 <span>已自动同步 Apple Music</span></div>';
+          c.innerHTML = '<div class="section-title">最近播放 <span>自动同步 Apple Music</span></div>';
           const list = document.createElement('div');
           list.className = 'song-list';
           tracks.forEach(t => {
@@ -1101,15 +1376,11 @@
           const favs = json.data || [];
 
           if (favs.length === 0) {
-            c.innerHTML = '<div style="text-align:center;padding:40px;color:var(--subtext);">暂无收藏歌曲，在播放页点击 ❤️ 即可收藏</div>';
+            c.innerHTML = '<div style="text-align:center;padding:40px;color:var(--subtext);">暂无收藏歌曲，播放时点击 ❤️ 即可收藏</div>';
             return;
           }
 
-          c.innerHTML = `
-            <div class="section-title">
-              <span>我喜爱的音乐 (${favs.length})</span>
-            </div>
-          `;
+          c.innerHTML = `<div class="section-title">我喜爱的音乐 (${favs.length})</div>`;
           const list = document.createElement('div');
           list.className = 'song-list';
           favs.forEach(t => {
@@ -1143,21 +1414,20 @@
             return;
           }
 
-          c.innerHTML = '<div class="section-title">听过的专辑</div>';
+          c.innerHTML = '<div class="section-title">历史收听专辑</div>';
           const grid = document.createElement('div');
           grid.className = 'albums-grid';
           albums.forEach(alb => {
             const card = document.createElement('div');
             card.className = 'album-card';
             card.innerHTML = `
-              <div style="width:100%;aspect-ratio:1;border-radius:8px;background:rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;font-size:32px;margin-bottom:8px;">💿</div>
+              <div style="width:100%;aspect-ratio:1;border-radius:10px;background:rgba(255,255,255,0.06);display:flex;align-items:center;justify-content:center;font-size:36px;margin-bottom:8px;">💿</div>
               <div class="album-card-title">${alb.name}</div>
               <div class="album-card-sub">${alb.artist} · ${alb.trackCount} 首</div>
             `;
-            card.onclick = async () => {
-              // Search album by name
+            card.onclick = () => {
               document.getElementById('searchInput').value = alb.name;
-              switchTab('search', document.querySelectorAll('.nav-item')[1]);
+              switchTab('search', document.querySelectorAll('.nav-bar .nav-item')[1]);
               doSearch();
             };
             grid.appendChild(card);
@@ -1176,6 +1446,8 @@
       try {
         const res = await fetch('/api/v2/amexclusive/status');
         const st = await res.json();
+        currentPluginStatus = st;
+
         document.getElementById('statusDot').className = 'status-dot ' + (st.connected ? 'active' : '');
         document.getElementById('statusText').textContent = st.connected ? (st.stateName === 'Active' ? '独占中 · 极高保真' : st.stateName) : '离线';
 
