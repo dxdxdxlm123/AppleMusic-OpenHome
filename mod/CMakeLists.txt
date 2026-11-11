@@ -125,7 +125,7 @@ add_library(am_exclusive_ui SHARED src/UiAdapter.cpp src/IpcTransport.cpp
 add_dependencies(am_exclusive_ui generate_winui_projection)
 target_include_directories(am_exclusive_ui PRIVATE src "${WINRT_GENERATED_DIR}")
 target_compile_definitions(am_exclusive_ui PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(am_exclusive_ui PRIVATE advapi32 ole32 runtimeobject windowsapp)
+target_link_libraries(am_exclusive_ui PRIVATE advapi32 ole32 runtimeobject windowsapp iphlpapi ws2_32)
 set_target_properties(am_exclusive_ui PROPERTIES OUTPUT_NAME "am-exclusive-ui")
 
 # "HiFi player" engine: owns WASAPI exclusive / ASIO / DLNA in its own process
@@ -201,6 +201,7 @@ if(MSVC)
   target_link_options(am_exclusive_hook PRIVATE /guard:cf)
   target_link_options(am_exclusive_ui PRIVATE /guard:cf)
   target_link_options(am_exclusive_media_control PRIVATE /guard:cf)
+  target_link_options(am_exclusive_remote PRIVATE /guard:cf /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup)
   target_link_options(am_exclusive_broker PRIVATE
     /guard:cf /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup
     "/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'")

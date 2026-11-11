@@ -21,6 +21,17 @@ BOOL WINAPI ConsoleHandler(DWORD ctrlType) {
 }
 
 int wmain(int argc, wchar_t** argv) {
+    HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"Global\\AMExclusiveRemoteServerMutex");
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        if (hMutex) CloseHandle(hMutex);
+        return 0; // Already running silently in background
+    }
+
+    HANDLE hStopEvent = CreateEventW(nullptr, FALSE, FALSE, L"Global\\AMExclusiveRemoteStopEvent");
+    if (hStopEvent) {
+        ResetEvent(hStopEvent);
+    }
+
     winrt::init_apartment(winrt::apartment_type::multi_threaded);
     SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 
@@ -31,31 +42,27 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
 
-    std::wcout << L"============================================================" << std::endl;
-    std::wcout << L" AMExclusive Remote Bridge v0.1" << std::endl;
-    std::wcout << L" Compatible with 'Remote for Cider' Android App" << std::endl;
-    std::wcout << L" Listening on: http://0.0.0.0:" << port << std::endl;
-    std::wcout << L" Bit-perfect Apple Music Remote Control Active" << std::endl;
-    std::wcout << L" Press Ctrl+C to stop." << std::endl;
-    std::wcout << L"============================================================" << std::endl;
-
     ammod::remote::AmPluginClient::Instance().Start();
 
     ammod::remote::RemoteServer server(port);
     if (!server.Start()) {
-        std::wcerr << L"Failed to start remote server on port " << port << std::endl;
         ammod::remote::AmPluginClient::Instance().Stop();
+        if (hStopEvent) CloseHandle(hStopEvent);
+        if (hMutex) CloseHandle(hMutex);
         return 1;
     }
 
     while (!g_stopRequested) {
-        Sleep(500);
+        DWORD wait = WaitForSingleObject(hStopEvent, 500);
+        if (wait == WAIT_OBJECT_0) {
+            break;
+        }
     }
 
-    std::wcout << L"\nShutting down remote server..." << std::endl;
     server.Stop();
     ammod::remote::AmPluginClient::Instance().Stop();
-    std::wcout << L"Server stopped cleanly." << std::endl;
+    if (hStopEvent) CloseHandle(hStopEvent);
+    if (hMutex) CloseHandle(hMutex);
 
     return 0;
 }

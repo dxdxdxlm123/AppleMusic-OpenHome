@@ -5,6 +5,9 @@
 #include "UiRefreshState.h"
 #include "UiPlaybackState.h"
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <iphlpapi.h>
 #include <windows.h>
 
 #ifdef GetCurrentTime
@@ -38,6 +41,7 @@
 #include <utility>
 #include <unordered_set>
 #include <vector>
+#include <tlhelp32.h>
 
 namespace {
 
@@ -125,6 +129,11 @@ winrt::weak_ref<Controls::TextBox> g_roonLeadInput;
 winrt::weak_ref<Controls::TextBox> g_roonSoodPortInput;
 winrt::weak_ref<Controls::TextBlock> g_outputTargetStatus;
 std::atomic<int> g_activeOutputTab{0}; // 0 = local, 1 = network, 2 = Roon
+winrt::weak_ref<Controls::ToggleSwitch> g_remoteToggle;
+winrt::weak_ref<Controls::TextBlock> g_remoteStatusText;
+void ApplyRemoteSettings();
+void StartRemoteServerProcess(int port = 10767);
+void StopRemoteServerProcess();
 std::mutex g_localDevicesMutex;
 std::vector<ammod::local_devices::Device> g_localDevices;
 
@@ -2284,6 +2293,9 @@ void ApplyOutputSelection() {
     Log(L"ui output saved kind=" + std::to_wstring(settings.kind) +
         L" tab=" + std::to_wstring(tab) + L" local=" + localId +
         L" device=" + settings.dlnaName);
+    try {
+        ApplyRemoteSettings();
+    } catch (...) {}
 }
 
 void CommitOutputSelection(const Controls::ComboBox&) {
@@ -3188,6 +3200,244 @@ Controls::Border CreateOutputFormatCard(
     return formatCard;
 }
 
+std::wstring GetPrimaryLanIpAddress() {
+    ULONG bufferSize = 15000;
+    std::vector<BYTE> buffer(bufferSize);
+    PIP_ADAPTER_ADDRESSES pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+
+    ULONG flags = GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+    DWORD ret = GetAdaptersAddresses(AF_INET, flags, nullptr, pAddresses, &bufferSize);
+    if (ret == ERROR_BUFFER_OVERFLOW) {
+        buffer.resize(bufferSize);
+        pAddresses = reinterpret_cast<PIP_ADAPTER_ADDRESSES>(buffer.data());
+        ret = GetAdaptersAddresses(AF_INET, flags, nullptr, pAddresses, &bufferSize);
+    }
+
+    if (ret == NO_ERROR) {
+        for (PIP_ADAPTER_ADDRESSES pCurr = pAddresses; pCurr != nullptr; pCurr = pCurr->Next) {
+            if (pCurr->OperStatus != IfOperStatusUp) continue;
+            if (pCurr->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
+
+            for (PIP_ADAPTER_UNICAST_ADDRESS pUni = pCurr->FirstUnicastAddress; pUni != nullptr; pUni = pUni->Next) {
+                if (pUni->Address.lpSockaddr && pUni->Address.lpSockaddr->sa_family == AF_INET) {
+                    sockaddr_in* sa_in = reinterpret_cast<sockaddr_in*>(pUni->Address.lpSockaddr);
+                    wchar_t ipStr[INET_ADDRSTRLEN]{};
+                    if (InetNtopW(AF_INET, &(sa_in->sin_addr), ipStr, INET_ADDRSTRLEN)) {
+                        if (wcsncmp(ipStr, L"127.", 4) != 0 && wcsncmp(ipStr, L"169.254.", 8) != 0) {
+                            return std::wstring(ipStr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return L"127.0.0.1";
+}
+
+std::wstring RemoteServerExePath() {
+    wchar_t modulePath[MAX_PATH]{};
+    GetModuleFileNameW(g_module, modulePath, static_cast<DWORD>(std::size(modulePath)));
+    return (std::filesystem::path(modulePath).parent_path() / L"am-exclusive-remote.exe").wstring();
+}
+
+bool IsRemoteServerProcessRunning() {
+    bool running = false;
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W entry{};
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snapshot, &entry)) {
+            do {
+                if (_wcsicmp(entry.szExeFile, L"am-exclusive-remote.exe") == 0) {
+                    running = true;
+                    break;
+                }
+            } while (Process32NextW(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
+    }
+    return running;
+}
+
+void StartRemoteServerProcess(int port) {
+    if (IsRemoteServerProcessRunning()) return;
+
+    std::wstring exe = RemoteServerExePath();
+    if (!std::filesystem::exists(exe)) {
+        Log(L"remote: exe not found: " + exe);
+        return;
+    }
+
+    std::wstring cmd = L"\"" + exe + L"\" --port " + std::to_wstring(port);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi{};
+
+    std::wstring dir = std::filesystem::path(exe).parent_path().wstring();
+    std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+    cmdBuf.push_back(L'\0');
+
+    if (CreateProcessW(exe.c_str(), cmdBuf.data(), nullptr, nullptr, FALSE,
+                       CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr,
+                       dir.c_str(), &si, &pi)) {
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        Log(L"remote: started remote server process on port " + std::to_wstring(port));
+    } else {
+        Log(L"remote: failed to start process error=" + std::to_wstring(GetLastError()));
+    }
+}
+
+void StopRemoteServerProcess() {
+    HANDLE hStop = OpenEventW(EVENT_MODIFY_STATE, FALSE, L"Global\\AMExclusiveRemoteStopEvent");
+    if (hStop) {
+        SetEvent(hStop);
+        CloseHandle(hStop);
+    }
+
+    Sleep(150);
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot != INVALID_HANDLE_VALUE) {
+        PROCESSENTRY32W entry{};
+        entry.dwSize = sizeof(entry);
+        if (Process32FirstW(snapshot, &entry)) {
+            do {
+                if (_wcsicmp(entry.szExeFile, L"am-exclusive-remote.exe") == 0) {
+                    HANDLE hProc = OpenProcess(PROCESS_TERMINATE, FALSE, entry.th32ProcessID);
+                    if (hProc) {
+                        TerminateProcess(hProc, 0);
+                        CloseHandle(hProc);
+                    }
+                }
+            } while (Process32NextW(snapshot, &entry));
+        }
+        CloseHandle(snapshot);
+    }
+    Log(L"remote: stopped remote server process");
+}
+
+void UpdateRemoteStatusDisplay(bool running, int port) {
+    if (auto statusText = g_remoteStatusText.get()) {
+        if (running) {
+            std::wstring lanIp = GetPrimaryLanIpAddress();
+            std::wstring text = Localized(
+                L"● 远程服务正在后台运行 (端口: " + std::to_wstring(port) + L")\n" +
+                L"本机浏览器访问: http://127.0.0.1:" + std::to_wstring(port) + L"\n" +
+                L"手机局域网访问: http://" + lanIp + L":" + std::to_wstring(port) + L"\n" +
+                L"(手机与电脑连接同一 Wi-Fi 时，用手机浏览器打开上方局域网网址即可遥控)",
+                L"● Remote service running in background (Port: " + std::to_wstring(port) + L")\n" +
+                L"Localhost: http://127.0.0.1:" + std::to_wstring(port) + L"\n" +
+                L"Phone / LAN: http://" + lanIp + L":" + std::to_wstring(port) + L"\n" +
+                L"(Connect phone to the same Wi-Fi and open LAN address in phone browser)"
+            );
+            statusText.Text(text);
+        } else {
+            statusText.Text(Localized(
+                L"○ 远程服务已停止 (未开启)",
+                L"○ Remote service stopped (Disabled)"
+            ));
+        }
+    }
+}
+
+void ApplyRemoteSettings() {
+    int port = 10767;
+    bool enabled = false;
+    if (auto toggle = g_remoteToggle.get()) {
+        enabled = toggle.IsOn();
+    }
+    const auto ini = StreamFormatIniPath();
+    if (!ini.empty()) {
+        WritePrivateProfileStringW(L"remote", L"enabled", enabled ? L"1" : L"0", ini.c_str());
+        WritePrivateProfileStringW(L"remote", L"port", std::to_wstring(port).c_str(), ini.c_str());
+        (void)WritePrivateProfileStringW(nullptr, nullptr, nullptr, ini.c_str());
+    }
+
+    if (enabled) {
+        StartRemoteServerProcess(port);
+        Sleep(200);
+        UpdateRemoteStatusDisplay(IsRemoteServerProcessRunning(), port);
+    } else {
+        StopRemoteServerProcess();
+        UpdateRemoteStatusDisplay(false, port);
+    }
+}
+
+Controls::Border CreateRemoteControlCard(
+    const Controls::Border& appearance,
+    const Controls::ToggleSwitch& templateToggle,
+    const std::vector<Controls::TextBlock>& nativeText) {
+
+    Controls::TextBlock title;
+    title.Text(Localized(L"网页远程控制", L"Web Remote Control"));
+    title.TextWrapping(Xaml::TextWrapping::Wrap);
+
+    Controls::TextBlock description;
+    description.Text(Localized(
+        L"允许通过手机或局域网浏览器远程选歌与遥控 Apple Music。默认关闭，需点击保存并应用。",
+        L"Allows remote browsing and playback control via phone or LAN browser. Default off; click Save & apply."
+    ));
+    description.TextWrapping(Xaml::TextWrapping::Wrap);
+    description.Margin(Xaml::Thickness{0, 2, 0, 8});
+
+    if (!nativeText.empty()) title.Style(nativeText[0].Style());
+    if (nativeText.size() > 1) description.Style(nativeText[1].Style());
+
+    Controls::ToggleSwitch toggle;
+    toggle.Name(L"AMExclusiveRemoteToggle");
+    toggle.Header(box_value(Localized(L"开启网页远程控制", L"Enable Web Remote Control")));
+    toggle.Style(templateToggle.Style());
+
+    const auto ini = StreamFormatIniPath();
+    int savedEnabled = GetPrivateProfileIntW(L"remote", L"enabled", 0, ini.c_str());
+    int savedPort = GetPrivateProfileIntW(L"remote", L"port", 10767, ini.c_str());
+    toggle.IsOn(savedEnabled == 1);
+
+    Controls::TextBlock status;
+    status.Name(L"AMExclusiveRemoteStatus");
+    status.TextWrapping(Xaml::TextWrapping::Wrap);
+    status.Margin(Xaml::Thickness{0, 6, 0, 6});
+    if (nativeText.size() > 1) status.Style(nativeText[1].Style());
+
+    Controls::StackPanel buttons;
+    buttons.Orientation(Controls::Orientation::Horizontal);
+    buttons.Spacing(8.0);
+    buttons.Margin(Xaml::Thickness{0, 4, 0, 0});
+
+    Controls::Button saveBtn;
+    saveBtn.Content(box_value(Localized(L"保存并应用", L"Save & apply")));
+    saveBtn.MinWidth(112.0);
+    saveBtn.Click([](auto&&, auto&&) {
+        try { ApplyRemoteSettings(); } catch (...) {}
+    });
+    buttons.Children().Append(saveBtn);
+
+    Controls::StackPanel panel;
+    panel.Children().Append(title);
+    panel.Children().Append(description);
+    panel.Children().Append(toggle);
+    panel.Children().Append(status);
+    panel.Children().Append(buttons);
+
+    Controls::Border card = CreateSettingsCard(appearance, L"AMExclusiveRemoteControlCard", panel);
+
+    g_remoteToggle = winrt::make_weak(toggle);
+    g_remoteStatusText = winrt::make_weak(status);
+
+    bool isRunning = IsRemoteServerProcessRunning();
+    if (savedEnabled == 1 && !isRunning) {
+        StartRemoteServerProcess(savedPort);
+        isRunning = true;
+    }
+    UpdateRemoteStatusDisplay(isRunning && savedEnabled == 1, savedPort);
+
+    return card;
+}
+
+
 bool AttachOrRefreshToggle(const Xaml::DependencyObject& page) {
     try {
         if (!page || !page.DispatcherQueue().HasThreadAccess()) return false;
@@ -3222,7 +3472,19 @@ bool AttachOrRefreshToggle(const Xaml::DependencyObject& page) {
                 (void)outputCard;
                 ++complete;
             }
-            return complete == 5;
+            if (auto remoteToggle = FindByName(page, L"AMExclusiveRemoteToggle").try_as<Controls::ToggleSwitch>()) {
+                g_remoteToggle = winrt::make_weak(remoteToggle);
+                if (auto statusText = FindByName(page, L"AMExclusiveRemoteStatus").try_as<Controls::TextBlock>()) {
+                    g_remoteStatusText = winrt::make_weak(statusText);
+                    const auto ini = StreamFormatIniPath();
+                    int savedPort = GetPrivateProfileIntW(L"remote", L"port", 10767, ini.c_str());
+                    int savedEnabled = GetPrivateProfileIntW(L"remote", L"enabled", 0, ini.c_str());
+                    bool isRunning = IsRemoteServerProcessRunning();
+                    UpdateRemoteStatusDisplay(isRunning && (savedEnabled == 1), savedPort);
+                }
+                ++complete;
+            }
+            return complete >= 5;
         }
 
         Controls::StackPanel target{nullptr};
@@ -3547,10 +3809,11 @@ bool AttachOrRefreshToggle(const Xaml::DependencyObject& page) {
         auto [resamplingCard, resamplingToggle] = CreateResamplingCard(card, toggle, nativeText);
         auto formatCard = CreateOutputFormatCard(card, nativeText);
         auto outputTargetCard = CreateOutputTargetCard(card, nativeText);
+        auto remoteCard = CreateRemoteControlCard(card, toggle, nativeText);
         // Construct all cards before publishing any. If an append fails, only
         // remove this batch, so the next readiness callback can retry cleanly.
         const Xaml::UIElement cards[]{card, bufferCard, resamplingCard, formatCard,
-                                      outputTargetCard};
+                                      outputTargetCard, remoteCard};
         auto children = target.Children();
         try {
             for (const auto& item : cards) children.Append(item);
@@ -3574,6 +3837,7 @@ bool AttachOrRefreshToggle(const Xaml::DependencyObject& page) {
         Log(L"Resampling settings card attached to PlaybackSettingsPage");
         Log(L"Audio format settings card attached to PlaybackSettingsPage");
         Log(L"Output target settings card attached to PlaybackSettingsPage");
+        Log(L"Remote control settings card attached to PlaybackSettingsPage");
         return true;
     } catch (const hresult_error& error) {
         std::wostringstream text;
@@ -3924,6 +4188,13 @@ DWORD WINAPI BootstrapThread(void*) {
     }
     (void)CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     Log(L"UI adapter loaded");
+    {
+        const auto ini = StreamFormatIniPath();
+        if (!ini.empty() && GetPrivateProfileIntW(L"remote", L"enabled", 0, ini.c_str()) == 1) {
+            int port = GetPrivateProfileIntW(L"remote", L"port", 10767, ini.c_str());
+            StartRemoteServerProcess(port);
+        }
+    }
     if (HANDLE pipeThread = CreateThread(nullptr, 0, PipeThread, nullptr, 0, nullptr)) CloseHandle(pipeThread);
 
     g_windowLifecycleHook = SetWinEventHook(

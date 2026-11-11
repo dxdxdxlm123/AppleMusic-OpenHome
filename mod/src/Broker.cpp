@@ -1857,6 +1857,28 @@ int wmain() {
     if (HANDLE watchdog = CreateThread(nullptr, 0, AudioHostWatchdog, nullptr, 0, nullptr)) {
         CloseHandle(watchdog);
     }
+    if (GetPrivateProfileIntW(L"remote", L"enabled", 0, BrokerIniPath().c_str()) == 1) {
+        wchar_t curModulePath[MAX_PATH]{};
+        GetModuleFileNameW(nullptr, curModulePath, static_cast<DWORD>(std::size(curModulePath)));
+        const auto remoteExe = std::filesystem::path(curModulePath).parent_path() / L"am-exclusive-remote.exe";
+        if (std::filesystem::exists(remoteExe)) {
+            STARTUPINFOW rsi{};
+            rsi.cb = sizeof(rsi);
+            rsi.dwFlags = STARTF_USESHOWWINDOW;
+            rsi.wShowWindow = SW_HIDE;
+            PROCESS_INFORMATION rpi{};
+            std::wstring rcmd = L"\"" + remoteExe.wstring() + L"\" --port 10767";
+            std::vector<wchar_t> rcmdBuf(rcmd.begin(), rcmd.end());
+            rcmdBuf.push_back(L'\0');
+            if (CreateProcessW(remoteExe.c_str(), rcmdBuf.data(), nullptr, nullptr, FALSE,
+                               CREATE_NO_WINDOW | DETACHED_PROCESS, nullptr,
+                               remoteExe.parent_path().c_str(), &rsi, &rpi)) {
+                CloseHandle(rpi.hProcess);
+                CloseHandle(rpi.hThread);
+                Log(L"broker: launched autostart remote server in background");
+            }
+        }
+    }
     const auto pipeName = PipeName();
     PipeSecurity security;
     if (pipeName.empty() || !security.IsValid()) {
@@ -1936,6 +1958,13 @@ int wmain() {
     if (g_deviceBroadcastThread.joinable()) g_deviceBroadcastThread.join();
     g_iniWatchStop.store(true, std::memory_order_release);
     if (g_iniWatchThread.joinable()) g_iniWatchThread.join();
+    {
+        HANDLE hStop = OpenEventW(EVENT_MODIFY_STATE, FALSE, L"Global\\AMExclusiveRemoteStopEvent");
+        if (hStop) {
+            SetEvent(hStop);
+            CloseHandle(hStop);
+        }
+    }
     // No host remains. Terminate detached IPC workers without destructing mutexes under them.
     ExitProcess(0);
 }

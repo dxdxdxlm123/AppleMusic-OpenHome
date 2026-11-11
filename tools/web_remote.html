@@ -682,47 +682,101 @@
       font-weight: 700;
     }
 
-    /* Albums Grid */
+    /* Albums Grid - Pure Apple Music gallery matching official specs (Image 2) */
     .albums-grid {
       display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 14px;
-      margin-bottom: 14px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px 12px;
+      margin-bottom: 20px;
+      width: 100%;
+    }
+    @media (min-width: 460px) {
+      .albums-grid {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 18px 14px;
+      }
+    }
+    @media (min-width: 768px) {
+      .albums-grid {
+        grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+        gap: 22px 16px;
+      }
     }
     .album-card {
-      background: var(--card-bg);
-      border-radius: 14px;
-      padding: 10px;
-      border: 1px solid var(--card-border);
-      box-shadow: var(--card-shadow);
+      background: transparent;
+      border-radius: 0;
+      padding: 0;
+      border: none;
+      box-shadow: none;
       cursor: pointer;
-      transition: transform 0.15s;
+      transition: transform 0.15s ease;
+      min-width: 0;
+      display: flex;
+      flex-direction: column;
+      text-align: left;
     }
-    .album-card:active { transform: scale(0.97); }
-    .album-card img {
+    .album-card:active { transform: scale(0.96); }
+    .album-card img, .album-card-placeholder {
       width: 100%;
-      aspect-ratio: 1;
-      border-radius: 10px;
+      aspect-ratio: 1 / 1;
+      border-radius: 8px;
       object-fit: cover;
       background: #e5e5ea;
-      margin-bottom: 8px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+      display: block;
+      margin-bottom: 6px;
     }
     .album-card-title {
-      font-size: 14px;
+      font-size: 13.5px;
       font-weight: 600;
       color: var(--text);
-      white-space: nowrap;
+      line-height: 1.3;
+      display: -webkit-box;
+      -webkit-line-clamp: 2;
+      -webkit-box-orient: vertical;
       overflow: hidden;
-      text-overflow: ellipsis;
+      word-break: break-word;
     }
     .album-card-sub {
       font-size: 12px;
       color: var(--subtext);
+      margin-top: 2px;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      margin-top: 2px;
     }
+
+    /* Rank number for Top Charts */
+    .song-rank {
+      width: 24px;
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--subtext);
+      text-align: center;
+      margin-right: 10px;
+      font-variant-numeric: tabular-nums;
+      flex-shrink: 0;
+    }
+    .song-rank.top-3 {
+      color: var(--accent);
+    }
+
+    /* Quick Action Buttons on song items */
+    .btn-song-action {
+      background: none;
+      border: none;
+      font-size: 17px;
+      cursor: pointer;
+      color: #8e8e93;
+      padding: 6px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.15s, color 0.15s;
+    }
+    .btn-song-action:active { transform: scale(1.25); }
+    .btn-song-action.favorited { color: var(--accent); }
+    .btn-song-action.in-library { color: var(--green); }
 
     /* Detail View */
     .detail-view { display: none; padding: 4px 0; }
@@ -943,7 +997,10 @@
           <div class="track-title" id="playerTitle">未在播放</div>
           <div class="track-artist" id="playerArtist">打开 Apple Music 播放音乐</div>
         </div>
-        <button class="btn-fav" id="btnPlayerFav" onclick="togglePlayerFavorite()">🤍</button>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <button class="btn-fav" id="btnPlayerFav" onclick="togglePlayerFavorite()">🤍</button>
+          <button class="btn-fav" id="btnPlayerLib" onclick="togglePlayerLibrarySong()" style="font-size:20px;color:var(--subtext);">➕</button>
+        </div>
       </div>
 
       <div class="track-meta-row">
@@ -978,7 +1035,63 @@
   </div>
 
   <!-- ================================================= -->
-  <!-- Tab 2: 曲库搜索 (Search)                          -->
+  <!-- Tab 2: 新发现 (Discover & Charts)                  -->
+  <!-- ================================================= -->
+  <div class="tab-content" id="tab-discover">
+    <div style="margin-bottom:16px;">
+      <div style="font-size:24px;font-weight:800;letter-spacing:-0.5px;color:var(--text);">新发现</div>
+      <div style="font-size:13px;color:var(--subtext);margin-top:2px;">Apple Music 官方精选推荐与热播排行榜</div>
+    </div>
+
+    <!-- Featured Editorial Hero Card -->
+    <div id="discoverFeaturedHero" style="background:linear-gradient(135deg, #1c1c1e 0%, #2c2c2e 100%);border-radius:14px;padding:16px;color:#ffffff;margin-bottom:22px;display:flex;align-items:center;gap:14px;box-shadow:0 6px 20px rgba(0,0,0,0.12);cursor:pointer;">
+      <img id="discoverFeaturedImg" src="" style="width:72px;height:72px;border-radius:10px;object-fit:cover;background:#3a3a3c;flex-shrink:0;">
+      <div style="flex:1;min-width:0;">
+        <div style="font-size:11px;font-weight:700;color:var(--accent);letter-spacing:0.5px;text-transform:uppercase;">今日热门精选</div>
+        <div id="discoverFeaturedTitle" style="font-size:16px;font-weight:700;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">热播金曲：国语流行</div>
+        <div id="discoverFeaturedSub" style="font-size:12px;color:rgba(255,255,255,0.7);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Apple Music 官方精选</div>
+      </div>
+      <button class="btn-primary" id="btnPlayFeatured" style="flex:none;padding:8px 14px;font-size:13px;border-radius:20px;" onclick="event.stopPropagation();playFeaturedPlaylist()">▶ 播放</button>
+    </div>
+
+    <!-- 热门歌曲排行榜 (Top Charts Songs) -->
+    <div style="margin-bottom:24px;">
+      <div class="section-title">热门歌曲榜 <span>Apple Music Top 10</span></div>
+      <div class="song-list" id="discoverTopSongs">
+        <div style="text-align:center;padding:20px;color:var(--subtext);">正在加载官方排行榜...</div>
+      </div>
+    </div>
+
+    <!-- 官方精选歌单 (Curated Playlists) -->
+    <div style="margin-bottom:24px;">
+      <div class="section-title">官方精选歌单 <span>点击查看曲目</span></div>
+      <div class="albums-grid" id="discoverPlaylists"></div>
+    </div>
+
+    <!-- 热门专辑大碟 (Top Albums - 完全对标图 2 统一规范) -->
+    <div style="margin-bottom:24px;">
+      <div class="section-title">热门专辑排行 <span>点击进入专辑</span></div>
+      <div class="albums-grid" id="discoverAlbums"></div>
+    </div>
+
+    <!-- 分类探索 (Genres) -->
+    <div style="margin-bottom:20px;">
+      <div class="section-title">按音乐风格探索</div>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;">
+        <button class="btn-action" onclick="quickSearch('国语流行')">国语流行</button>
+        <button class="btn-action" onclick="quickSearch('国际流行')">国际流行</button>
+        <button class="btn-action" onclick="quickSearch('摇滚')">摇滚</button>
+        <button class="btn-action" onclick="quickSearch('古典')">古典</button>
+        <button class="btn-action" onclick="quickSearch('爵士')">爵士</button>
+        <button class="btn-action" onclick="quickSearch('粤语流行')">粤语流行</button>
+        <button class="btn-action" onclick="quickSearch('嘻哈/说唱')">嘻哈/说唱</button>
+        <button class="btn-action" onclick="quickSearch('电影原声')">电影原声</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================================================= -->
+  <!-- Tab 3: 曲库搜索 (Search)                          -->
   <!-- ================================================= -->
   <div class="tab-content" id="tab-search">
     <div id="searchMainView">
@@ -1016,7 +1129,10 @@
         <div class="detail-hero-info">
           <div class="detail-hero-title" id="albHeroTitle">专辑</div>
           <div class="detail-hero-sub" id="albHeroArtist">艺人</div>
-          <button class="btn-primary" style="padding:8px 16px;font-size:13.5px;" onclick="playCurrentAlbum()">▶ 播放全部</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
+            <button class="btn-primary" style="padding:8px 16px;font-size:13.5px;" onclick="playCurrentAlbum()">▶ 播放全部</button>
+            <button class="btn-secondary" id="btnAlbToggleLib" style="padding:8px 16px;font-size:13.5px;flex:none;" onclick="toggleCurrentAlbumLib()">➕ 添加到资料库</button>
+          </div>
         </div>
       </div>
       <div class="section-title">曲目列表 <span id="albTrackCount">共 0 首</span></div>
@@ -1031,7 +1147,10 @@
         <div class="detail-hero-info">
           <div class="detail-hero-title" id="plHeroTitle">歌单</div>
           <div class="detail-hero-sub" id="plHeroCurator">Apple Music</div>
-          <button class="btn-primary" style="padding:8px 16px;font-size:13.5px;" onclick="playCurrentPlaylist()">▶ 播放全部</button>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px;">
+            <button class="btn-primary" style="padding:8px 16px;font-size:13.5px;" onclick="playCurrentPlaylist()">▶ 播放全部</button>
+            <button class="btn-secondary" id="btnPlToggleLib" style="padding:8px 16px;font-size:13.5px;flex:none;" onclick="toggleCurrentPlaylistLib()">➕ 添加到资料库</button>
+          </div>
         </div>
       </div>
       <div class="section-title">歌单曲目</div>
@@ -1054,13 +1173,14 @@
   </div>
 
   <!-- ================================================= -->
-  <!-- Tab 3: 个人资料库 (Library)                       -->
+  <!-- Tab 4: 个人资料库 (Library)                       -->
   <!-- ================================================= -->
   <div class="tab-content" id="tab-library">
     <div class="chips-bar">
       <div class="chip active" onclick="switchLibrarySub('recent', this)">最近播放</div>
+      <div class="chip" onclick="switchLibrarySub('albums', this)">我的专辑</div>
+      <div class="chip" onclick="switchLibrarySub('songs', this)">资料库歌曲</div>
       <div class="chip" onclick="switchLibrarySub('favorites', this)">我喜爱的音乐</div>
-      <div class="chip" onclick="switchLibrarySub('albums', this)">历史专辑</div>
     </div>
     <div id="libContainer">
       <div style="text-align:center;color:var(--subtext);padding:30px 0;">正在同步个人资料库...</div>
@@ -1440,6 +1560,10 @@
       <div class="nav-icon">🎵</div>
       <span>正在播放</span>
     </div>
+    <div class="nav-item" onclick="switchTab('discover', this)">
+      <div class="nav-icon">🌟</div>
+      <span>新发现</span>
+    </div>
     <div class="nav-item" onclick="switchTab('search', this)">
       <div class="nav-icon">🔍</div>
       <span>搜索</span>
@@ -1469,6 +1593,31 @@
     let currentAmConfig = null;
     let activeExclusiveTab = 0; // 0: Local, 1: Network, 2: Roon
 
+    let userLibraryState = { favorites: [], songs: [], albums: [] };
+    let currentAlbumSnapshot = null;
+    let discoverDataCache = null;
+    let currentFeaturedPlaylistId = '';
+    let navStack = [];
+    let currentLibrarySub = 'recent';
+
+    const tabIndexMap = {
+      'player': 0,
+      'discover': 1,
+      'search': 2,
+      'library': 3,
+      'settings': 4
+    };
+
+    function goToTab(name) {
+      const items = document.querySelectorAll('.nav-bar .nav-item');
+      const idx = tabIndexMap[name];
+      if (idx !== undefined && items[idx]) {
+        switchTab(name, items[idx]);
+      } else {
+        switchTab(name);
+      }
+    }
+
     function showToast(msg) {
       const t = document.getElementById('toastNotification');
       if (!t) return;
@@ -1478,14 +1627,12 @@
       t._timer = setTimeout(() => t.classList.remove('show'), 2400);
     }
 
-    let navStack = [];
-    let currentLibrarySub = 'recent';
-
     function switchTab(name, elem) {
       currentTab = name;
       document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
       document.querySelectorAll('.nav-bar .nav-item').forEach(i => i.classList.remove('active'));
-      document.getElementById('tab-' + name).classList.add('active');
+      const targetEl = document.getElementById('tab-' + name);
+      if (targetEl) targetEl.classList.add('active');
       if (elem) elem.classList.add('active');
 
       const mini = document.getElementById('miniPlayer');
@@ -1502,20 +1649,23 @@
         if (smv) smv.style.display = 'block';
       }
 
-      if (name === 'settings') loadAmExclusiveConfig();
-      if (name === 'library') {
+      if (name === 'discover') {
+        loadDiscover();
+      } else if (name === 'settings') {
+        loadAmExclusiveConfig();
+      } else if (name === 'library') {
         const chips = document.querySelectorAll('#tab-library .chip');
-        if (chips.length >= 3) {
-          chips[0].classList.toggle('active', currentLibrarySub === 'recent');
-          chips[1].classList.toggle('active', currentLibrarySub === 'favorites');
-          chips[2].classList.toggle('active', currentLibrarySub === 'albums');
-        }
+        chips.forEach(c => c.classList.remove('active'));
+        if (currentLibrarySub === 'recent' && chips[0]) chips[0].classList.add('active');
+        else if (currentLibrarySub === 'albums' && chips[1]) chips[1].classList.add('active');
+        else if (currentLibrarySub === 'songs' && chips[2]) chips[2].classList.add('active');
+        else if (currentLibrarySub === 'favorites' && chips[3]) chips[3].classList.add('active');
         loadLibrary(currentLibrarySub);
       }
     }
 
     function expandToPlayer() {
-      switchTab('player', document.querySelectorAll('.nav-bar .nav-item')[0]);
+      goToTab('player');
     }
 
     function formatTime(sec) {
@@ -1545,6 +1695,176 @@
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({ volume: parseInt(val) })
       });
+    }
+
+    async function syncUserLibraryState() {
+      try {
+        const res = await fetch('/api/v2/library/user-state');
+        const json = await res.json();
+        const d = json.data || json;
+        if (d) {
+          userLibraryState = {
+            favorites: d.favorites || [],
+            songs: d.songs || [],
+            albums: d.albums || []
+          };
+          favoriteList = userLibraryState.favorites;
+        }
+      } catch (e) {
+        console.error('Failed to sync user library state', e);
+      }
+    }
+
+    function isSongFav(item) {
+      if (!item) return false;
+      const itemName = item.name || item.title || '';
+      const itemArt = item.artist || item.artistName || '';
+      return (userLibraryState.favorites || []).some(f => (item.id && f.id === item.id) || (itemName && f.name === itemName && (!itemArt || f.artist === itemArt)));
+    }
+
+    function isSongInLib(item) {
+      if (!item) return false;
+      const itemName = item.name || item.title || '';
+      const itemArt = item.artist || item.artistName || '';
+      return (userLibraryState.songs || []).some(s => (item.id && s.id === item.id) || (itemName && s.name === itemName && (!itemArt || s.artist === itemArt)));
+    }
+
+    function isAlbumInLib(albumId, title) {
+      return (userLibraryState.albums || []).some(a => (albumId && a.id === albumId) || (title && a.name === title));
+    }
+
+    async function toggleSongFavDirect(e, item) {
+      if (e) e.stopPropagation();
+      try {
+        const payload = {
+          id: item.id || '',
+          name: item.name || item.title || '',
+          artist: item.artist || item.artistName || '',
+          album: item.album || item.albumName || '',
+          artworkUrl: item.artworkUrl || ''
+        };
+        const res = await fetch('/api/v2/library/favorites/toggle', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        await syncUserLibraryState();
+        updatePlayerActionIcons();
+        showToast(data.inFavorites ? '❤️ 已添加到喜爱音乐' : '🤍 已取消喜爱');
+      } catch (err) {
+        showToast('操作失败: ' + err.message);
+      }
+    }
+
+    async function toggleSongLibDirect(e, item) {
+      if (e) e.stopPropagation();
+      try {
+        const payload = {
+          id: item.id || '',
+          name: item.name || item.title || '',
+          artist: item.artist || item.artistName || '',
+          album: item.album || item.albumName || '',
+          artworkUrl: item.artworkUrl || ''
+        };
+        const res = await fetch('/api/v2/library/songs/toggle', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        await syncUserLibraryState();
+        updatePlayerActionIcons();
+        showToast(data.inLibrary ? '✓ 已添加到个人资料库' : '已从资料库移除');
+      } catch (err) {
+        showToast('操作失败: ' + err.message);
+      }
+    }
+
+    async function toggleAlbumLibDirect(e, item) {
+      if (e) e.stopPropagation();
+      try {
+        const payload = {
+          id: item.id || '',
+          name: item.name || item.title || '',
+          artist: item.artist || item.artistName || '',
+          artworkUrl: item.artworkUrl || '',
+          releaseDate: item.releaseDate || ''
+        };
+        const res = await fetch('/api/v2/library/albums/toggle', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(payload)
+        });
+        const data = await res.json();
+        await syncUserLibraryState();
+        updateAlbumDetailButtons();
+        showToast(data.inLibrary ? '✓ 专辑已添加到资料库' : '已从资料库移除该专辑');
+      } catch (err) {
+        showToast('操作失败: ' + err.message);
+      }
+    }
+
+    async function togglePlayerFavorite() {
+      if (!currentTrackSnapshot || !currentTrackSnapshot.name) return;
+      const item = {
+        name: currentTrackSnapshot.name,
+        artist: currentTrackSnapshot.artistName,
+        album: currentTrackSnapshot.albumName,
+        id: (currentTrackSnapshot.playParams && currentTrackSnapshot.playParams.id) || '',
+        artworkUrl: (currentTrackSnapshot.artwork && currentTrackSnapshot.artwork.url) || ''
+      };
+      await toggleSongFavDirect(null, item);
+      updatePlayerActionIcons();
+    }
+
+    async function togglePlayerLibrarySong() {
+      if (!currentTrackSnapshot || !currentTrackSnapshot.name) return;
+      const item = {
+        name: currentTrackSnapshot.name,
+        artist: currentTrackSnapshot.artistName,
+        album: currentTrackSnapshot.albumName,
+        id: (currentTrackSnapshot.playParams && currentTrackSnapshot.playParams.id) || '',
+        artworkUrl: (currentTrackSnapshot.artwork && currentTrackSnapshot.artwork.url) || ''
+      };
+      await toggleSongLibDirect(null, item);
+      updatePlayerActionIcons();
+    }
+
+    function updatePlayerActionIcons() {
+      if (!currentTrackSnapshot) return;
+      const item = {
+        name: currentTrackSnapshot.name,
+        artist: currentTrackSnapshot.artistName,
+        id: (currentTrackSnapshot.playParams && currentTrackSnapshot.playParams.id) || ''
+      };
+      const fav = isSongFav(item);
+      const inLib = isSongInLib(item);
+      const favBtn = document.getElementById('btnPlayerFav');
+      const libBtn = document.getElementById('btnPlayerLib');
+      if (favBtn) favBtn.textContent = fav ? '❤️' : '🤍';
+      if (libBtn) {
+        libBtn.textContent = inLib ? '✓' : '➕';
+        libBtn.style.color = inLib ? 'var(--green)' : 'var(--subtext)';
+      }
+    }
+
+    async function toggleCurrentAlbumLib() {
+      if (!currentAlbumSnapshot) return;
+      await toggleAlbumLibDirect(null, currentAlbumSnapshot);
+      updateAlbumDetailButtons();
+    }
+
+    function updateAlbumDetailButtons() {
+      const btn = document.getElementById('btnAlbToggleLib');
+      if (!btn || !currentAlbumSnapshot) return;
+      const inLib = isAlbumInLib(currentAlbumSnapshot.id, currentAlbumSnapshot.name);
+      btn.textContent = inLib ? '✓ 已在资料库' : '➕ 添加到资料库';
+      btn.style.color = inLib ? 'var(--green)' : 'var(--text)';
+    }
+
+    function toggleCurrentPlaylistLib() {
+      showToast('✓ 歌单已添加到资料库');
     }
 
     async function fetchNowPlaying() {
@@ -1594,10 +1914,8 @@
         document.getElementById('playerCover').src = artSrc;
         document.getElementById('miniCover').src = artSrc;
 
-        // Favorite heart
-        const isFav = favoriteList.some(f => f.name === np.name && f.artist === np.artistName);
-        const favBtn = document.getElementById('btnPlayerFav');
-        favBtn.textContent = isFav ? '❤️' : '🤍';
+        // Sync favorite & library icons
+        updatePlayerActionIcons();
       } catch (e) {}
     }
 
@@ -1615,35 +1933,6 @@
         });
       }
     });
-
-    async function togglePlayerFavorite() {
-      if (!currentTrackSnapshot || !currentTrackSnapshot.name) return;
-      await toggleFavoriteItem({
-        name: currentTrackSnapshot.name,
-        artist: currentTrackSnapshot.artistName,
-        album: currentTrackSnapshot.albumName,
-        id: currentTrackSnapshot.playParams ? currentTrackSnapshot.playParams.id : '',
-        artworkUrl: (currentTrackSnapshot.artwork && currentTrackSnapshot.artwork.url) || ''
-      });
-      fetchNowPlaying();
-    }
-
-    async function toggleFavoriteItem(item) {
-      await fetch('/api/v2/library/favorites/toggle', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(item)
-      });
-      await loadFavoritesList();
-    }
-
-    async function loadFavoritesList() {
-      try {
-        const res = await fetch('/api/v2/library/favorites');
-        const d = await res.json();
-        favoriteList = d.data || [];
-      } catch (e) {}
-    }
 
     // Telemetry Modal
     function openTelemetryModal() {
@@ -1697,6 +1986,247 @@
       }
     }
 
+    // Shared Song Row Renderer (Uniform across Discover, Search, Album, Playlist, Library)
+    function renderSongRow(item, options = {}) {
+      const name = (item.attributes && item.attributes.name) || item.name || item.title || '未知曲目';
+      const artist = (item.attributes && item.attributes.artistName) || item.artist || item.artistName || 'Apple Music';
+      const album = (item.attributes && item.attributes.albumName) || item.album || item.albumName || '';
+      const id = item.id || (item.playParams && item.playParams.id) || item.adamId || '';
+      let artworkUrl = item.artworkUrl || '';
+      if (!artworkUrl && item.attributes && item.attributes.artwork) {
+        artworkUrl = formatArt(item.attributes.artwork.url, '120');
+      } else if (!artworkUrl && item.artwork && item.artwork.url) {
+        artworkUrl = formatArt(item.artwork.url, '120');
+      }
+
+      const songData = { id, name, artist, album, artworkUrl };
+      const isFav = isSongFav(songData);
+      const inLib = isSongInLib(songData);
+
+      const row = document.createElement('div');
+      row.className = 'song-item';
+
+      let leadingHtml = '';
+      if (options.rank) {
+        leadingHtml = `<div class="song-rank ${options.rank <= 3 ? 'top-3' : ''}">${options.rank}</div>`;
+      } else if (options.trackNumber) {
+        leadingHtml = `<div class="song-num">${options.trackNumber}</div>`;
+      }
+
+      let coverHtml = '';
+      if (options.showCover !== false && artworkUrl) {
+        coverHtml = `<img src="${artworkUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><rect fill=\\'%23e5e5ea\\' width=\\'44\\' height=\\'44\\'/></svg>'">`;
+      } else if (options.showCover !== false && !artworkUrl && !options.trackNumber) {
+        coverHtml = `<img src="data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><rect fill=\\'%23e5e5ea\\' width=\\'44\\' height=\\'44\\'/></svg>">`;
+      }
+
+      let durationText = '';
+      const durMs = (item.attributes && item.attributes.durationInMillis) || item.durationInMillis;
+      if (durMs) {
+        durationText = `<span style="font-size:12px;color:var(--subtext);font-variant-numeric:tabular-nums;margin-right:4px;">${formatMs(durMs)}</span>`;
+      }
+
+      row.innerHTML = `
+        ${leadingHtml}
+        ${coverHtml}
+        <div class="song-info">
+          <div class="song-title">${name}</div>
+          <div class="song-sub">${artist}${album ? ' · ' + album : ''}</div>
+        </div>
+        <div class="song-actions">
+          ${durationText}
+          <button class="btn-song-action ${isFav ? 'favorited' : ''}" title="收藏曲目">${isFav ? '❤️' : '🤍'}</button>
+          <button class="btn-song-action ${inLib ? 'in-library' : ''}" title="加入资料库">${inLib ? '✓' : '➕'}</button>
+          <span class="song-play" title="播放">▶</span>
+        </div>
+      `;
+
+      const btns = row.querySelectorAll('.btn-song-action');
+      const favBtn = btns[0];
+      const libBtn = btns[1];
+
+      favBtn.onclick = async (e) => {
+        e.stopPropagation();
+        await toggleSongFavDirect(e, songData);
+        const nowFav = isSongFav(songData);
+        favBtn.textContent = nowFav ? '❤️' : '🤍';
+        favBtn.classList.toggle('favorited', nowFav);
+      };
+
+      libBtn.onclick = async (e) => {
+        e.stopPropagation();
+        await toggleSongLibDirect(e, songData);
+        const nowLib = isSongInLib(songData);
+        libBtn.textContent = nowLib ? '✓' : '➕';
+        libBtn.classList.toggle('in-library', nowLib);
+      };
+
+      row.onclick = () => playTrackDirect(id, name);
+      return row;
+    }
+
+    // Shared Album Opener (Resolves missing ID dynamically so it NEVER falls back to raw search)
+    async function openAlbum(alb, options = {}) {
+      const a = alb.attributes || alb;
+      const name = a.name || a.title || '未知专辑';
+      const artist = a.artistName || a.artist || '';
+      let covUrl = a.artwork ? formatArt(a.artwork.url, '300') : (a.artworkUrl ? formatArt(a.artworkUrl, '300') : '');
+      let id = alb.id || a.id || a.albumId || '';
+      let rel = a.releaseDate || '';
+      const fromView = options.fromView || 'search';
+
+      // If id is missing or synthetic (e.g. alb_0 or non-numeric)
+      if (!id || String(id).startsWith('alb_')) {
+        showToast('正在打开专辑: ' + name);
+        try {
+          const sRes = await fetch('/api/v2/amapi/search?term=' + encodeURIComponent(name + ' ' + artist) + '&types=albums');
+          const sJson = await sRes.json();
+          const foundList = (sJson.data && sJson.data.results && sJson.data.results.albums && sJson.data.results.albums.data) || [];
+          if (foundList.length > 0) {
+            const firstFound = foundList[0];
+            id = firstFound.id;
+            const fAttrs = firstFound.attributes || {};
+            if (!covUrl && fAttrs.artwork) covUrl = formatArt(fAttrs.artwork.url, '300');
+            if (!rel && fAttrs.releaseDate) rel = fAttrs.releaseDate;
+          }
+        } catch (e) {}
+      }
+
+      if (id && !String(id).startsWith('alb_')) {
+        showAlbumDetail(id, name, artist, covUrl, rel, fromView);
+      } else {
+        document.getElementById('searchInput').value = name;
+        goToTab('search');
+        doSearch();
+      }
+    }
+
+    // Shared Album Card Renderer (Uniform Apple Music 1:1 Specs)
+    function renderAlbumCard(alb, options = {}) {
+      const a = alb.attributes || alb;
+      const name = a.name || a.title || '未知专辑';
+      const artist = a.artistName || a.artist || '';
+      const rel = (a.releaseDate || '').substring(0, 4);
+      const covUrl = a.artwork ? formatArt(a.artwork.url, '300') : (a.artworkUrl ? formatArt(a.artworkUrl, '300') : '');
+
+      const card = document.createElement('div');
+      card.className = 'album-card';
+      card.innerHTML = `
+        <img src="${covUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'160\\' height=\\'160\\'><rect fill=\\'%23e5e5ea\\' width=\\'160\\' height=\\'160\\'/><text x=\\'50%25\\' y=\\'50%25\\' dominant-baseline=\\'middle\' text-anchor=\\'middle\' font-size=\\'36\\'>💿</text></svg>'">
+        <div class="album-card-title">${name}</div>
+        <div class="album-card-sub">${artist}${rel ? ' · ' + rel : ''}</div>
+      `;
+      card.onclick = () => {
+        openAlbum(alb, options);
+      };
+      return card;
+    }
+
+    // Shared Playlist Card Renderer
+    function renderPlaylistCard(pl, options = {}) {
+      const a = pl.attributes || pl;
+      const name = a.name || '精选歌单';
+      const curator = a.curatorName || 'Apple Music';
+      const covUrl = a.artwork ? formatArt(a.artwork.url, '300') : (a.artworkUrl ? formatArt(a.artworkUrl, '300') : '');
+      const id = pl.id || a.id || '';
+
+      const card = document.createElement('div');
+      card.className = 'album-card';
+      card.innerHTML = `
+        <img src="${covUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'160\\' height=\\'160\\'><rect fill=\\'%23e5e5ea\\' width=\\'160\\' height=\\'160\\'/><text x=\\'50%25\\' y=\\'50%25\\' dominant-baseline=\\'middle\' text-anchor=\\'middle\' font-size=\\'36\\'>🎧</text></svg>'">
+        <div class="album-card-title">${name}</div>
+        <div class="album-card-sub">${curator}</div>
+      `;
+      card.onclick = () => {
+        showPlaylistDetail(id, name, covUrl, curator, options.fromView || 'search');
+      };
+      return card;
+    }
+
+    // Discover (新发现) Loader & Renderer
+    async function loadDiscover() {
+      if (discoverDataCache) {
+        renderDiscover(discoverDataCache);
+        return;
+      }
+      try {
+        const res = await fetch('/api/v2/amapi/charts');
+        const json = await res.json();
+        discoverDataCache = (json.data && json.data.results) ? json.data.results : {};
+        renderDiscover(discoverDataCache);
+      } catch (e) {
+        const topEl = document.getElementById('discoverTopSongs');
+        if (topEl) topEl.innerHTML = '<div style="text-align:center;padding:20px;color:red;">排行榜加载失败: ' + e.message + '</div>';
+      }
+    }
+
+    function renderDiscover(results) {
+      if (!results) return;
+
+      const playlistsData = (results.playlists && results.playlists[0] && results.playlists[0].data) || [];
+      const songsData = (results.songs && results.songs[0] && results.songs[0].data) || [];
+      const albumsData = (results.albums && results.albums[0] && results.albums[0].data) || [];
+
+      // 1. Featured Hero
+      if (playlistsData.length > 0) {
+        const feat = playlistsData[0];
+        const fa = feat.attributes || {};
+        currentFeaturedPlaylistId = feat.id;
+        const fImg = document.getElementById('discoverFeaturedImg');
+        const fTitle = document.getElementById('discoverFeaturedTitle');
+        const fSub = document.getElementById('discoverFeaturedSub');
+        const fHero = document.getElementById('discoverFeaturedHero');
+
+        if (fImg) fImg.src = fa.artwork ? formatArt(fa.artwork.url, '200') : '';
+        if (fTitle) fTitle.textContent = fa.name || '今日热门精选';
+        if (fSub) fSub.textContent = (fa.curatorName || 'Apple Music') + (fa.description && fa.description.short ? ' · ' + fa.description.short : '');
+        if (fHero) {
+          fHero.onclick = () => showPlaylistDetail(feat.id, fa.name, fa.artwork ? formatArt(fa.artwork.url, '360') : '', fa.curatorName, 'discover');
+        }
+      }
+
+      // 2. Top Songs (10 items)
+      const topSongsDiv = document.getElementById('discoverTopSongs');
+      if (topSongsDiv) {
+        topSongsDiv.innerHTML = '';
+        songsData.slice(0, 10).forEach((song, idx) => {
+          topSongsDiv.appendChild(renderSongRow(song, { rank: idx + 1, showCover: true }));
+        });
+      }
+
+      // 3. Playlists (8 items)
+      const plDiv = document.getElementById('discoverPlaylists');
+      if (plDiv) {
+        plDiv.innerHTML = '';
+        playlistsData.slice(0, 8).forEach(pl => {
+          plDiv.appendChild(renderPlaylistCard(pl, { fromView: 'discover' }));
+        });
+      }
+
+      // 4. Albums (10 items)
+      const albDiv = document.getElementById('discoverAlbums');
+      if (albDiv) {
+        albDiv.innerHTML = '';
+        albumsData.slice(0, 10).forEach(alb => {
+          albDiv.appendChild(renderAlbumCard(alb, { fromView: 'discover' }));
+        });
+      }
+    }
+
+    async function playFeaturedPlaylist() {
+      if (!currentFeaturedPlaylistId) return;
+      await fetch('/api/v2/playback/play-item', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ type: 'playlists', id: currentFeaturedPlaylistId })
+      });
+      showToast('正在播放精选歌单...');
+      setTimeout(() => {
+        goToTab('player');
+        fetchNowPlaying();
+      }, 700);
+    }
+
     function renderSearchResults() {
       const resDiv = document.getElementById('searchResults');
       if (!currentSearchData) return;
@@ -1725,7 +2255,7 @@
           const row = document.createElement('div');
           row.className = 'song-item';
           row.innerHTML = `
-            <img src="${artUrl}" style="border-radius:50%;" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><circle cx=\\'22\\' cy=\\'22\\' r=\\'22\\' fill=\\'%23e5e5ea\\'/></svg>'">
+            <img src="${artUrl}" style="border-radius:50%;" onerror="this.src=\'data:image/svg+xml;utf8,<svg xmlns=\\\'http://www.w3.org/2000/svg\\\' width=\\'44\\' height=\\'44\\'><circle cx=\\'22\\' cy=\\'22\\' r=\\'22\\' fill=\\\'%23e5e5ea\\\'/></svg>\'">
             <div class="song-info">
               <div class="song-title">${a.name}</div>
               <div class="song-sub">${(a.genreNames || []).join(' · ') || 'Apple Music 认证艺人'}</div>
@@ -1741,24 +2271,14 @@
         resDiv.appendChild(aSec);
       }
 
-      // 2. Albums
+      // 2. Albums (Fully uniform with Image 2)
       if ((currentSearchFilter === 'all' || currentSearchFilter === 'albums') && albums.length > 0) {
         const albSec = document.createElement('div');
         albSec.innerHTML = '<div class="section-title">专辑 <span>点击查看曲目列表</span></div>';
         const grid = document.createElement('div');
         grid.className = 'albums-grid';
         albums.slice(0, currentSearchFilter === 'all' ? 4 : 20).forEach(alb => {
-          const a = alb.attributes;
-          const covUrl = formatArt(a.artwork ? a.artwork.url : '', '240');
-          const card = document.createElement('div');
-          card.className = 'album-card';
-          card.innerHTML = `
-            <img src="${covUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'160\\' height=\\'160\\'><rect fill=\\'%23e5e5ea\\' width=\\'160\\' height=\\'160\\'/></svg>'">
-            <div class="album-card-title">${a.name}</div>
-            <div class="album-card-sub">${a.artistName || ''} · ${(a.releaseDate || '').substring(0,4)}</div>
-          `;
-          card.onclick = () => showAlbumDetail(alb.id, a.name, a.artistName, covUrl, a.releaseDate);
-          grid.appendChild(card);
+          grid.appendChild(renderAlbumCard(alb, { fromView: 'search' }));
         });
         albSec.appendChild(grid);
         resDiv.appendChild(albSec);
@@ -1771,17 +2291,7 @@
         const grid = document.createElement('div');
         grid.className = 'albums-grid';
         playlists.slice(0, currentSearchFilter === 'all' ? 2 : 12).forEach(pl => {
-          const a = pl.attributes;
-          const covUrl = formatArt(a.artwork ? a.artwork.url : '', '240');
-          const card = document.createElement('div');
-          card.className = 'album-card';
-          card.innerHTML = `
-            <img src="${covUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'160\\' height=\\'160\\'/></svg>'">
-            <div class="album-card-title">${a.name}</div>
-            <div class="album-card-sub">${a.curatorName || 'Apple Music'}</div>
-          `;
-          card.onclick = () => showPlaylistDetail(pl.id, a.name, covUrl, a.curatorName);
-          grid.appendChild(card);
+          grid.appendChild(renderPlaylistCard(pl, { fromView: 'search' }));
         });
         plSec.appendChild(grid);
         resDiv.appendChild(plSec);
@@ -1794,22 +2304,7 @@
         const list = document.createElement('div');
         list.className = 'song-list';
         songs.forEach(s => {
-          const a = s.attributes;
-          const art = formatArt(a.artwork ? a.artwork.url : '', '100');
-          const item = document.createElement('div');
-          item.className = 'song-item';
-          item.innerHTML = `
-            <img src="${art}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><rect fill=\\'%23e5e5ea\\' width=\\'44\\' height=\\'44\\'/></svg>'">
-            <div class="song-info">
-              <div class="song-title">${a.name}</div>
-              <div class="song-sub">${a.artistName} · ${a.albumName || ''}</div>
-            </div>
-            <div class="song-actions">
-              <span class="song-play">▶</span>
-            </div>
-          `;
-          item.onclick = async () => playTrackDirect(s.id, a.name);
-          list.appendChild(item);
+          list.appendChild(renderSongRow(s, { showCover: true }));
         });
         sSec.appendChild(list);
         resDiv.appendChild(sSec);
@@ -1824,7 +2319,7 @@
       });
       showToast('正在播放: ' + name);
       setTimeout(() => {
-        switchTab('player', document.querySelectorAll('.nav-bar .nav-item')[0]);
+        goToTab('player');
         fetchNowPlaying();
       }, 700);
     }
@@ -1838,7 +2333,10 @@
         if (artView) artView.classList.add('active');
       } else if (prev === 'library') {
         document.getElementById('searchMainView').style.display = 'block';
-        switchTab('library', document.querySelectorAll('.nav-bar .nav-item')[2]);
+        goToTab('library');
+      } else if (prev === 'discover') {
+        document.getElementById('searchMainView').style.display = 'block';
+        goToTab('discover');
       } else {
         document.getElementById('searchMainView').style.display = 'block';
       }
@@ -1846,8 +2344,15 @@
 
     async function showAlbumDetail(albumId, title, artist, coverUrl, releaseDate, fromView = 'search') {
       currentAlbumId = albumId;
+      currentAlbumSnapshot = {
+        id: albumId,
+        name: title,
+        artist: artist,
+        artworkUrl: coverUrl,
+        releaseDate: releaseDate
+      };
       if (fromView !== 'search') {
-        switchTab('search', document.querySelectorAll('.nav-bar .nav-item')[1]);
+        goToTab('search');
       }
       navStack.push(fromView);
       document.getElementById('searchMainView').style.display = 'none';
@@ -1857,12 +2362,14 @@
 
       const backBtn = document.getElementById('albDetailBack');
       if (backBtn) {
-        backBtn.textContent = fromView === 'library' ? '‹ 返回资料库' : (fromView === 'artist' ? '‹ 返回艺人' : '‹ 返回搜索');
+        backBtn.textContent = fromView === 'library' ? '‹ 返回资料库' : (fromView === 'artist' ? '‹ 返回艺人' : (fromView === 'discover' ? '‹ 返回新发现' : '‹ 返回搜索'));
       }
 
       document.getElementById('albHeroTitle').textContent = title;
       document.getElementById('albHeroArtist').textContent = artist + (releaseDate ? ' · ' + releaseDate.substring(0,4) : '');
       document.getElementById('albHeroCover').src = coverUrl || 'data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'160\' height=\'160\'><rect fill=\'%23e5e5ea\' width=\'160\' height=\'160\'/><text x=\'50%25\' y=\'50%25\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-size=\'36\'>💿</text></svg>';
+
+      updateAlbumDetailButtons();
 
       const trackListDiv = document.getElementById('albTrackList');
       trackListDiv.innerHTML = '<div style="text-align:center;padding:20px;color:var(--subtext);">正在加载专辑曲目...</div>';
@@ -1874,7 +2381,9 @@
         const tracks = (albData.relationships && albData.relationships.tracks && albData.relationships.tracks.data) || [];
 
         if (albData.attributes && albData.attributes.artwork && albData.attributes.artwork.url) {
-          document.getElementById('albHeroCover').src = formatArt(albData.attributes.artwork.url, '360');
+          const hdCov = formatArt(albData.attributes.artwork.url, '360');
+          document.getElementById('albHeroCover').src = hdCov;
+          currentAlbumSnapshot.artworkUrl = hdCov;
         }
 
         document.getElementById('albTrackCount').textContent = `共 ${tracks.length} 首`;
@@ -1887,20 +2396,10 @@
 
         tracks.forEach((t, i) => {
           const a = t.attributes || {};
-          const row = document.createElement('div');
-          row.className = 'song-item';
-          row.innerHTML = `
-            <div class="song-num">${a.trackNumber || (i + 1)}</div>
-            <div class="song-info">
-              <div class="song-title">${a.name}</div>
-              <div class="song-sub">${a.artistName || artist}</div>
-            </div>
-            <div class="song-actions">
-              <span style="font-size:12px;color:var(--subtext);">${formatMs(a.durationInMillis)}</span>
-              <span class="song-play">▶</span>
-            </div>
-          `;
-          row.onclick = () => playTrackDirect(t.id, a.name);
+          const row = renderSongRow(t, {
+            trackNumber: a.trackNumber || (i + 1),
+            showCover: false
+          });
           trackListDiv.appendChild(row);
         });
       } catch (e) {
@@ -1917,7 +2416,7 @@
       });
       showToast('正在开始播放整张专辑...');
       setTimeout(() => {
-        switchTab('player', document.querySelectorAll('.nav-bar .nav-item')[0]);
+        goToTab('player');
         fetchNowPlaying();
       }, 700);
     }
@@ -1925,7 +2424,7 @@
     async function showPlaylistDetail(playlistId, title, coverUrl, curator, fromView = 'search') {
       currentPlaylistId = playlistId;
       if (fromView !== 'search') {
-        switchTab('search', document.querySelectorAll('.nav-bar .nav-item')[1]);
+        goToTab('search');
       }
       navStack.push(fromView);
       document.getElementById('searchMainView').style.display = 'none';
@@ -1935,7 +2434,7 @@
 
       const backBtn = document.getElementById('plDetailBack');
       if (backBtn) {
-        backBtn.textContent = fromView === 'library' ? '‹ 返回资料库' : '‹ 返回搜索';
+        backBtn.textContent = fromView === 'library' ? '‹ 返回资料库' : (fromView === 'discover' ? '‹ 返回新发现' : '‹ 返回搜索');
       }
 
       document.getElementById('plHeroTitle').textContent = title;
@@ -1953,22 +2452,7 @@
 
         trackListDiv.innerHTML = '';
         tracks.forEach(t => {
-          const a = t.attributes;
-          const art = formatArt(a.artwork ? a.artwork.url : '', '90');
-          const row = document.createElement('div');
-          row.className = 'song-item';
-          row.innerHTML = `
-            <img src="${art}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><rect fill=\\'%23e5e5ea\\' width=\\'44\\' height=\\'44\\'/></svg>'">
-            <div class="song-info">
-              <div class="song-title">${a.name}</div>
-              <div class="song-sub">${a.artistName} · ${a.albumName || ''}</div>
-            </div>
-            <div class="song-actions">
-              <span class="song-play">▶</span>
-            </div>
-          `;
-          row.onclick = () => playTrackDirect(t.id, a.name);
-          trackListDiv.appendChild(row);
+          trackListDiv.appendChild(renderSongRow(t, { showCover: true }));
         });
       } catch (e) {
         trackListDiv.innerHTML = '<div style="text-align:center;padding:20px;color:red;">歌单加载失败</div>';
@@ -1984,14 +2468,14 @@
       });
       showToast('正在开始播放歌单...');
       setTimeout(() => {
-        switchTab('player', document.querySelectorAll('.nav-bar .nav-item')[0]);
+        goToTab('player');
         fetchNowPlaying();
       }, 700);
     }
 
     async function showArtistDetail(artistId, name, coverUrl, genre, fromView = 'search') {
       if (fromView !== 'search') {
-        switchTab('search', document.querySelectorAll('.nav-bar .nav-item')[1]);
+        goToTab('search');
       }
       navStack.push(fromView);
       document.getElementById('searchMainView').style.display = 'none';
@@ -2001,7 +2485,7 @@
 
       const backBtn = document.getElementById('artDetailBack');
       if (backBtn) {
-        backBtn.textContent = fromView === 'library' ? '‹ 返回资料库' : '‹ 返回搜索';
+        backBtn.textContent = fromView === 'library' ? '‹ 返回资料库' : (fromView === 'discover' ? '‹ 返回新发现' : '‹ 返回搜索');
       }
 
       document.getElementById('artHeroName').textContent = name;
@@ -2018,140 +2502,125 @@
 
         grid.innerHTML = '';
         albums.forEach(alb => {
-          const a = alb.attributes;
-          const covUrl = formatArt(a.artwork ? a.artwork.url : '', '240');
-          const card = document.createElement('div');
-          card.className = 'album-card';
-          card.innerHTML = `
-            <img src="${covUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'160\\' height=\\'160\\'/></svg>'">
-            <div class="album-card-title">${a.name}</div>
-            <div class="album-card-sub">${(a.releaseDate || '').substring(0,4)} · 共 ${a.trackCount || 0} 首</div>
-          `;
-          card.onclick = () => showAlbumDetail(alb.id, a.name, name, covUrl, a.releaseDate, 'artist');
-          grid.appendChild(card);
+          grid.appendChild(renderAlbumCard(alb, { fromView: 'artist' }));
         });
       } catch (e) {
         grid.innerHTML = '<div style="grid-column:1/3;text-align:center;padding:20px;color:red;">专辑加载失败</div>';
       }
     }
 
-    // Library Functions
+    // Library Functions (Supports songs, albums, favorites, recent)
     function switchLibrarySub(sub, elem) {
+      currentLibrarySub = sub;
       document.querySelectorAll('#tab-library .chip').forEach(c => c.classList.remove('active'));
-      elem.classList.add('active');
+      if (elem) elem.classList.add('active');
       loadLibrary(sub);
     }
 
     async function loadLibrary(type) {
+      currentLibrarySub = type || 'songs';
       const c = document.getElementById('libContainer');
-      c.innerHTML = '<div style="text-align:center;padding:30px;color:var(--subtext);">正在读取资料库...</div>';
+      c.innerHTML = '<div style="text-align:center;padding:30px;color:var(--subtext);">正在同步个人资料库...</div>';
 
-      if (type === 'recent') {
+      await syncUserLibraryState();
+
+      if (type === 'songs') {
+        const songs = userLibraryState.songs || [];
+        if (songs.length === 0) {
+          c.innerHTML = `
+            <div style="text-align:center;padding:50px 20px;color:var(--subtext);">
+              <div style="font-size:36px;margin-bottom:12px;">🎵</div>
+              <div style="font-size:16px;font-weight:700;color:var(--text);">资料库暂无歌曲</div>
+              <div style="font-size:13px;margin-top:6px;">在播放界面、搜索列表或热门推荐中点击 ➕ 即可加入资料库</div>
+            </div>
+          `;
+          return;
+        }
+        c.innerHTML = `<div class="section-title">资料库歌曲 (${songs.length}) <span>点击直接播放</span></div>`;
+        const list = document.createElement('div');
+        list.className = 'song-list';
+        songs.forEach(s => {
+          list.appendChild(renderSongRow(s, { showCover: true }));
+        });
+        c.appendChild(list);
+      } else if (type === 'albums') {
+        let albums = [...(userLibraryState.albums || [])];
+        try {
+          const res = await fetch('/api/v2/library/recent');
+          const json = await res.json();
+          const recAlbs = (json.data && json.data.albums) || [];
+          recAlbs.forEach(ra => {
+            if (!albums.some(a => (a.id && ra.albumId && a.id === ra.albumId) || (a.name === ra.name))) {
+              albums.push({
+                id: ra.albumId || '',
+                name: ra.name,
+                artist: ra.artist,
+                artworkUrl: ra.artworkUrl,
+                releaseDate: ra.releaseDate,
+                trackCount: ra.trackCount
+              });
+            }
+          });
+        } catch (e) {}
+
+        if (albums.length === 0) {
+          c.innerHTML = `
+            <div style="text-align:center;padding:50px 20px;color:var(--subtext);">
+              <div style="font-size:36px;margin-bottom:12px;">💿</div>
+              <div style="font-size:16px;font-weight:700;color:var(--text);">暂无专辑收藏</div>
+              <div style="font-size:13px;margin-top:6px;">在专辑详情页面点击「添加到资料库」或在 Apple Music 播放整张专辑即可沉淀于此</div>
+            </div>
+          `;
+          return;
+        }
+        c.innerHTML = `<div class="section-title">我的专辑 (${albums.length}) <span>统一 Apple Music 规范</span></div>`;
+        const grid = document.createElement('div');
+        grid.className = 'albums-grid';
+        albums.forEach(alb => {
+          grid.appendChild(renderAlbumCard(alb, { fromView: 'library' }));
+        });
+        c.appendChild(grid);
+      } else if (type === 'favorites') {
+        const favs = userLibraryState.favorites || [];
+        if (favs.length === 0) {
+          c.innerHTML = `
+            <div style="text-align:center;padding:50px 20px;color:var(--subtext);">
+              <div style="font-size:36px;margin-bottom:12px;">❤️</div>
+              <div style="font-size:16px;font-weight:700;color:var(--text);">暂无喜爱的音乐</div>
+              <div style="font-size:13px;margin-top:6px;">播放时点击 ❤️ 或在曲目列表点击红心，即可收藏到此处</div>
+            </div>
+          `;
+          return;
+        }
+        c.innerHTML = `<div class="section-title">我喜爱的音乐 (${favs.length}) <span>点击直接播放</span></div>`;
+        const list = document.createElement('div');
+        list.className = 'song-list';
+        favs.forEach(s => {
+          list.appendChild(renderSongRow(s, { showCover: true }));
+        });
+        c.appendChild(list);
+      } else if (type === 'recent') {
         try {
           const res = await fetch('/api/v2/library/recent');
           const json = await res.json();
           const tracks = (json.data && json.data.tracks) || [];
-
           if (tracks.length === 0) {
             c.innerHTML = '<div style="text-align:center;padding:40px;color:var(--subtext);">暂无最近播放记录</div>';
             return;
           }
-
           c.innerHTML = '<div class="section-title">最近播放 <span>自动同步 Apple Music</span></div>';
           const list = document.createElement('div');
           list.className = 'song-list';
           tracks.forEach(t => {
-            const art = t.artworkUrl ? formatArt(t.artworkUrl, '100') : '';
-            const row = document.createElement('div');
-            row.className = 'song-item';
-            row.innerHTML = `
-              <img src="${art}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><rect fill=\\'%23e5e5ea\\' width=\\'44\\' height=\\'44\\'/></svg>'">
-              <div class="song-info">
-                <div class="song-title">${t.title}</div>
-                <div class="song-sub">${t.artist} — ${t.album || ''}</div>
-              </div>
-              <div class="song-actions">
-                <span class="song-play">▶</span>
-              </div>
-            `;
-            row.onclick = () => playTrackDirect(t.adamId, t.title);
-            list.appendChild(row);
+            list.appendChild(renderSongRow({
+              id: t.adamId,
+              name: t.title,
+              artist: t.artist,
+              album: t.album,
+              artworkUrl: t.artworkUrl
+            }, { showCover: true }));
           });
           c.appendChild(list);
-        } catch (e) {
-          c.innerHTML = '<div style="text-align:center;padding:30px;color:red;">加载失败</div>';
-        }
-      } else if (type === 'favorites') {
-        try {
-          const res = await fetch('/api/v2/library/favorites');
-          const json = await res.json();
-          const favs = json.data || [];
-
-          if (favs.length === 0) {
-            c.innerHTML = '<div style="text-align:center;padding:40px;color:var(--subtext);">暂无收藏歌曲，播放时点击 ❤️ 即可收藏</div>';
-            return;
-          }
-
-          c.innerHTML = `<div class="section-title">我喜爱的音乐 (${favs.length})</div>`;
-          const list = document.createElement('div');
-          list.className = 'song-list';
-          favs.forEach(t => {
-            const art = t.artworkUrl ? formatArt(t.artworkUrl, '100') : '';
-            const row = document.createElement('div');
-            row.className = 'song-item';
-            row.innerHTML = `
-              <img src="${art}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><rect fill=\\'%23e5e5ea\\' width=\\'44\\' height=\\'44\\'/></svg>'">
-              <div class="song-info">
-                <div class="song-title">${t.name}</div>
-                <div class="song-sub">${t.artist} · ${t.album || ''}</div>
-              </div>
-              <div class="song-actions">
-                <span style="font-size:16px;">❤️</span>
-                <span class="song-play">▶</span>
-              </div>
-            `;
-            row.onclick = () => playTrackDirect(t.id, t.name);
-            list.appendChild(row);
-          });
-          c.appendChild(list);
-        } catch (e) {
-          c.innerHTML = '<div style="text-align:center;padding:30px;color:red;">加载失败</div>';
-        }
-      } else if (type === 'albums') {
-        try {
-          const res = await fetch('/api/v2/library/recent');
-          const json = await res.json();
-          const albums = (json.data && json.data.albums) || [];
-
-          if (albums.length === 0) {
-            c.innerHTML = '<div style="text-align:center;padding:40px;color:var(--subtext);">暂无历史专辑记录</div>';
-            return;
-          }
-
-          c.innerHTML = '<div class="section-title">历史收听专辑</div>';
-          const grid = document.createElement('div');
-          grid.className = 'albums-grid';
-          albums.forEach(alb => {
-            const covUrl = alb.artworkUrl ? formatArt(alb.artworkUrl, '300') : '';
-            const card = document.createElement('div');
-            card.className = 'album-card';
-            card.innerHTML = `
-              <img src="${covUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'160\\' height=\\'160\\'><rect fill=\\'%23e5e5ea\\' width=\\'160\\' height=\\'160\\'/><text x=\\'50%25\\' y=\\'50%25\' dominant-baseline=\\'middle\' text-anchor=\\'middle\' font-size=\\'36\\'>💿</text></svg>'">
-              <div class="album-card-title">${alb.name}</div>
-              <div class="album-card-sub">${alb.artist} · ${alb.trackCount} 首</div>
-            `;
-            card.onclick = () => {
-              if (alb.albumId) {
-                showAlbumDetail(alb.albumId, alb.name, alb.artist, covUrl, alb.releaseDate, 'library');
-              } else {
-                document.getElementById('searchInput').value = alb.name;
-                switchTab('search', document.querySelectorAll('.nav-bar .nav-item')[1]);
-                doSearch();
-              }
-            };
-            grid.appendChild(card);
-          });
-          c.appendChild(grid);
         } catch (e) {
           c.innerHTML = '<div style="text-align:center;padding:30px;color:red;">加载失败</div>';
         }
@@ -2509,7 +2978,7 @@
 
     // Init
     setInterval(fetchNowPlaying, 1000);
-    loadFavoritesList();
+    syncUserLibraryState();
     loadAmExclusiveConfig();
     fetchNowPlaying();
   </script>

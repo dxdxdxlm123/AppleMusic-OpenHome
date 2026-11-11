@@ -78,6 +78,11 @@ std::mutex g_albumMetaMutex;
 std::unordered_map<std::string, CachedAlbumMeta> g_albumMetaCache;
 std::unordered_map<std::string, std::string> g_songArtworkCache;
 
+// Forward declarations
+void SaveFavorites();
+void SaveLibSongs();
+void SaveLibAlbums();
+
 // Favorites persistence
 std::mutex g_favoritesMutex;
 json g_favorites = json::array();
@@ -89,7 +94,7 @@ std::wstring GetFavoritesFilePath() {
 
 void LoadFavoritesIfNeeded() {
     std::lock_guard lock(g_favoritesMutex);
-    if (g_favoritesLoaded) return;
+    if (g_favoritesLoaded && !g_favorites.empty()) return;
     g_favoritesLoaded = true;
 
     std::wstring path = GetFavoritesFilePath();
@@ -105,6 +110,15 @@ void LoadFavoritesIfNeeded() {
             } catch (...) {}
         }
         CloseHandle(hFile);
+    }
+
+    if (g_favorites.empty()) {
+        g_favorites = json::array({
+            {{"id", "535824731"}, {"name", "晴天"}, {"artist", "周杰伦"}, {"album", "叶惠美"}, {"artworkUrl", ""}},
+            {{"id", "545213762"}, {"name", "想自由"}, {"artist", "林宥嘉"}, {"album", "美妙生活"}, {"artworkUrl", ""}},
+            {{"id", "1445888258"}, {"name", "Blank Space"}, {"artist", "Taylor Swift"}, {"album", "1989"}, {"artworkUrl", ""}}
+        });
+        SaveFavorites();
     }
 }
 
@@ -122,12 +136,16 @@ void SaveFavorites() {
 bool ToggleFavorite(const json& item) {
     LoadFavoritesIfNeeded();
     std::lock_guard lock(g_favoritesMutex);
+    std::string id = item.value("id", "");
     std::string name = item.value("name", "");
     std::string artist = item.value("artist", "");
-    if (name.empty()) return false;
+    if (id.empty() && name.empty()) return false;
 
     for (auto it = g_favorites.begin(); it != g_favorites.end(); ++it) {
-        if ((*it).value("name", "") == name && (*it).value("artist", "") == artist) {
+        bool match = false;
+        if (!id.empty() && (*it).value("id", "") == id) match = true;
+        else if ((*it).value("name", "") == name && (*it).value("artist", "") == artist) match = true;
+        if (match) {
             g_favorites.erase(it);
             SaveFavorites();
             return false; // removed
@@ -136,6 +154,164 @@ bool ToggleFavorite(const json& item) {
 
     g_favorites.push_back(item);
     SaveFavorites();
+    return true; // added
+}
+
+// Library Songs persistence
+std::mutex g_libSongsMutex;
+json g_libSongs = json::array();
+bool g_libSongsLoaded = false;
+
+std::wstring GetLibSongsFilePath() {
+    return L"C:\\Users\\Public\\AMExclusive\\am_library_songs.json";
+}
+
+void LoadLibSongsIfNeeded() {
+    std::lock_guard lock(g_libSongsMutex);
+    if (g_libSongsLoaded && !g_libSongs.empty()) return;
+    g_libSongsLoaded = true;
+
+    std::wstring path = GetLibSongsFilePath();
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD size = GetFileSize(hFile, nullptr);
+        if (size > 0 && size < 10 * 1024 * 1024) {
+            std::string content(size, '\0');
+            DWORD read = 0;
+            ReadFile(hFile, content.data(), size, &read, nullptr);
+            try {
+                g_libSongs = json::parse(content);
+            } catch (...) {}
+        }
+        CloseHandle(hFile);
+    }
+
+    if (g_libSongs.empty()) {
+        auto recents = PlayQueueReader::ReadRecentItems();
+        for (const auto& r : recents) {
+            g_libSongs.push_back({
+                {"id", r.adamId},
+                {"name", r.title},
+                {"artist", r.artist},
+                {"album", r.album},
+                {"artworkUrl", ""}
+            });
+        }
+        SaveLibSongs();
+    }
+}
+
+void SaveLibSongs() {
+    std::wstring path = GetLibSongsFilePath();
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        std::string s = g_libSongs.dump(2);
+        DWORD written = 0;
+        WriteFile(hFile, s.data(), static_cast<DWORD>(s.size()), &written, nullptr);
+        CloseHandle(hFile);
+    }
+}
+
+bool ToggleLibSong(const json& item) {
+    LoadLibSongsIfNeeded();
+    std::lock_guard lock(g_libSongsMutex);
+    std::string id = item.value("id", "");
+    std::string name = item.value("name", "");
+    std::string artist = item.value("artist", "");
+    if (id.empty() && name.empty()) return false;
+
+    for (auto it = g_libSongs.begin(); it != g_libSongs.end(); ++it) {
+        bool match = false;
+        if (!id.empty() && (*it).value("id", "") == id) match = true;
+        else if ((*it).value("name", "") == name && (*it).value("artist", "") == artist) match = true;
+        if (match) {
+            g_libSongs.erase(it);
+            SaveLibSongs();
+            return false; // removed
+        }
+    }
+
+    g_libSongs.push_back(item);
+    SaveLibSongs();
+    return true; // added
+}
+
+// Library Albums persistence
+std::mutex g_libAlbumsMutex;
+json g_libAlbums = json::array();
+bool g_libAlbumsLoaded = false;
+
+std::wstring GetLibAlbumsFilePath() {
+    return L"C:\\Users\\Public\\AMExclusive\\am_library_albums.json";
+}
+
+void LoadLibAlbumsIfNeeded() {
+    std::lock_guard lock(g_libAlbumsMutex);
+    if (g_libAlbumsLoaded && !g_libAlbums.empty()) return;
+    g_libAlbumsLoaded = true;
+
+    std::wstring path = GetLibAlbumsFilePath();
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        DWORD size = GetFileSize(hFile, nullptr);
+        if (size > 0 && size < 10 * 1024 * 1024) {
+            std::string content(size, '\0');
+            DWORD read = 0;
+            ReadFile(hFile, content.data(), size, &read, nullptr);
+            try {
+                g_libAlbums = json::parse(content);
+            } catch (...) {}
+        }
+        CloseHandle(hFile);
+    }
+
+    if (g_libAlbums.empty()) {
+        auto recents = PlayQueueReader::ReadRecentAlbums();
+        for (const auto& alb : recents) {
+            g_libAlbums.push_back({
+                {"id", alb.firstAdamId},
+                {"name", alb.name},
+                {"artist", alb.artist},
+                {"trackCount", alb.trackCount},
+                {"artworkUrl", ""}
+            });
+        }
+        SaveLibAlbums();
+    }
+}
+
+void SaveLibAlbums() {
+    std::wstring path = GetLibAlbumsFilePath();
+    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile != INVALID_HANDLE_VALUE) {
+        std::string s = g_libAlbums.dump(2);
+        DWORD written = 0;
+        WriteFile(hFile, s.data(), static_cast<DWORD>(s.size()), &written, nullptr);
+        CloseHandle(hFile);
+    }
+}
+
+bool ToggleLibAlbum(const json& item) {
+    LoadLibAlbumsIfNeeded();
+    std::lock_guard lock(g_libAlbumsMutex);
+    std::string id = item.value("id", "");
+    std::string name = item.value("name", "");
+    std::string artist = item.value("artist", "");
+    if (id.empty() && name.empty()) return false;
+
+    for (auto it = g_libAlbums.begin(); it != g_libAlbums.end(); ++it) {
+        bool match = false;
+        if (!id.empty() && (*it).value("id", "") == id) match = true;
+        else if ((*it).value("name", "") == name && (*it).value("artist", "") == artist) match = true;
+        if (match) {
+            g_libAlbums.erase(it);
+            SaveLibAlbums();
+            return false; // removed
+        }
+    }
+
+    g_libAlbums.push_back(item);
+    SaveLibAlbums();
     return true; // added
 }
 
@@ -586,7 +762,9 @@ bool RemoteServer::Start() {
 
     // Run server in background thread
     std::thread([this]() {
-        server_->listen("0.0.0.0", port_);
+        try {
+            server_->listen("0.0.0.0", port_);
+        } catch (...) {}
     }).detach();
 
     return true;
@@ -606,6 +784,10 @@ std::string RemoteServer::BuildNowPlayingJson(const TrackSnapshot& snapshot) {
     std::string title = Narrow(snapshot.title);
     std::string artist = Narrow(snapshot.artist);
     std::string album = Narrow(snapshot.album);
+
+    if (!title.empty() && !artist.empty() && title != "未在播放") {
+        PlayQueueReader::RecordTrack(title, artist, album, "");
+    }
 
     json track = {
         {"name", title},
@@ -1106,6 +1288,75 @@ void RemoteServer::SetupRoutes() {
             added = ToggleFavorite(j);
         } catch (...) {}
         res.set_content(json({{"success", true}, {"favorited", added}}).dump(), "application/json");
+    });
+
+    server_->Get("/api/v2/library/user-state", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        LoadFavoritesIfNeeded();
+        LoadLibSongsIfNeeded();
+        LoadLibAlbumsIfNeeded();
+        json j = json::object();
+        {
+            std::lock_guard lock(g_favoritesMutex);
+            j["favorites"] = g_favorites;
+        }
+        {
+            std::lock_guard lock(g_libSongsMutex);
+            j["songs"] = g_libSongs;
+        }
+        {
+            std::lock_guard lock(g_libAlbumsMutex);
+            j["albums"] = g_libAlbums;
+        }
+        res.set_content(json({{"status", "ok"}, {"data", j}}).dump(), "application/json");
+    });
+
+    server_->Get("/api/v2/library/songs", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        LoadLibSongsIfNeeded();
+        std::lock_guard lock(g_libSongsMutex);
+        json j = {{"data", g_libSongs}};
+        res.set_content(j.dump(), "application/json");
+    });
+
+    server_->Post("/api/v2/library/songs/toggle", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        bool added = false;
+        try {
+            auto j = json::parse(req.body);
+            added = ToggleLibSong(j);
+        } catch (...) {}
+        res.set_content(json({{"success", true}, {"inLibrary", added}}).dump(), "application/json");
+    });
+
+    server_->Get("/api/v2/library/albums", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        LoadLibAlbumsIfNeeded();
+        std::lock_guard lock(g_libAlbumsMutex);
+        json j = {{"data", g_libAlbums}};
+        res.set_content(j.dump(), "application/json");
+    });
+
+    server_->Post("/api/v2/library/albums/toggle", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        bool added = false;
+        try {
+            auto j = json::parse(req.body);
+            added = ToggleLibAlbum(j);
+        } catch (...) {}
+        res.set_content(json({{"success", true}, {"inLibrary", added}}).dump(), "application/json");
+    });
+
+    // Recommendations & Charts endpoint
+    server_->Get("/api/v2/amapi/charts", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        std::string limitStr = req.get_param_value("limit");
+        std::string types = req.get_param_value("types");
+        if (types.empty()) types = "songs,albums,playlists";
+        if (limitStr.empty()) limitStr = "20";
+        auto apiRes = FetchAppleMusicApi("/v1/catalog/cn/charts", "types=" + types + "&limit=" + limitStr);
+        json wrapped = {{"data", apiRes}};
+        res.set_content(wrapped.dump(), "application/json");
     });
 
     // Apple Music API raw proxy with user library interceptor

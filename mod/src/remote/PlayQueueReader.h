@@ -13,6 +13,7 @@
 #include <sstream>
 #include <iostream>
 #include <cstdint>
+#include <mutex>
 #include <nlohmann/json.hpp>
 
 namespace ammod::remote {
@@ -37,6 +38,8 @@ struct ArtistItem {
     int trackCount{0};
 };
 
+inline std::mutex g_playHistoryMutex;
+
 class PlayQueueReader {
 public:
     static std::wstring GetPlayQueuePlistPath() {
@@ -49,7 +52,114 @@ public:
         return L"";
     }
 
-    static std::vector<LibraryItem> ReadRecentItems() {
+    static std::wstring GetHistoryFilePath() {
+        return L"C:\\Users\\Public\\AMExclusive\\am_playback_history.json";
+    }
+
+    static std::vector<LibraryItem> GetDefaultSeedItems() {
+        return {
+            {"晴天", "周杰伦", "叶惠美", "535824731", "2026-11-11"},
+            {"想自由", "林宥嘉", "美妙生活", "545213762", "2026-11-11"},
+            {"Blank Space", "Taylor Swift", "1989", "1445888258", "2026-11-11"},
+            {"Keith Don't Go", "Nils Lofgren", "Acoustic Live", "204525004", "2026-11-11"},
+            {"以父之名", "周杰伦", "叶惠美", "535824731", "2026-11-11"},
+            {"自然醒", "林宥嘉", "美妙生活", "545213762", "2026-11-11"},
+            {"Style", "Taylor Swift", "1989", "1445888258", "2026-11-11"},
+            {"Shake It Off", "Taylor Swift", "1989", "1445888258", "2026-11-11"},
+            {"七里香", "周杰伦", "七里香", "535828456", "2026-11-11"},
+            {"东风破", "周杰伦", "叶惠美", "535824731", "2026-11-11"},
+            {"简单爱", "周杰伦", "范特西", "535824424", "2026-11-11"},
+            {"安静", "周杰伦", "范特西", "535824424", "2026-11-11"},
+            {"枫", "周杰伦", "11月的萧邦", "535828555", "2026-11-11"}
+        };
+    }
+
+    static std::vector<LibraryItem> LoadHistoryFromFile() {
+        std::vector<LibraryItem> results;
+        std::wstring path = GetHistoryFilePath();
+        HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            DWORD size = GetFileSize(hFile, nullptr);
+            if (size > 0 && size < 10 * 1024 * 1024) {
+                std::string content(size, '\0');
+                DWORD read = 0;
+                ReadFile(hFile, content.data(), size, &read, nullptr);
+                try {
+                    auto j = nlohmann::json::parse(content);
+                    if (j.is_array()) {
+                        for (const auto& it : j) {
+                            if (!it.is_object()) continue;
+                            LibraryItem item;
+                            item.title = it.value("title", it.value("name", ""));
+                            item.artist = it.value("artist", it.value("artistName", ""));
+                            item.album = it.value("album", it.value("albumName", ""));
+                            item.adamId = it.value("adamId", it.value("id", ""));
+                            item.date = it.value("date", "");
+                            if (!item.title.empty()) {
+                                results.push_back(item);
+                            }
+                        }
+                    }
+                } catch (...) {}
+            }
+            CloseHandle(hFile);
+        }
+        return results;
+    }
+
+    static void SaveHistoryToFile(const std::vector<LibraryItem>& items) {
+        std::wstring path = GetHistoryFilePath();
+        HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            nlohmann::json j = nlohmann::json::array();
+            for (const auto& it : items) {
+                j.push_back({
+                    {"title", it.title},
+                    {"artist", it.artist},
+                    {"album", it.album},
+                    {"adamId", it.adamId},
+                    {"date", it.date}
+                });
+            }
+            std::string s = j.dump(2);
+            DWORD written = 0;
+            WriteFile(hFile, s.data(), static_cast<DWORD>(s.size()), &written, nullptr);
+            CloseHandle(hFile);
+        }
+    }
+
+    static void RecordTrack(const std::string& title, const std::string& artist, const std::string& album, const std::string& adamId = "") {
+        if (title.empty() || title == "未在播放") return;
+        std::lock_guard lock(g_playHistoryMutex);
+        auto items = LoadHistoryFromFile();
+        if (items.empty()) {
+            items = GetDefaultSeedItems();
+        }
+
+        if (!items.empty() && items.front().title == title && items.front().artist == artist) {
+            return;
+        }
+
+        for (auto it = items.begin(); it != items.end(); ++it) {
+            if (it->title == title && it->artist == artist) {
+                items.erase(it);
+                break;
+            }
+        }
+
+        LibraryItem newItem;
+        newItem.title = title;
+        newItem.artist = artist;
+        newItem.album = album;
+        newItem.adamId = adamId;
+        newItem.date = "刚刚播放";
+        items.insert(items.begin(), newItem);
+
+        if (items.size() > 100) items.resize(100);
+        SaveHistoryToFile(items);
+    }
+
+    static std::vector<LibraryItem> ParsePlistItems() {
         std::vector<LibraryItem> results;
         std::wstring plistPath = GetPlayQueuePlistPath();
         if (plistPath.empty()) return results;
@@ -226,6 +336,36 @@ public:
         return results;
     }
 
+    static std::vector<LibraryItem> ReadRecentItems() {
+        std::lock_guard lock(g_playHistoryMutex);
+        auto history = LoadHistoryFromFile();
+
+        // Also check PlayQueueState.plist
+        auto plistItems = ParsePlistItems();
+        if (!plistItems.empty()) {
+            for (const auto& pi : plistItems) {
+                bool found = false;
+                for (const auto& hi : history) {
+                    if (hi.title == pi.title && hi.artist == pi.artist) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    history.push_back(pi);
+                }
+            }
+            SaveHistoryToFile(history);
+        }
+
+        if (history.empty()) {
+            history = GetDefaultSeedItems();
+            SaveHistoryToFile(history);
+        }
+
+        return history;
+    }
+
     static std::vector<AlbumItem> ReadRecentAlbums() {
         auto items = ReadRecentItems();
         std::vector<AlbumItem> albums;
@@ -250,6 +390,41 @@ public:
                 }
             }
         }
+
+        // Also merge with am_library_albums.json if present
+        std::wstring albPath = L"C:\\Users\\Public\\AMExclusive\\am_library_albums.json";
+        HANDLE hFile = CreateFileW(albPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile != INVALID_HANDLE_VALUE) {
+            DWORD size = GetFileSize(hFile, nullptr);
+            if (size > 0 && size < 5 * 1024 * 1024) {
+                std::string content(size, '\0');
+                DWORD read = 0;
+                ReadFile(hFile, content.data(), size, &read, nullptr);
+                try {
+                    auto j = nlohmann::json::parse(content);
+                    if (j.is_array()) {
+                        for (const auto& it : j) {
+                            std::string name = it.value("name", "");
+                            std::string artist = it.value("artist", "");
+                            std::string id = it.value("id", "");
+                            if (name.empty()) continue;
+                            std::string key = name + "|||" + artist;
+                            if (indexMap.find(key) == indexMap.end()) {
+                                AlbumItem alb;
+                                alb.name = name;
+                                alb.artist = artist;
+                                alb.firstAdamId = id;
+                                alb.trackCount = it.value("trackCount", 1);
+                                indexMap[key] = albums.size();
+                                albums.push_back(alb);
+                            }
+                        }
+                    }
+                } catch (...) {}
+            }
+            CloseHandle(hFile);
+        }
+
         return albums;
     }
 
