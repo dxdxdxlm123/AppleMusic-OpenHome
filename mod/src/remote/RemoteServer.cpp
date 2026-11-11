@@ -333,29 +333,7 @@ void LogDebugMsg(const char* msg) {
     }
 }
 
-void RunLibrarySyncScript() {
-    try {
-        std::wstring scriptPath = L"C:\\Users\\Public\\AMExclusive\\sync_library_from_am.py";
-        if (GetFileAttributesW(scriptPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-            return;
-        }
-
-        std::wstring cmd = L"python.exe \"C:\\Users\\Public\\AMExclusive\\sync_library_from_am.py\"";
-        STARTUPINFOW si = { sizeof(si) };
-        si.dwFlags = STARTF_USESHOWWINDOW;
-        si.wShowWindow = SW_HIDE;
-        PROCESS_INFORMATION pi = { 0 };
-        std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
-        cmdBuf.push_back(L'\0');
-        if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-            WaitForSingleObject(pi.hProcess, 5000);
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-        }
-    } catch (...) {
-        LogDebugMsg("Exception in RunLibrarySyncScript");
-    }
-}
+void NativeSyncAndEnrichLibrary();
 
 json FetchAppleMusicApi(const std::string& path, const std::string& query = "") {
     HINTERNET hSession = WinHttpOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -527,6 +505,10 @@ void PopulateRecentMetadata(const std::vector<AlbumItem>& albums, const std::vec
         std::lock_guard lock(g_albumMetaMutex);
         for (const auto& alb : albums) {
             if (!alb.firstAdamId.empty()) {
+                // If album already has valid albumId and artworkUrl, do not re-query songs
+                if (!alb.albumId.empty() && !alb.albumId.starts_with("lib.alb.") && !alb.artworkUrl.empty()) {
+                    continue;
+                }
                 if (g_albumMetaCache.find(alb.firstAdamId) == g_albumMetaCache.end()) {
                     missingSongIds.push_back(alb.firstAdamId);
                 }
@@ -589,12 +571,14 @@ void PopulateRecentMetadata(const std::vector<AlbumItem>& albums, const std::vec
         }
     }
 
-    // Secondary fallback for any album without resolved albumId
+    // Secondary fallback for any album without resolved albumId: search limit=5 with name/artist verification
     for (const auto& alb : albums) {
         bool resolved = false;
         {
             std::lock_guard lock(g_albumMetaMutex);
-            if (!alb.firstAdamId.empty()) {
+            if (!alb.albumId.empty() && !alb.albumId.starts_with("lib.alb.") && !alb.artworkUrl.empty()) {
+                resolved = true;
+            } else if (!alb.firstAdamId.empty()) {
                 auto it = g_albumMetaCache.find(alb.firstAdamId);
                 if (it != g_albumMetaCache.end() && !it->second.albumId.empty()) {
                     resolved = true;
@@ -608,13 +592,40 @@ void PopulateRecentMetadata(const std::vector<AlbumItem>& albums, const std::vec
             }
         }
         if (!resolved && !alb.name.empty()) {
-            auto srch = FetchAppleSearch(alb.name + " " + alb.artist, "albums", 1);
+            auto srch = FetchAppleSearch(alb.name + " " + alb.artist, "albums", 5);
             if (srch.contains("data") && srch["data"].contains("results") &&
                 srch["data"]["results"].contains("albums") && srch["data"]["results"]["albums"].contains("data") &&
                 !srch["data"]["results"]["albums"]["data"].empty()) {
-                const auto& firstAlb = srch["data"]["results"]["albums"]["data"][0];
-                std::string foundAlbId = firstAlb.value("id", "");
-                const auto& aAttrs = firstAlb.value("attributes", json::object());
+
+                auto normStr = [](std::string s) {
+                    std::string out;
+                    for (char c : s) {
+                        if (c >= 'A' && c <= 'Z') out += (c + 32);
+                        else if (c != ' ' && c != '\t' && c != '-' && c != '_' && c != '(' && c != ')' && c != '/') out += c;
+                    }
+                    return out;
+                };
+
+                std::string targetName = normStr(alb.name);
+                std::string targetArt = normStr(alb.artist);
+
+                const json* bestMatch = nullptr;
+                for (const auto& candidate : srch["data"]["results"]["albums"]["data"]) {
+                    const auto& aAttrs = candidate.value("attributes", json::object());
+                    std::string candName = normStr(aAttrs.value("name", ""));
+                    std::string candArt = normStr(aAttrs.value("artistName", ""));
+                    if ((candName == targetName || candName.find(targetName) != std::string::npos || targetName.find(candName) != std::string::npos) &&
+                        (targetArt.empty() || candArt == targetArt || candArt.find(targetArt) != std::string::npos || targetArt.find(candArt) != std::string::npos)) {
+                        bestMatch = &candidate;
+                        break;
+                    }
+                }
+                if (!bestMatch) {
+                    bestMatch = &srch["data"]["results"]["albums"]["data"][0];
+                }
+
+                std::string foundAlbId = bestMatch->value("id", "");
+                const auto& aAttrs = bestMatch->value("attributes", json::object());
                 std::string foundArtUrl = "";
                 if (aAttrs.contains("artwork") && aAttrs["artwork"].is_object()) {
                     foundArtUrl = aAttrs["artwork"].value("url", "");
@@ -626,6 +637,123 @@ void PopulateRecentMetadata(const std::vector<AlbumItem>& albums, const std::vec
                 g_albumMetaCache[alb.name + "|||" + alb.artist] = meta;
             }
         }
+    }
+}
+
+void NativeSyncAndEnrichLibrary() {
+    LoadLibAlbumsIfNeeded();
+    LoadLibSongsIfNeeded();
+
+    auto recentAlbums = PlayQueueReader::ReadRecentAlbums();
+    auto recentItems = PlayQueueReader::ReadRecentItems();
+    PopulateRecentMetadata(recentAlbums, recentItems);
+
+    std::lock_guard lock(g_libAlbumsMutex);
+    bool modified = false;
+
+    for (const auto& ra : recentAlbums) {
+        std::string albId = "";
+        std::string artUrl = ra.artworkUrl;
+        std::string relDate = ra.releaseDate;
+
+        {
+            std::lock_guard metaLock(g_albumMetaMutex);
+            if (!ra.firstAdamId.empty()) {
+                auto it = g_albumMetaCache.find(ra.firstAdamId);
+                if (it != g_albumMetaCache.end()) {
+                    if (!it->second.albumId.empty()) albId = it->second.albumId;
+                    if (artUrl.empty()) artUrl = it->second.artworkUrl;
+                    if (relDate.empty()) relDate = it->second.releaseDate;
+                }
+            }
+            if (albId.empty() || artUrl.empty()) {
+                auto it2 = g_albumMetaCache.find(ra.name + "|||" + ra.artist);
+                if (it2 != g_albumMetaCache.end()) {
+                    if (albId.empty() && !it2->second.albumId.empty()) albId = it2->second.albumId;
+                    if (artUrl.empty()) artUrl = it2->second.artworkUrl;
+                    if (relDate.empty()) relDate = it2->second.releaseDate;
+                }
+            }
+        }
+        if (albId.empty() && !ra.albumId.empty() && !ra.albumId.starts_with("lib.alb.")) {
+            albId = ra.albumId;
+        }
+        if (albId.empty()) albId = ra.firstAdamId;
+
+        bool found = false;
+        for (auto& ea : g_libAlbums) {
+            std::string eaName = ea.value("name", "");
+            std::string eaArtist = ea.value("artist", "");
+            std::string eaId = ea.value("id", "");
+            if ((!eaId.empty() && !albId.empty() && eaId == albId) || (eaName == ra.name && eaArtist == ra.artist) || eaName == ra.name) {
+                found = true;
+                if (!albId.empty() && (eaId.empty() || eaId.starts_with("lib.alb."))) {
+                    ea["id"] = albId;
+                    ea["albumId"] = albId;
+                    modified = true;
+                }
+                if (ea.value("artworkUrl", "").empty() && !artUrl.empty()) {
+                    ea["artworkUrl"] = artUrl;
+                    modified = true;
+                }
+                if (ea.value("releaseDate", "").empty() && !relDate.empty()) {
+                    ea["releaseDate"] = relDate;
+                    modified = true;
+                }
+                if (ea.value("firstSongId", "").empty() && !ra.firstAdamId.empty()) {
+                    ea["firstSongId"] = ra.firstAdamId;
+                    modified = true;
+                }
+                break;
+            }
+        }
+        if (!found) {
+            json newAlb = {
+                {"id", albId.empty() ? ra.firstAdamId : albId},
+                {"albumId", albId},
+                {"firstSongId", ra.firstAdamId},
+                {"name", ra.name},
+                {"artist", ra.artist},
+                {"trackCount", ra.trackCount},
+                {"artworkUrl", artUrl},
+                {"releaseDate", relDate}
+            };
+            g_libAlbums.push_back(newAlb);
+            modified = true;
+        }
+    }
+
+    // Enrich existing g_libAlbums items
+    for (auto& alb : g_libAlbums) {
+        std::string aId = alb.value("albumId", alb.value("id", ""));
+        std::string aArt = alb.value("artworkUrl", "");
+        std::string aName = alb.value("name", "");
+        std::string aArtist = alb.value("artist", "");
+        std::string songId = alb.value("firstSongId", "");
+
+        if (aArt.empty() || aId.empty() || aId.starts_with("lib.alb.")) {
+            std::lock_guard metaLock(g_albumMetaMutex);
+            if (!songId.empty()) {
+                auto it = g_albumMetaCache.find(songId);
+                if (it != g_albumMetaCache.end()) {
+                    if (!it->second.albumId.empty()) { alb["id"] = it->second.albumId; alb["albumId"] = it->second.albumId; modified = true; }
+                    if (aArt.empty() && !it->second.artworkUrl.empty()) { alb["artworkUrl"] = it->second.artworkUrl; modified = true; }
+                    if (alb.value("releaseDate", "").empty() && !it->second.releaseDate.empty()) { alb["releaseDate"] = it->second.releaseDate; modified = true; }
+                }
+            }
+            if (alb.value("artworkUrl", "").empty() || alb.value("id", "").starts_with("lib.alb.")) {
+                auto it2 = g_albumMetaCache.find(aName + "|||" + aArtist);
+                if (it2 != g_albumMetaCache.end()) {
+                    if (!it2->second.albumId.empty()) { alb["id"] = it2->second.albumId; alb["albumId"] = it2->second.albumId; modified = true; }
+                    if (aArt.empty() && !it2->second.artworkUrl.empty()) { alb["artworkUrl"] = it2->second.artworkUrl; modified = true; }
+                    if (alb.value("releaseDate", "").empty() && !it2->second.releaseDate.empty()) { alb["releaseDate"] = it2->second.releaseDate; modified = true; }
+                }
+            }
+        }
+    }
+
+    if (modified) {
+        SaveLibAlbums();
     }
 }
 
@@ -857,9 +985,9 @@ bool RemoteServer::Start() {
 
                 if (changed) {
                     LogDebugMsg("Watcher detected artwork database change, running sync");
-                    RunLibrarySyncScript();
-                    LoadLibAlbumsIfNeeded();
-                    LoadLibSongsIfNeeded();
+                    std::thread([]() {
+                        NativeSyncAndEnrichLibrary();
+                    }).detach();
                 }
             }
         } catch (const std::exception& e) {
@@ -1339,25 +1467,41 @@ void RemoteServer::SetupRoutes() {
 
         json albumsArr = json::array();
         for (const auto& alb : recentAlbums) {
-            std::string albId = alb.albumId.empty() ? alb.firstAdamId : alb.albumId;
+            std::string albId = "";
             std::string artUrl = alb.artworkUrl;
             std::string relDate = alb.releaseDate;
-            if (artUrl.empty() || albId.empty()) {
+
+            // 1. Check metadata cache
+            {
                 std::lock_guard lock(g_albumMetaMutex);
-                auto it = g_albumMetaCache.find(alb.firstAdamId);
-                if (it != g_albumMetaCache.end()) {
-                    if (albId.empty()) albId = it->second.albumId;
-                    if (artUrl.empty()) artUrl = it->second.artworkUrl;
-                    if (relDate.empty()) relDate = it->second.releaseDate;
-                } else {
+                if (!alb.firstAdamId.empty()) {
+                    auto it = g_albumMetaCache.find(alb.firstAdamId);
+                    if (it != g_albumMetaCache.end()) {
+                        if (!it->second.albumId.empty()) albId = it->second.albumId;
+                        if (artUrl.empty()) artUrl = it->second.artworkUrl;
+                        if (relDate.empty()) relDate = it->second.releaseDate;
+                    }
+                }
+                if (albId.empty() || artUrl.empty()) {
                     auto it2 = g_albumMetaCache.find(alb.name + "|||" + alb.artist);
                     if (it2 != g_albumMetaCache.end()) {
-                        if (albId.empty()) albId = it2->second.albumId;
+                        if (albId.empty() && !it2->second.albumId.empty()) albId = it2->second.albumId;
                         if (artUrl.empty()) artUrl = it2->second.artworkUrl;
                         if (relDate.empty()) relDate = it2->second.releaseDate;
                     }
                 }
             }
+
+            // 2. Next check alb.albumId (if valid and not synthetic)
+            if (albId.empty() && !alb.albumId.empty() && !alb.albumId.starts_with("lib.alb.")) {
+                albId = alb.albumId;
+            }
+
+            // 3. Last fallback: firstAdamId
+            if (albId.empty()) {
+                albId = alb.firstAdamId;
+            }
+
             albumsArr.push_back({
                 {"name", alb.name},
                 {"artist", alb.artist},
@@ -1446,8 +1590,7 @@ void RemoteServer::SetupRoutes() {
 
     server_->Post("/api/v2/library/sync", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
-        RunLibrarySyncScript();
-        LoadLibAlbumsIfNeeded();
+        NativeSyncAndEnrichLibrary();
         LoadLibSongsIfNeeded();
         std::lock_guard lock(g_libAlbumsMutex);
         std::lock_guard lock2(g_libSongsMutex);
@@ -1461,8 +1604,7 @@ void RemoteServer::SetupRoutes() {
 
     server_->Get("/api/v2/library/sync", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
-        RunLibrarySyncScript();
-        LoadLibAlbumsIfNeeded();
+        NativeSyncAndEnrichLibrary();
         LoadLibSongsIfNeeded();
         std::lock_guard lock(g_libAlbumsMutex);
         std::lock_guard lock2(g_libSongsMutex);
@@ -1480,6 +1622,19 @@ void RemoteServer::SetupRoutes() {
         std::lock_guard lock(g_libAlbumsMutex);
         json j = {{"data", g_libAlbums}};
         res.set_content(j.dump(), "application/json");
+    });
+
+    server_->Post("/api/v2/library/albums/batch", [](const httplib::Request& req, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        try {
+            auto j = json::parse(req.body);
+            if (j.is_array() && !j.empty()) {
+                std::lock_guard lock(g_libAlbumsMutex);
+                g_libAlbums = j;
+                SaveLibAlbums();
+            }
+        } catch (...) {}
+        res.set_content("{\"success\":true}", "application/json");
     });
 
     server_->Post("/api/v2/library/albums/toggle", [this](const httplib::Request& req, httplib::Response& res) {

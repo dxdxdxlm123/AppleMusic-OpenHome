@@ -1730,6 +1730,8 @@
       return formatTime(Math.floor((ms || 0) / 1000));
     }
 
+    const defaultCoverSvg = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><rect fill='%23e5e5ea' width='160' height='160'/><text x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' font-size='36'>💿</text></svg>";
+
     function formatArt(url, size = '300') {
       if (!url) return '';
       let u = String(url).trim();
@@ -2192,12 +2194,12 @@
       const artist = a.artistName || a.artist || '';
       const rel = (a.releaseDate || '').substring(0, 4);
       let rawArt = a.artwork ? a.artwork.url : (a.artworkUrl || '');
-      const covUrl = formatArt(rawArt, '300');
+      const covUrl = formatArt(rawArt, '300') || defaultCoverSvg;
 
       const card = document.createElement('div');
       card.className = 'album-card';
       card.innerHTML = `
-        <img src="${covUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'160\\' height=\\'160\\'><rect fill=\\'%23e5e5ea\\' width=\\'160\\' height=\\'160\\'/><text x=\\'50%25\\' y=\\'50%25\\' dominant-baseline=\\'middle\' text-anchor=\\'middle\' font-size=\\'36\\'>💿</text></svg>'">
+        <img src="${covUrl}" onerror="this.src='${defaultCoverSvg}'">
         <div class="album-card-title">${name}</div>
         <div class="album-card-sub">${artist}${rel ? ' · ' + rel : ''}</div>
       `;
@@ -2463,10 +2465,44 @@
       try {
         const res = await fetch('/api/v2/amapi/raw/v1/catalog/cn/albums/' + albumId);
         const json = await res.json();
-        const albData = (json.data && json.data.data && json.data.data[0]) || {};
-        const tracks = (albData.relationships && albData.relationships.tracks && albData.relationships.tracks.data) || [];
+        let albData = (json.data && json.data.data && json.data.data[0]) || null;
+        let hasErrors = json.data && json.data.errors && json.data.errors.length > 0;
+        let tracks = (albData && albData.relationships && albData.relationships.tracks && albData.relationships.tracks.data) || [];
 
-        if (albData.attributes && albData.attributes.artwork && albData.attributes.artwork.url) {
+        // Fallback if 40400 or no tracks
+        if (!albData || hasErrors || tracks.length === 0) {
+          try {
+            const sRes = await fetch('/api/v2/amapi/search?term=' + encodeURIComponent(title + ' ' + artist) + '&types=albums&limit=5');
+            if (sRes.ok) {
+              const sJson = await sRes.json();
+              const foundList = (sJson.data && sJson.data.results && sJson.data.results.albums && sJson.data.results.albums.data) || [];
+              const norm = s => String(s || '').toLowerCase().replace(/[\s\-_()（）]/g, '');
+              const targetTitle = norm(title);
+              const targetArtist = norm(artist);
+              let matched = foundList.find(fa => {
+                const aAttrs = fa.attributes || {};
+                const aName = norm(aAttrs.name);
+                const aArt = norm(aAttrs.artistName);
+                return (aName === targetTitle || aName.includes(targetTitle) || targetTitle.includes(aName)) &&
+                       (!targetArtist || aArt === targetArtist || aArt.includes(targetArtist) || targetArtist.includes(aArt));
+              }) || foundList[0];
+
+              if (matched && matched.id) {
+                currentAlbumId = matched.id;
+                currentAlbumSnapshot.id = matched.id;
+                const res2 = await fetch('/api/v2/amapi/raw/v1/catalog/cn/albums/' + matched.id);
+                if (res2.ok) {
+                  const json2 = await res2.json();
+                  albData = (json2.data && json2.data.data && json2.data.data[0]) || albData;
+                  tracks = (albData && albData.relationships && albData.relationships.tracks && albData.relationships.tracks.data) || tracks;
+                  fetch('/api/v2/library/sync', { method: 'POST' }).catch(() => {});
+                }
+              }
+            }
+          } catch (e) {}
+        }
+
+        if (albData && albData.attributes && albData.attributes.artwork && albData.attributes.artwork.url) {
           const hdCov = formatArt(albData.attributes.artwork.url, '360');
           document.getElementById('albHeroCover').src = hdCov;
           currentAlbumSnapshot.artworkUrl = hdCov;
@@ -2641,7 +2677,8 @@
           const json = await res.json();
           const recAlbs = (json.data && json.data.albums) || [];
           recAlbs.forEach(ra => {
-            if (!albums.some(a => (a.id && ra.albumId && a.id === ra.albumId) || (a.name === ra.name))) {
+            const existing = albums.find(a => (a.id && ra.albumId && a.id === ra.albumId) || (a.name === ra.name));
+            if (!existing) {
               albums.push({
                 id: ra.albumId || ra.firstAdamId || '',
                 name: ra.name,
@@ -2650,6 +2687,15 @@
                 releaseDate: ra.releaseDate,
                 trackCount: ra.trackCount
               });
+            } else {
+              if ((!existing.artworkUrl || existing.artworkUrl === '') && ra.artworkUrl) {
+                existing.artworkUrl = formatArt(ra.artworkUrl, '300');
+              }
+              if (ra.albumId && (!existing.id || existing.id.startsWith('lib.alb.'))) {
+                existing.id = ra.albumId;
+              }
+              if (!existing.releaseDate && ra.releaseDate) existing.releaseDate = ra.releaseDate;
+              if (!existing.trackCount && ra.trackCount) existing.trackCount = ra.trackCount;
             }
           });
         } catch (e) {}

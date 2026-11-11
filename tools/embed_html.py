@@ -1,8 +1,21 @@
+import os
+import re
+
 with open('tools/web_remote.html', 'rb') as f:
     html_data = f.read()
 
-with open('tools/icon-192.png', 'rb') as f:
-    icon_data = f.read()
+icon_data = b''
+if os.path.exists('tools/icon-192.png'):
+    with open('tools/icon-192.png', 'rb') as f:
+        icon_data = f.read()
+elif os.path.exists('mod/src/remote/WebRemoteHtml.h'):
+    # Extract existing kAppIconBytes
+    with open('mod/src/remote/WebRemoteHtml.h', 'r', encoding='utf-8') as f:
+        content = f.read()
+        m = re.search(r'kAppIconBytes\[\]\s*=\s*\{([^}]+)\}', content)
+        if m:
+            hexes = re.findall(r'0x([0-9a-fA-F]{2})', m.group(1))
+            icon_data = bytes(int(h, 16) for h in hexes)
 
 with open('mod/src/remote/WebRemoteHtml.h', 'w', encoding='utf-8') as f:
     f.write('#pragma once\n#include <string_view>\n\nnamespace ammod::remote {\n\n')

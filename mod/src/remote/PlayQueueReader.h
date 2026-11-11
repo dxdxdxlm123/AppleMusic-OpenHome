@@ -437,6 +437,8 @@ public:
                             std::string name = it.value("name", "");
                             std::string artist = it.value("artist", "");
                             std::string id = it.value("id", "");
+                            std::string albId = it.value("albumId", it.value("id", ""));
+                            std::string songId = it.value("firstSongId", it.value("firstAdamId", ""));
                             std::string artworkUrl = it.value("artworkUrl", "");
                             std::string releaseDate = it.value("releaseDate", "");
                             int trackCount = it.value("trackCount", 1);
@@ -446,8 +448,8 @@ public:
                                 AlbumItem alb;
                                 alb.name = name;
                                 alb.artist = artist;
-                                alb.firstAdamId = id;
-                                alb.albumId = id;
+                                alb.albumId = (albId.starts_with("lib.alb.") ? "" : albId);
+                                alb.firstAdamId = songId;
                                 alb.artworkUrl = artworkUrl;
                                 alb.releaseDate = releaseDate;
                                 alb.trackCount = trackCount;
@@ -471,7 +473,7 @@ public:
                 alb.name = it.album;
                 alb.artist = it.artist;
                 alb.firstAdamId = it.adamId;
-                alb.albumId = it.adamId;
+                alb.albumId = ""; // Keep empty to resolve via PopulateRecentMetadata
                 alb.artworkUrl = it.artworkUrl;
                 alb.trackCount = 1;
                 indexMap[key] = albums.size();
