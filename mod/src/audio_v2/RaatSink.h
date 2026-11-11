@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace ammod::audio_v2 {
@@ -91,6 +92,9 @@ private:
     bool ReadSettingInt(int& value, const wchar_t* key, int fallback) const noexcept;
     bool CheckSupportedFormat(const std::string& supported) const noexcept;
 
+    static int GetPreferredVariant(const std::wstring& endpoint) noexcept;
+    static void SetPreferredVariant(const std::wstring& endpoint, int variant) noexcept;
+
     AudioSinkOpenParams params_{};
     RaatTarget target_{};
     PcmFormat format_{};
@@ -150,6 +154,9 @@ private:
     std::vector<std::int32_t> block_;
     std::vector<std::uint8_t> pcm_;
     std::vector<std::uint8_t> frame_;
+
+    static inline std::mutex s_variantMutex;
+    static inline std::unordered_map<std::wstring, int> s_preferredVariants;
 };
 
 } // namespace ammod::audio_v2

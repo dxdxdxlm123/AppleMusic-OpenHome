@@ -673,6 +673,29 @@ bool DlnaSink::AdvanceToNextTrack() noexcept {
     // endOfStreamSubmitted_ deliberately stays false and the runtime keeps
     // this sink alive.
     if (session_) {
+        // If FlacFile produced fewer frames than trackFramesExact_, pad tail silence
+        // so that the emitted FLAC exactly reaches the promised totalBytes_ (Content-Length).
+        // This ensures the renderer receives 100% of the declared bytes and transitions naturally
+        // without issuing Range 410 requests or cutting off audible audio.
+        if (shape_ == DlnaStreamShape::FlacFile && trackFramesExact_ != 0 &&
+            sessionFramesProduced_ < trackFramesExact_) {
+            const auto missingFrames = trackFramesExact_ - sessionFramesProduced_;
+            if (missingFrames > 0 && missingFrames <= static_cast<std::uint64_t>(format_.sampleRate) * 30ull) {
+                DlnaLog(L"padding auto-advance tail silence frames=" + std::to_wstring(missingFrames) +
+                        L" produced=" + std::to_wstring(sessionFramesProduced_) +
+                        L" exact=" + std::to_wstring(trackFramesExact_));
+                std::vector<std::int32_t> silence(chunkFrames_ * format_.channels, 0);
+                std::uint64_t padLeft = missingFrames;
+                std::vector<BYTE> padPacked;
+                while (padLeft > 0 && !producerStop_.load(std::memory_order_acquire)) {
+                    const auto cur = static_cast<std::uint32_t>(std::min<std::uint64_t>(padLeft, chunkFrames_));
+                    if (!PackChunk(silence.data(), cur, false, padPacked)) break;
+                    if (!session_->Append(padPacked.data(), padPacked.size(), false)) break;
+                    sessionFramesProduced_ += cur;
+                    padLeft -= cur;
+                }
+            }
+        }
         FlushEncoderTail();
         if (shape_ != DlnaStreamShape::FlacLive) {
             // Live: no EOS. The renderer would treat the EOF as a broken
@@ -1386,6 +1409,25 @@ void DlnaSink::FlushEncoderTail() noexcept {
 
 void DlnaSink::SubmitNaturalEndOfStreamDelayed() noexcept {
     if (!session_) return;
+    if (shape_ == DlnaStreamShape::FlacFile && trackFramesExact_ != 0 &&
+        sessionFramesProduced_ < trackFramesExact_) {
+        const auto missingFrames = trackFramesExact_ - sessionFramesProduced_;
+        if (missingFrames > 0 && missingFrames <= static_cast<std::uint64_t>(format_.sampleRate) * 30ull) {
+            DlnaLog(L"padding natural EOS tail silence frames=" + std::to_wstring(missingFrames) +
+                    L" produced=" + std::to_wstring(sessionFramesProduced_) +
+                    L" exact=" + std::to_wstring(trackFramesExact_));
+            std::vector<std::int32_t> silence(chunkFrames_ * format_.channels, 0);
+            std::uint64_t padLeft = missingFrames;
+            std::vector<BYTE> padPacked;
+            while (padLeft > 0 && !producerStop_.load(std::memory_order_acquire)) {
+                const auto cur = static_cast<std::uint32_t>(std::min<std::uint64_t>(padLeft, chunkFrames_));
+                if (!PackChunk(silence.data(), cur, false, padPacked)) break;
+                if (!session_->Append(padPacked.data(), padPacked.size(), false)) break;
+                sessionFramesProduced_ += cur;
+                padLeft -= cur;
+            }
+        }
+    }
     FlushEncoderTail();
     const bool live = shape_ == DlnaStreamShape::FlacLive;
     // File shapes (wav / flac-file) are sealed BEFORE the wait. Declaring the

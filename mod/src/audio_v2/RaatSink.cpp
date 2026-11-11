@@ -505,6 +505,19 @@ bool RaatSink::OpenControl(std::wstring& error) noexcept {
     return false;
 }
 
+int RaatSink::GetPreferredVariant(const std::wstring& endpoint) noexcept {
+    if (endpoint.empty()) return 0;
+    std::lock_guard lock(s_variantMutex);
+    const auto it = s_preferredVariants.find(endpoint);
+    return it != s_preferredVariants.end() ? it->second : 0;
+}
+
+void RaatSink::SetPreferredVariant(const std::wstring& endpoint, int variant) noexcept {
+    if (endpoint.empty()) return;
+    std::lock_guard lock(s_variantMutex);
+    s_preferredVariants[endpoint] = variant;
+}
+
 bool RaatSink::LoadScripts(std::wstring& error) noexcept {
     const bool newGen = RaatVersionIsNewGen(target_.raatVersion);
     if (newGen) LogRaat(L"newgen endpoint: replaying official signed corpus");
@@ -518,7 +531,13 @@ bool RaatSink::LoadScripts(std::wstring& error) noexcept {
         // load_script with Success but refuse to install the scripts; echo
         // (and later setup) then return {"status":"NotImplemented"}. Mixing
         // variants across scripts would leave a half-installed dispatcher.
-        for (int variant = 0; variant < 3; ++variant) {
+        const int preferred = GetPreferredVariant(target_.address);
+        std::vector<int> variants;
+        variants.push_back(preferred);
+        for (int v = 0; v < 3; ++v) {
+            if (v != preferred) variants.push_back(v);
+        }
+        for (int variant : variants) {
             bool allLoaded = true;
             for (std::size_t index = 0; index < count; ++index) {
                 const auto& record = records[index];
@@ -554,6 +573,7 @@ bool RaatSink::LoadScripts(std::wstring& error) noexcept {
                 }
             }
             if (ready) {
+                SetPreferredVariant(target_.address, variant);
                 error.clear();
                 LogRaat(L"dispatcher ready (echo canary, variant " +
                         std::to_wstring(variant) + L")");
@@ -933,9 +953,13 @@ bool RaatSink::SendStream(std::wstring& error) noexcept {
 bool RaatSink::Prefill() noexcept {
     if (!source_) return false;
     // Apple Music decodes roughly 1.3 s ahead; asking for the whole 5 s panel
-    // look-ahead would only stall START and then insert silence. Pre-roll is
-    // capped at 1 s; the pump keeps the device fed after start.
-    const std::uint32_t prefillMs = std::min<std::uint32_t>(lookaheadMs_, 1000u);
+    // look-ahead would only stall START and then insert silence.
+    // Dynamic prefill: cap high sample rates to 300-400ms to eliminate startup stalls
+    // and queue starvation while still providing plenty of network jitter margin.
+    const std::uint32_t prefillCap = format_.sampleRate >= 176400u ? 300u
+                                   : format_.sampleRate >= 88200u  ? 400u
+                                                                   : 1000u;
+    const std::uint32_t prefillMs = std::min<std::uint32_t>(lookaheadMs_, prefillCap);
     const std::uint64_t targetFrames =
         static_cast<std::uint64_t>(format_.sampleRate) * prefillMs / 1000u;
     const auto deadline = std::chrono::steady_clock::now() +

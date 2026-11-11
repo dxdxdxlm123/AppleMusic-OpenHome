@@ -498,6 +498,11 @@ void AudioCoreRuntime::OnTransportSkip(std::uint64_t epoch) noexcept {
         transportSkipArmEpoch_.store(0, std::memory_order_release);
         transportSkipArmGeneration_.store(0, std::memory_order_release);
         const auto currentGeneration = boundMediaGeneration_.load(std::memory_order_acquire);
+        userPauseIntent_ = false;
+        nativeStartedAfterUserPause_ = false;
+        resumePrebufferPending_ = false;
+        resumeProducerPending_ = false;
+        trackChangePending_ = true;
         if (armedGeneration == 0 || currentGeneration != armedGeneration) {
             TryActivateLocked();
             Wake();
