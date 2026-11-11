@@ -472,4 +472,86 @@ bool MediaController::PlayAlbumId(const std::string& albumId) {
     return PlayTrack(playUri, L"");
 }
 
+bool MediaController::AddAlbumToLibrary(const std::string& albumId) {
+    if (albumId.empty()) return false;
+    std::string playUri = "music://music.apple.com/cn/album/" + albumId;
+    std::wstring wUri = ToWide(playUri);
+    ShellExecuteW(nullptr, L"open", wUri.c_str(), nullptr, nullptr, SW_SHOWMINNOACTIVE);
+
+    std::thread([]() {
+        Sleep(800);
+        HDESK hDesk = OpenDesktopW(L"default", 0, FALSE, GENERIC_ALL);
+        if (hDesk) SetThreadDesktop(hDesk);
+        CoInitialize(nullptr);
+
+        IUIAutomation* pAutomation = nullptr;
+        CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                         IID_IUIAutomation, reinterpret_cast<void**>(&pAutomation));
+        if (!pAutomation) { CoUninitialize(); return; }
+
+        for (int attempt = 0; attempt < 12; ++attempt) {
+            HWND amHwnd = nullptr;
+            EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+                if (!IsWindowVisible(hwnd)) return TRUE;
+                wchar_t cls[256]{};
+                GetClassNameW(hwnd, cls, 256);
+                wchar_t title[256]{};
+                GetWindowTextW(hwnd, title, 256);
+                if (wcscmp(cls, L"WinUIDesktopWin32WindowClass") == 0 && wcsstr(title, L"Apple Music") != nullptr) {
+                    *reinterpret_cast<HWND*>(lParam) = hwnd;
+                    return FALSE;
+                }
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&amHwnd));
+
+            if (!amHwnd) { Sleep(350); continue; }
+
+            IUIAutomationElement* pRoot = nullptr;
+            if (FAILED(pAutomation->ElementFromHandle(amHwnd, &pRoot)) || !pRoot) {
+                Sleep(350);
+                continue;
+            }
+
+            VARIANT varId;
+            varId.vt = VT_BSTR;
+            varId.bstrVal = SysAllocString(L"AddButton");
+            IUIAutomationCondition* pCond = nullptr;
+            pAutomation->CreatePropertyCondition(UIA_AutomationIdPropertyId, varId, &pCond);
+            SysFreeString(varId.bstrVal);
+
+            IUIAutomationElement* pAddBtn = nullptr;
+            pRoot->FindFirst(TreeScope_Descendants, pCond, &pAddBtn);
+            if (!pAddBtn) {
+                VARIANT varName;
+                varName.vt = VT_BSTR;
+                varName.bstrVal = SysAllocString(L"添加到资料库");
+                IUIAutomationCondition* pCondName = nullptr;
+                pAutomation->CreatePropertyCondition(UIA_NamePropertyId, varName, &pCondName);
+                SysFreeString(varName.bstrVal);
+                pRoot->FindFirst(TreeScope_Descendants, pCondName, &pAddBtn);
+                if (pCondName) pCondName->Release();
+            }
+            if (pCond) pCond->Release();
+
+            if (pAddBtn) {
+                IUIAutomationInvokePattern* pInvoke = nullptr;
+                if (SUCCEEDED(pAddBtn->GetCurrentPattern(UIA_InvokePatternId, reinterpret_cast<IUnknown**>(&pInvoke))) && pInvoke) {
+                    pInvoke->Invoke();
+                    pInvoke->Release();
+                }
+                pAddBtn->Release();
+                pRoot->Release();
+                break;
+            }
+            pRoot->Release();
+            Sleep(350);
+        }
+
+        pAutomation->Release();
+        CoUninitialize();
+    }).detach();
+
+    return true;
+}
+
 } // namespace ammod::remote

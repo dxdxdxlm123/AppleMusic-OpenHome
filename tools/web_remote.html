@@ -678,6 +678,19 @@
       margin-right: 12px;
       background: #e5e5ea;
     }
+    .song-cover-placeholder {
+      width: 44px;
+      height: 44px;
+      border-radius: 8px;
+      margin-right: 12px;
+      background: linear-gradient(135deg, #f2f2f7, #e5e5ea);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      color: var(--subtext);
+      flex-shrink: 0;
+    }
     .song-num {
       width: 24px;
       font-size: 14px;
@@ -1717,9 +1730,19 @@
       return formatTime(Math.floor((ms || 0) / 1000));
     }
 
-    function formatArt(url, size) {
+    function formatArt(url, size = '300') {
       if (!url) return '';
-      return url.replace('{w}', size).replace('{h}', size).replace('{f}', 'jpg');
+      let u = String(url).trim();
+      if (!u) return '';
+      if (!u.startsWith('http') && !u.startsWith('data:')) {
+        u = 'https://is1-ssl.mzstatic.com/image/thumb/' + u;
+      }
+      if (u.includes('{w}') || u.includes('{h}')) {
+        u = u.replace(/{w}/g, size).replace(/{h}/g, size).replace(/{f}/g, 'jpg');
+      } else if (!/\/\d+x\d+.*$/.test(u)) {
+        u = u + '/' + size + 'x' + size + 'bb.jpg';
+      }
+      return u;
     }
 
     async function apiControl(action) {
@@ -1837,9 +1860,29 @@
         const data = await res.json();
         await syncUserLibraryState();
         updateAlbumDetailButtons();
-        showToast(data.inLibrary ? '✓ 专辑已添加到资料库' : '已从资料库移除该专辑');
+        showToast(data.inLibrary ? '✓ 正在同步添加到 Apple Music 资料库...' : '已从资料库移除该专辑');
+        if (data.inLibrary) {
+          setTimeout(async () => {
+            await manualSyncLibrary();
+          }, 2500);
+        }
       } catch (err) {
         showToast('操作失败: ' + err.message);
+      }
+    }
+
+    async function manualSyncLibrary() {
+      showToast('正在从 Apple Music 实时同步资料库...');
+      try {
+        const res = await fetch('/api/v2/library/sync', { method: 'POST' });
+        const data = await res.json();
+        await syncUserLibraryState();
+        renderLibrary(currentLibrarySub);
+        showToast(`同步完成: 共有 ${data.albumsCount || userLibraryState.albums.length} 张专辑`);
+      } catch (e) {
+        await syncUserLibraryState();
+        renderLibrary(currentLibrarySub);
+        showToast('已重新加载资料库');
       }
     }
 
@@ -2030,12 +2073,13 @@
       const artist = (item.attributes && item.attributes.artistName) || item.artist || item.artistName || 'Apple Music';
       const album = (item.attributes && item.attributes.albumName) || item.album || item.albumName || '';
       const id = item.id || (item.playParams && item.playParams.id) || item.adamId || '';
-      let artworkUrl = item.artworkUrl || '';
-      if (!artworkUrl && item.attributes && item.attributes.artwork) {
-        artworkUrl = formatArt(item.attributes.artwork.url, '120');
-      } else if (!artworkUrl && item.artwork && item.artwork.url) {
-        artworkUrl = formatArt(item.artwork.url, '120');
+      let rawArt = item.artworkUrl || '';
+      if (!rawArt && item.attributes && item.attributes.artwork) {
+        rawArt = item.attributes.artwork.url;
+      } else if (!rawArt && item.artwork && item.artwork.url) {
+        rawArt = item.artwork.url;
       }
+      const artworkUrl = formatArt(rawArt, '120');
 
       const songData = { id, name, artist, album, artworkUrl };
       const isFav = isSongFav(songData);
@@ -2052,10 +2096,12 @@
       }
 
       let coverHtml = '';
-      if (options.showCover !== false && artworkUrl) {
-        coverHtml = `<img src="${artworkUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><rect fill=\\'%23e5e5ea\\' width=\\'44\\' height=\\'44\\'/></svg>'">`;
-      } else if (options.showCover !== false && !artworkUrl && !options.trackNumber) {
-        coverHtml = `<img src="data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><rect fill=\\'%23e5e5ea\\' width=\\'44\\' height=\\'44\\'/></svg>">`;
+      if (options.showCover !== false) {
+        if (artworkUrl) {
+          coverHtml = `<img src="${artworkUrl}" onerror="this.outerHTML='<div class=\\'song-cover-placeholder\\'>🎵</div>'">`;
+        } else if (!options.trackNumber) {
+          coverHtml = `<div class="song-cover-placeholder">🎵</div>`;
+        }
       }
 
       let durationText = '';
@@ -2145,7 +2191,8 @@
       const name = a.name || a.title || '未知专辑';
       const artist = a.artistName || a.artist || '';
       const rel = (a.releaseDate || '').substring(0, 4);
-      const covUrl = a.artwork ? formatArt(a.artwork.url, '300') : (a.artworkUrl ? formatArt(a.artworkUrl, '300') : '');
+      let rawArt = a.artwork ? a.artwork.url : (a.artworkUrl || '');
+      const covUrl = formatArt(rawArt, '300');
 
       const card = document.createElement('div');
       card.className = 'album-card';
@@ -2165,7 +2212,8 @@
       const a = pl.attributes || pl;
       const name = a.name || '精选歌单';
       const curator = a.curatorName || 'Apple Music';
-      const covUrl = a.artwork ? formatArt(a.artwork.url, '300') : (a.artworkUrl ? formatArt(a.artworkUrl, '300') : '');
+      let rawArt = a.artwork ? a.artwork.url : (a.artworkUrl || '');
+      const covUrl = formatArt(rawArt, '300');
       const id = pl.id || a.id || '';
 
       const card = document.createElement('div');
@@ -2574,7 +2622,12 @@
           `;
           return;
         }
-        c.innerHTML = `<div class="section-title">资料库歌曲 (${songs.length}) <span>点击直接播放</span></div>`;
+        c.innerHTML = `
+          <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>资料库歌曲 (${songs.length})</span>
+            <button class="btn btn-secondary" onclick="manualSyncLibrary()" style="font-size:12px;padding:3px 10px;border-radius:12px;cursor:pointer;">🔄 刷新同步</button>
+          </div>
+        `;
         const list = document.createElement('div');
         list.className = 'song-list';
         songs.forEach(s => {
@@ -2590,10 +2643,10 @@
           recAlbs.forEach(ra => {
             if (!albums.some(a => (a.id && ra.albumId && a.id === ra.albumId) || (a.name === ra.name))) {
               albums.push({
-                id: ra.albumId || '',
+                id: ra.albumId || ra.firstAdamId || '',
                 name: ra.name,
                 artist: ra.artist,
-                artworkUrl: ra.artworkUrl,
+                artworkUrl: formatArt(ra.artworkUrl, '300'),
                 releaseDate: ra.releaseDate,
                 trackCount: ra.trackCount
               });
@@ -2611,7 +2664,12 @@
           `;
           return;
         }
-        c.innerHTML = `<div class="section-title">我的专辑 (${albums.length}) <span>统一 Apple Music 规范</span></div>`;
+        c.innerHTML = `
+          <div class="section-title" style="display:flex;justify-content:space-between;align-items:center;">
+            <span>我的专辑 (${albums.length})</span>
+            <button class="btn btn-secondary" onclick="manualSyncLibrary()" style="font-size:12px;padding:3px 10px;border-radius:12px;cursor:pointer;">🔄 刷新同步</button>
+          </div>
+        `;
         const grid = document.createElement('div');
         grid.className = 'albums-grid';
         albums.forEach(alb => {
@@ -2655,7 +2713,7 @@
               name: t.title,
               artist: t.artist,
               album: t.album,
-              artworkUrl: t.artworkUrl
+              artworkUrl: formatArt(t.artworkUrl, '120')
             }, { showCover: true }));
           });
           c.appendChild(list);

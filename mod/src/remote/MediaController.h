@@ -44,6 +44,7 @@ public:
     bool PlayUrl(const std::string& url);
     bool PlayTrackId(const std::string& trackId);
     bool PlayAlbumId(const std::string& albumId);
+    bool AddAlbumToLibrary(const std::string& albumId);
 
     void SetOnTrackChanged(std::function<void(const TrackSnapshot&)> callback) {
         std::lock_guard lock(mutex_);

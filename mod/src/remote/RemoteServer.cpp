@@ -94,9 +94,6 @@ std::wstring GetFavoritesFilePath() {
 
 void LoadFavoritesIfNeeded() {
     std::lock_guard lock(g_favoritesMutex);
-    if (g_favoritesLoaded && !g_favorites.empty()) return;
-    g_favoritesLoaded = true;
-
     std::wstring path = GetFavoritesFilePath();
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile != INVALID_HANDLE_VALUE) {
@@ -107,16 +104,22 @@ void LoadFavoritesIfNeeded() {
             ReadFile(hFile, content.data(), size, &read, nullptr);
             try {
                 g_favorites = json::parse(content);
+                g_favoritesLoaded = true;
+                CloseHandle(hFile);
+                return;
             } catch (...) {}
         }
         CloseHandle(hFile);
     }
 
+    if (g_favoritesLoaded && !g_favorites.empty()) return;
+    g_favoritesLoaded = true;
+
     if (g_favorites.empty()) {
         g_favorites = json::array({
-            {{"id", "535824731"}, {"name", "晴天"}, {"artist", "周杰伦"}, {"album", "叶惠美"}, {"artworkUrl", ""}},
-            {{"id", "545213762"}, {"name", "想自由"}, {"artist", "林宥嘉"}, {"album", "美妙生活"}, {"artworkUrl", ""}},
-            {{"id", "1445888258"}, {"name", "Blank Space"}, {"artist", "Taylor Swift"}, {"album", "1989"}, {"artworkUrl", ""}}
+            {{"id", "635770200"}, {"name", "加州旅馆"}, {"artist", "Eagles"}, {"album", "加州旅馆"}, {"artworkUrl", "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/88/16/2c/88162c3d-46db-8321-61f3-3a47404cfe76/075596050920.jpg/{w}x{h}bb.jpg"}},
+            {{"id", "1544083976"}, {"name", "怪物"}, {"artist", "YOASOBI"}, {"album", "怪物 - Single"}, {"artworkUrl", "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/9e/ab/2c/9eab2c24-8289-1bd7-548d-e6b871fcf169/195497732630.jpg/{w}x{h}bb.jpg"}},
+            {{"id", "547158777"}, {"name", "说谎"}, {"artist", "林宥嘉"}, {"album", "感官/世界"}, {"artworkUrl", "https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/57/e5/9b/57e59bd6-3564-e4c4-1add-e3dbbf4d8ab1/asset.jpg/{w}x{h}bb.jpg"}}
         });
         SaveFavorites();
     }
@@ -168,9 +171,6 @@ std::wstring GetLibSongsFilePath() {
 
 void LoadLibSongsIfNeeded() {
     std::lock_guard lock(g_libSongsMutex);
-    if (g_libSongsLoaded && !g_libSongs.empty()) return;
-    g_libSongsLoaded = true;
-
     std::wstring path = GetLibSongsFilePath();
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile != INVALID_HANDLE_VALUE) {
@@ -181,10 +181,16 @@ void LoadLibSongsIfNeeded() {
             ReadFile(hFile, content.data(), size, &read, nullptr);
             try {
                 g_libSongs = json::parse(content);
+                g_libSongsLoaded = true;
+                CloseHandle(hFile);
+                return;
             } catch (...) {}
         }
         CloseHandle(hFile);
     }
+
+    if (g_libSongsLoaded && !g_libSongs.empty()) return;
+    g_libSongsLoaded = true;
 
     if (g_libSongs.empty()) {
         auto recents = PlayQueueReader::ReadRecentItems();
@@ -194,7 +200,7 @@ void LoadLibSongsIfNeeded() {
                 {"name", r.title},
                 {"artist", r.artist},
                 {"album", r.album},
-                {"artworkUrl", ""}
+                {"artworkUrl", r.artworkUrl}
             });
         }
         SaveLibSongs();
@@ -247,9 +253,6 @@ std::wstring GetLibAlbumsFilePath() {
 
 void LoadLibAlbumsIfNeeded() {
     std::lock_guard lock(g_libAlbumsMutex);
-    if (g_libAlbumsLoaded && !g_libAlbums.empty()) return;
-    g_libAlbumsLoaded = true;
-
     std::wstring path = GetLibAlbumsFilePath();
     HANDLE hFile = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (hFile != INVALID_HANDLE_VALUE) {
@@ -260,20 +263,27 @@ void LoadLibAlbumsIfNeeded() {
             ReadFile(hFile, content.data(), size, &read, nullptr);
             try {
                 g_libAlbums = json::parse(content);
+                g_libAlbumsLoaded = true;
+                CloseHandle(hFile);
+                return;
             } catch (...) {}
         }
         CloseHandle(hFile);
     }
 
+    if (g_libAlbumsLoaded && !g_libAlbums.empty()) return;
+    g_libAlbumsLoaded = true;
+
     if (g_libAlbums.empty()) {
         auto recents = PlayQueueReader::ReadRecentAlbums();
         for (const auto& alb : recents) {
             g_libAlbums.push_back({
-                {"id", alb.firstAdamId},
+                {"id", alb.albumId.empty() ? alb.firstAdamId : alb.albumId},
                 {"name", alb.name},
                 {"artist", alb.artist},
                 {"trackCount", alb.trackCount},
-                {"artworkUrl", ""}
+                {"artworkUrl", alb.artworkUrl},
+                {"releaseDate", alb.releaseDate}
             });
         }
         SaveLibAlbums();
@@ -313,6 +323,38 @@ bool ToggleLibAlbum(const json& item) {
     g_libAlbums.push_back(item);
     SaveLibAlbums();
     return true; // added
+}
+
+void LogDebugMsg(const char* msg) {
+    FILE* f = fopen("C:\\Users\\Public\\AMExclusive\\remote_debug.log", "a");
+    if (f) {
+        fprintf(f, "%s\n", msg);
+        fclose(f);
+    }
+}
+
+void RunLibrarySyncScript() {
+    try {
+        std::wstring scriptPath = L"C:\\Users\\Public\\AMExclusive\\sync_library_from_am.py";
+        if (GetFileAttributesW(scriptPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+            return;
+        }
+
+        std::wstring cmd = L"python.exe \"C:\\Users\\Public\\AMExclusive\\sync_library_from_am.py\"";
+        STARTUPINFOW si = { sizeof(si) };
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION pi = { 0 };
+        std::vector<wchar_t> cmdBuf(cmd.begin(), cmd.end());
+        cmdBuf.push_back(L'\0');
+        if (CreateProcessW(nullptr, cmdBuf.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
+            WaitForSingleObject(pi.hProcess, 5000);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+    } catch (...) {
+        LogDebugMsg("Exception in RunLibrarySyncScript");
+    }
 }
 
 json FetchAppleMusicApi(const std::string& path, const std::string& query = "") {
@@ -762,9 +804,71 @@ bool RemoteServer::Start() {
 
     // Run server in background thread
     std::thread([this]() {
+        LogDebugMsg("Server listen thread starting");
         try {
-            server_->listen("0.0.0.0", port_);
-        } catch (...) {}
+            if (!server_->listen("0.0.0.0", port_)) {
+                LogDebugMsg("server_->listen returned false");
+            }
+        } catch (const std::exception& e) {
+            std::string err = std::string("Exception in server_->listen: ") + e.what();
+            LogDebugMsg(err.c_str());
+        } catch (...) {
+            LogDebugMsg("Unknown exception in server_->listen");
+        }
+        LogDebugMsg("Server listen thread exiting");
+    }).detach();
+
+    // Background watcher for Apple Music library database changes
+    std::thread([this]() {
+        LogDebugMsg("Watcher thread starting");
+        try {
+            wchar_t userProfile[MAX_PATH] = { 0 };
+            DWORD len = GetEnvironmentVariableW(L"USERPROFILE", userProfile, MAX_PATH);
+            if (len == 0) return;
+            std::wstring dbPath = std::wstring(userProfile) + L"\\Music\\Apple Music\\Apple Music Library.musiclibrary\\artwork.sqlite";
+            std::wstring walPath = dbPath + L"-wal";
+
+            FILETIME lastDbTime = { 0, 0 };
+            FILETIME lastWalTime = { 0, 0 };
+
+            while (running_) {
+                std::this_thread::sleep_for(std::chrono::seconds(5));
+                if (!running_) break;
+                bool changed = false;
+
+                WIN32_FILE_ATTRIBUTE_DATA fad;
+                if (GetFileAttributesExW(dbPath.c_str(), GetFileExInfoStandard, &fad)) {
+                    if (lastDbTime.dwLowDateTime != 0 &&
+                        (fad.ftLastWriteTime.dwLowDateTime != lastDbTime.dwLowDateTime ||
+                         fad.ftLastWriteTime.dwHighDateTime != lastDbTime.dwHighDateTime)) {
+                        changed = true;
+                    }
+                    lastDbTime = fad.ftLastWriteTime;
+                }
+
+                if (GetFileAttributesExW(walPath.c_str(), GetFileExInfoStandard, &fad)) {
+                    if (lastWalTime.dwLowDateTime != 0 &&
+                        (fad.ftLastWriteTime.dwLowDateTime != lastWalTime.dwLowDateTime ||
+                         fad.ftLastWriteTime.dwHighDateTime != lastWalTime.dwHighDateTime)) {
+                        changed = true;
+                    }
+                    lastWalTime = fad.ftLastWriteTime;
+                }
+
+                if (changed) {
+                    LogDebugMsg("Watcher detected artwork database change, running sync");
+                    RunLibrarySyncScript();
+                    LoadLibAlbumsIfNeeded();
+                    LoadLibSongsIfNeeded();
+                }
+            }
+        } catch (const std::exception& e) {
+            std::string err = std::string("Exception in watcher thread: ") + e.what();
+            LogDebugMsg(err.c_str());
+        } catch (...) {
+            LogDebugMsg("Unknown exception in watcher thread");
+        }
+        LogDebugMsg("Watcher thread exiting");
     }).detach();
 
     return true;
@@ -1199,8 +1303,8 @@ void RemoteServer::SetupRoutes() {
 
         json tracksArr = json::array();
         for (const auto& it : recentItems) {
-            std::string artUrl = "";
-            {
+            std::string artUrl = it.artworkUrl;
+            if (artUrl.empty()) {
                 std::lock_guard lock(g_albumMetaMutex);
                 auto f = g_songArtworkCache.find(it.adamId);
                 if (f != g_songArtworkCache.end()) {
@@ -1209,6 +1313,17 @@ void RemoteServer::SetupRoutes() {
                     auto f2 = g_albumMetaCache.find(it.album + "|||" + it.artist);
                     if (f2 != g_albumMetaCache.end()) {
                         artUrl = f2->second.artworkUrl;
+                    }
+                }
+            }
+            if (artUrl.empty() && !it.album.empty()) {
+                LoadLibAlbumsIfNeeded();
+                std::lock_guard lock(g_libAlbumsMutex);
+                for (const auto& a : g_libAlbums) {
+                    std::string aname = a.value("name", "");
+                    if (aname == it.album || aname.find(it.album) != std::string::npos || it.album.find(aname) != std::string::npos) {
+                        artUrl = a.value("artworkUrl", "");
+                        break;
                     }
                 }
             }
@@ -1224,22 +1339,22 @@ void RemoteServer::SetupRoutes() {
 
         json albumsArr = json::array();
         for (const auto& alb : recentAlbums) {
-            std::string albId = "";
-            std::string artUrl = "";
-            std::string relDate = "";
-            {
+            std::string albId = alb.albumId.empty() ? alb.firstAdamId : alb.albumId;
+            std::string artUrl = alb.artworkUrl;
+            std::string relDate = alb.releaseDate;
+            if (artUrl.empty() || albId.empty()) {
                 std::lock_guard lock(g_albumMetaMutex);
                 auto it = g_albumMetaCache.find(alb.firstAdamId);
                 if (it != g_albumMetaCache.end()) {
-                    albId = it->second.albumId;
-                    artUrl = it->second.artworkUrl;
-                    relDate = it->second.releaseDate;
+                    if (albId.empty()) albId = it->second.albumId;
+                    if (artUrl.empty()) artUrl = it->second.artworkUrl;
+                    if (relDate.empty()) relDate = it->second.releaseDate;
                 } else {
                     auto it2 = g_albumMetaCache.find(alb.name + "|||" + alb.artist);
                     if (it2 != g_albumMetaCache.end()) {
-                        albId = it2->second.albumId;
-                        artUrl = it2->second.artworkUrl;
-                        relDate = it2->second.releaseDate;
+                        if (albId.empty()) albId = it2->second.albumId;
+                        if (artUrl.empty()) artUrl = it2->second.artworkUrl;
+                        if (relDate.empty()) relDate = it2->second.releaseDate;
                     }
                 }
             }
@@ -1329,6 +1444,36 @@ void RemoteServer::SetupRoutes() {
         res.set_content(json({{"success", true}, {"inLibrary", added}}).dump(), "application/json");
     });
 
+    server_->Post("/api/v2/library/sync", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        RunLibrarySyncScript();
+        LoadLibAlbumsIfNeeded();
+        LoadLibSongsIfNeeded();
+        std::lock_guard lock(g_libAlbumsMutex);
+        std::lock_guard lock2(g_libSongsMutex);
+        json j = {
+            {"status", "ok"},
+            {"albumsCount", g_libAlbums.size()},
+            {"songsCount", g_libSongs.size()}
+        };
+        res.set_content(j.dump(), "application/json");
+    });
+
+    server_->Get("/api/v2/library/sync", [](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        RunLibrarySyncScript();
+        LoadLibAlbumsIfNeeded();
+        LoadLibSongsIfNeeded();
+        std::lock_guard lock(g_libAlbumsMutex);
+        std::lock_guard lock2(g_libSongsMutex);
+        json j = {
+            {"status", "ok"},
+            {"albumsCount", g_libAlbums.size()},
+            {"songsCount", g_libSongs.size()}
+        };
+        res.set_content(j.dump(), "application/json");
+    });
+
     server_->Get("/api/v2/library/albums", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
         LoadLibAlbumsIfNeeded();
@@ -1337,11 +1482,16 @@ void RemoteServer::SetupRoutes() {
         res.set_content(j.dump(), "application/json");
     });
 
-    server_->Post("/api/v2/library/albums/toggle", [](const httplib::Request& req, httplib::Response& res) {
+    server_->Post("/api/v2/library/albums/toggle", [this](const httplib::Request& req, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
         bool added = false;
         try {
             auto j = json::parse(req.body);
+            std::string id = j.value("id", "");
+            if (!id.empty()) {
+                if (id.rfind("catalog.", 0) == 0) id = id.substr(8);
+                controller_.AddAlbumToLibrary(id);
+            }
             added = ToggleLibAlbum(j);
         } catch (...) {}
         res.set_content(json({{"success", true}, {"inLibrary", added}}).dump(), "application/json");

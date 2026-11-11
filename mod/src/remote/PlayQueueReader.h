@@ -24,12 +24,16 @@ struct LibraryItem {
     std::string album;
     std::string adamId;
     std::string date;
+    std::string artworkUrl;
 };
 
 struct AlbumItem {
     std::string name;
     std::string artist;
     std::string firstAdamId;
+    std::string albumId;
+    std::string artworkUrl;
+    std::string releaseDate;
     int trackCount{0};
 };
 
@@ -58,19 +62,18 @@ public:
 
     static std::vector<LibraryItem> GetDefaultSeedItems() {
         return {
-            {"晴天", "周杰伦", "叶惠美", "535824731", "2026-11-11"},
-            {"想自由", "林宥嘉", "美妙生活", "545213762", "2026-11-11"},
-            {"Blank Space", "Taylor Swift", "1989", "1445888258", "2026-11-11"},
-            {"Keith Don't Go", "Nils Lofgren", "Acoustic Live", "204525004", "2026-11-11"},
-            {"以父之名", "周杰伦", "叶惠美", "535824731", "2026-11-11"},
-            {"自然醒", "林宥嘉", "美妙生活", "545213762", "2026-11-11"},
-            {"Style", "Taylor Swift", "1989", "1445888258", "2026-11-11"},
-            {"Shake It Off", "Taylor Swift", "1989", "1445888258", "2026-11-11"},
-            {"七里香", "周杰伦", "七里香", "535828456", "2026-11-11"},
-            {"东风破", "周杰伦", "叶惠美", "535824731", "2026-11-11"},
-            {"简单爱", "周杰伦", "范特西", "535824424", "2026-11-11"},
-            {"安静", "周杰伦", "范特西", "535824424", "2026-11-11"},
-            {"枫", "周杰伦", "11月的萧邦", "535828555", "2026-11-11"}
+            {"加州旅馆", "Eagles", "加州旅馆", "635770200", "2026-11-11", "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/88/16/2c/88162c3d-46db-8321-61f3-3a47404cfe76/075596050920.jpg/{w}x{h}bb.jpg"},
+            {"怪物", "YOASOBI", "怪物 - Single", "1544083976", "2026-11-11", "https://is1-ssl.mzstatic.com/image/thumb/Music221/v4/9e/ab/2c/9eab2c24-8289-1bd7-548d-e6b871fcf169/195497732630.jpg/{w}x{h}bb.jpg"},
+            {"群青", "YOASOBI", "群青 - Single", "1528119626", "2026-11-11", "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/ae/7e/4a/ae7e4a28-fd46-9617-1066-fcbd124303d6/195497105656.jpg/{w}x{h}bb.jpg"},
+            {"夜に駆ける", "YOASOBI", "夜に駆ける - Single", "1490256978", "2026-11-11", "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/fe/58/79/fe58795c-1628-230a-9ffe-300c04b6627c/194491717186.jpg/{w}x{h}bb.jpg"},
+            {"说谎", "林宥嘉", "感官/世界", "547158777", "2026-11-11", "https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/57/e5/9b/57e59bd6-3564-e4c4-1add-e3dbbf4d8ab1/asset.jpg/{w}x{h}bb.jpg"},
+            {"想自由", "林宥嘉", "美妙生活", "545213762", "2026-11-11", "https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/3e/f9/49/3ef94944-d61a-b3dd-6a4a-d4d23e41ccbd/asset.jpg/{w}x{h}bb.jpg"},
+            {"Michi Teyu Ku (Overflowing)", "藤井风", "Michi Teyu Ku (Overflowing) - Single", "1733129984", "2026-11-11", "https://is1-ssl.mzstatic.com/image/thumb/Music122/v4/d0/f4/ad/d0f4ad92-2a6c-6a02-34c5-d45b93f767d9/24UMGIM15199.rgb.jpg/{w}x{h}bb.jpg"},
+            {"温柔", "五月天", "爱情万岁", "150093860", "2026-11-11", "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/af/c2/33/afc233f6-d570-8f22-0a91-14a3e289a30d/dj.uhlsejtl.jpg/{w}x{h}bb.jpg"},
+            {"突然好想你", "五月天", "后 青春期的诗", "1081381033", "2026-11-11", "https://is1-ssl.mzstatic.com/image/thumb/Music69/v4/fd/ba/9e/fdba9e89-6336-d3e4-ee00-94184f9a5c2c/BD0016-_-.jpg/{w}x{h}bb.jpg"},
+            {"离开地球表面", "五月天", "离开地球表面", "1081738606", "2026-11-11", "https://is1-ssl.mzstatic.com/image/thumb/Music124/v4/ad/a5/8f/ada58f96-3fa7-8547-ee40-2766ea9d9fec/BD0009-_-.jpg/{w}x{h}bb.jpg"},
+            {"派对动物", "五月天", "自传", "1158763922", "2026-11-11", "https://is1-ssl.mzstatic.com/image/thumb/Music126/v4/64/a0/f1/64a0f1b8-a36b-ff10-509a-9a8f5fef53ff/dj.zfoqlnar.jpg/{w}x{h}bb.jpg"},
+            {"ヘビリンゴ (feat. ねね)", "THREEE", "ヘビリンゴ (feat. ねね) - Single", "1575366854", "2026-11-11", "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/ce/7b/e8/ce7be864-469b-57fc-e8d1-ca27e5ecf00b/cover.jpg/{w}x{h}bb.jpg"}
         };
     }
 
@@ -95,6 +98,7 @@ public:
                             item.album = it.value("album", it.value("albumName", ""));
                             item.adamId = it.value("adamId", it.value("id", ""));
                             item.date = it.value("date", "");
+                            item.artworkUrl = it.value("artworkUrl", "");
                             if (!item.title.empty()) {
                                 results.push_back(item);
                             }
@@ -118,7 +122,8 @@ public:
                     {"artist", it.artist},
                     {"album", it.album},
                     {"adamId", it.adamId},
-                    {"date", it.date}
+                    {"date", it.date},
+                    {"artworkUrl", it.artworkUrl}
                 });
             }
             std::string s = j.dump(2);
@@ -128,7 +133,7 @@ public:
         }
     }
 
-    static void RecordTrack(const std::string& title, const std::string& artist, const std::string& album, const std::string& adamId = "") {
+    static void RecordTrack(const std::string& title, const std::string& artist, const std::string& album, const std::string& adamId = "", const std::string& artworkUrl = "") {
         if (title.empty() || title == "未在播放") return;
         std::lock_guard lock(g_playHistoryMutex);
         auto items = LoadHistoryFromFile();
@@ -136,22 +141,68 @@ public:
             items = GetDefaultSeedItems();
         }
 
-        if (!items.empty() && items.front().title == title && items.front().artist == artist) {
+        std::string realArtist = artist;
+        std::string realAlbum = album;
+        // Split if artist is formatted as "Artist — Album"
+        size_t sep = realArtist.find(" — ");
+        if (sep != std::string::npos && realAlbum.empty()) {
+            std::string a = realArtist.substr(0, sep);
+            std::string b = realArtist.substr(sep + 5);
+            auto trim = [](std::string& s) {
+                while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
+                while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+            };
+            trim(a);
+            trim(b);
+            realArtist = a;
+            realAlbum = b;
+        }
+
+        if (!items.empty() && items.front().title == title && items.front().artist == realArtist) {
             return;
         }
 
         for (auto it = items.begin(); it != items.end(); ++it) {
-            if (it->title == title && it->artist == artist) {
+            if (it->title == title && (it->artist == realArtist || it->artist == artist)) {
                 items.erase(it);
                 break;
             }
         }
 
+        std::string art = artworkUrl;
+        if (art.empty()) {
+            // Match from am_library_albums.json
+            std::wstring albPath = L"C:\\Users\\Public\\AMExclusive\\am_library_albums.json";
+            HANDLE hFile = CreateFileW(albPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (hFile != INVALID_HANDLE_VALUE) {
+                DWORD size = GetFileSize(hFile, nullptr);
+                if (size > 0 && size < 5 * 1024 * 1024) {
+                    std::string content(size, '\0');
+                    DWORD read = 0;
+                    ReadFile(hFile, content.data(), size, &read, nullptr);
+                    try {
+                        auto j = nlohmann::json::parse(content);
+                        if (j.is_array()) {
+                            for (const auto& a : j) {
+                                std::string aname = a.value("name", "");
+                                if (!realAlbum.empty() && (aname == realAlbum || aname.find(realAlbum) != std::string::npos || realAlbum.find(aname) != std::string::npos)) {
+                                    art = a.value("artworkUrl", "");
+                                    break;
+                                }
+                            }
+                        }
+                    } catch (...) {}
+                }
+                CloseHandle(hFile);
+            }
+        }
+
         LibraryItem newItem;
         newItem.title = title;
-        newItem.artist = artist;
-        newItem.album = album;
+        newItem.artist = realArtist;
+        newItem.album = realAlbum;
         newItem.adamId = adamId;
+        newItem.artworkUrl = art;
         newItem.date = "刚刚播放";
         items.insert(items.begin(), newItem);
 
@@ -367,31 +418,10 @@ public:
     }
 
     static std::vector<AlbumItem> ReadRecentAlbums() {
-        auto items = ReadRecentItems();
         std::vector<AlbumItem> albums;
         std::unordered_map<std::string, size_t> indexMap;
 
-        for (const auto& it : items) {
-            if (it.album.empty()) continue;
-            std::string key = it.album + "|||" + it.artist;
-            auto found = indexMap.find(key);
-            if (found == indexMap.end()) {
-                AlbumItem alb;
-                alb.name = it.album;
-                alb.artist = it.artist;
-                alb.firstAdamId = it.adamId;
-                alb.trackCount = 1;
-                indexMap[key] = albums.size();
-                albums.push_back(alb);
-            } else {
-                albums[found->second].trackCount++;
-                if (albums[found->second].firstAdamId.empty() && !it.adamId.empty()) {
-                    albums[found->second].firstAdamId = it.adamId;
-                }
-            }
-        }
-
-        // Also merge with am_library_albums.json if present
+        // Load am_library_albums.json first (user's authentic library albums)
         std::wstring albPath = L"C:\\Users\\Public\\AMExclusive\\am_library_albums.json";
         HANDLE hFile = CreateFileW(albPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hFile != INVALID_HANDLE_VALUE) {
@@ -407,6 +437,9 @@ public:
                             std::string name = it.value("name", "");
                             std::string artist = it.value("artist", "");
                             std::string id = it.value("id", "");
+                            std::string artworkUrl = it.value("artworkUrl", "");
+                            std::string releaseDate = it.value("releaseDate", "");
+                            int trackCount = it.value("trackCount", 1);
                             if (name.empty()) continue;
                             std::string key = name + "|||" + artist;
                             if (indexMap.find(key) == indexMap.end()) {
@@ -414,7 +447,10 @@ public:
                                 alb.name = name;
                                 alb.artist = artist;
                                 alb.firstAdamId = id;
-                                alb.trackCount = it.value("trackCount", 1);
+                                alb.albumId = id;
+                                alb.artworkUrl = artworkUrl;
+                                alb.releaseDate = releaseDate;
+                                alb.trackCount = trackCount;
                                 indexMap[key] = albums.size();
                                 albums.push_back(alb);
                             }
@@ -423,6 +459,31 @@ public:
                 } catch (...) {}
             }
             CloseHandle(hFile);
+        }
+
+        auto items = ReadRecentItems();
+        for (const auto& it : items) {
+            if (it.album.empty()) continue;
+            std::string key = it.album + "|||" + it.artist;
+            auto found = indexMap.find(key);
+            if (found == indexMap.end()) {
+                AlbumItem alb;
+                alb.name = it.album;
+                alb.artist = it.artist;
+                alb.firstAdamId = it.adamId;
+                alb.albumId = it.adamId;
+                alb.artworkUrl = it.artworkUrl;
+                alb.trackCount = 1;
+                indexMap[key] = albums.size();
+                albums.push_back(alb);
+            } else {
+                if (albums[found->second].firstAdamId.empty() && !it.adamId.empty()) {
+                    albums[found->second].firstAdamId = it.adamId;
+                }
+                if (albums[found->second].artworkUrl.empty() && !it.artworkUrl.empty()) {
+                    albums[found->second].artworkUrl = it.artworkUrl;
+                }
+            }
         }
 
         return albums;
