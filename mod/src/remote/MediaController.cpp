@@ -211,10 +211,15 @@ bool MediaController::Play() {
     try {
         auto manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
         auto session = GetAppleSession(manager);
-        if (session) return session.TryPlayAsync().get();
+        if (session) {
+            if (session.TryPlayAsync().get()) return true;
+            if (session.TryTogglePlayPauseAsync().get()) return true;
+        }
     } catch (...) {}
     // If Apple Music is not running yet, auto-launch it!
     ShellExecuteW(nullptr, L"open", L"music://", nullptr, nullptr, SW_SHOWMINNOACTIVE);
+    keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0);
+    keybd_event(VK_MEDIA_PLAY_PAUSE, 0, KEYEVENTF_KEYUP, 0);
     return true;
 }
 
@@ -223,9 +228,14 @@ bool MediaController::Pause() {
     try {
         auto manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
         auto session = GetAppleSession(manager);
-        if (session) return session.TryPauseAsync().get();
+        if (session) {
+            if (session.TryPauseAsync().get()) return true;
+            if (session.TryTogglePlayPauseAsync().get()) return true;
+        }
     } catch (...) {}
-    return false;
+    keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0);
+    keybd_event(VK_MEDIA_PLAY_PAUSE, 0, KEYEVENTF_KEYUP, 0);
+    return true;
 }
 
 bool MediaController::TogglePlayPause() {
@@ -233,10 +243,22 @@ bool MediaController::TogglePlayPause() {
     try {
         auto manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
         auto session = GetAppleSession(manager);
-        if (session) return session.TryTogglePlayPauseAsync().get();
+        if (session) {
+            auto info = session.GetPlaybackInfo();
+            if (info) {
+                auto status = info.PlaybackStatus();
+                if (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing) {
+                    if (session.TryPauseAsync().get()) return true;
+                } else if (status == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Paused) {
+                    if (session.TryPlayAsync().get()) return true;
+                }
+            }
+            if (session.TryTogglePlayPauseAsync().get()) return true;
+        }
     } catch (...) {}
-    // If Apple Music is not running yet, auto-launch it!
-    ShellExecuteW(nullptr, L"open", L"music://", nullptr, nullptr, SW_SHOWMINNOACTIVE);
+    // Fallback: media key
+    keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0);
+    keybd_event(VK_MEDIA_PLAY_PAUSE, 0, KEYEVENTF_KEYUP, 0);
     return true;
 }
 

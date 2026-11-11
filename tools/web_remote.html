@@ -10,6 +10,13 @@
   <link rel="manifest" href="/manifest.json">
   <link rel="apple-touch-icon" href="/icon-192.png">
   <title>Apple Music - AMExclusive</title>
+  <script>
+    // Standard Base64 SVG fallbacks (Zero URL encoding issues in Chromium/WebKit)
+    const defaultCoverSvg = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iMTYwIj48cmVjdCBmaWxsPSIjZTVlNWVhIiB3aWR0aD0iMTYwIiBoZWlnaHQ9IjE2MCIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBkb21pbmFudC1iYXNlbGluZT0ibWlkZGxlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjM2Ij7wn5K/PC90ZXh0Pjwvc3ZnPg==";
+    const defaultMusicSvg = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIzMjAiIGhlaWdodD0iMzIwIj48cmVjdCBmaWxsPSIjZTVlNWVhIiB3aWR0aD0iMzIwIiBoZWlnaHQ9IjMyMCIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBmaWxsPSIjOGE4YThlIiBmb250LXNpemU9IjQ4IiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBkb21pbmFudC1iYXNlbGluZT0ibWlkZGxlIj7wn461PC90ZXh0Pjwvc3ZnPg==";
+    const defaultPlaylistSvg = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iMTYwIj48cmVjdCBmaWxsPSIjZTVlNWVhIiB3aWR0aD0iMTYwIiBoZWlnaHQ9IjE2MCIvPjx0ZXh0IHg9IjUwJSIgeT0iNTAlIiBkb21pbmFudC1iYXNlbGluZT0ibWlkZGxlIiB0ZXh0LWFuY2hvcj0ibWlkZGxlIiBmb250LXNpemU9IjM2Ij7wn46nPC90ZXh0Pjwvc3ZnPg==";
+    const defaultArtistSvg = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI0NCIgaGVpZ2h0PSI0NCI+PGNpcmNsZSBjeD0iMjIiIGN5PSIyMiIgcj0iMjIiIGZpbGw9IiNlNWU1ZWEiLz48L3N2Zz4=";
+  </script>
   <style>
     :root {
       --bg: #f2f2f7;
@@ -1039,7 +1046,7 @@
   <div class="tab-content active" id="tab-player">
     <div class="player-container">
       <div class="artwork-container">
-        <img id="playerCover" src="/api/v2/playback/artwork" alt="Album Cover" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'320\' height=\'320\'><rect fill=\'%23e5e5ea\' width=\'320\' height=\'320\'/><text x=\'50%25\' y=\'50%25\' fill=\'%238a8a8e\' font-size=\'48\' text-anchor=\'middle\' dy=\'.3em\'>🎵</text></svg>'">
+        <img id="playerCover" src="/api/v2/playback/artwork" alt="Album Cover" onerror="this.src=defaultMusicSvg">
       </div>
 
       <div class="track-details">
@@ -1730,8 +1737,6 @@
       return formatTime(Math.floor((ms || 0) / 1000));
     }
 
-    const defaultCoverSvg = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><rect fill='%23e5e5ea' width='160' height='160'/><text x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' font-size='36'>💿</text></svg>";
-
     function formatArt(url, size = '300') {
       if (!url) return '';
       let u = String(url).trim();
@@ -1748,8 +1753,24 @@
     }
 
     async function apiControl(action) {
-      await fetch('/api/v2/playback/' + action, { method: 'POST' });
-      fetchNowPlaying();
+      if (action === 'playpause') {
+        const isPlaying = (document.getElementById('btnPlay').textContent === '⏸');
+        const target = isPlaying ? 'pause' : 'play';
+        try {
+          const res = await fetch('/api/v2/playback/' + target, { method: 'POST' });
+          if (!res.ok) throw new Error();
+        } catch (e) {
+          try {
+            await fetch('/api/v2/playback/playpause', { method: 'POST' });
+          } catch (e2) {
+            await fetch('/api/v2/playback/toggle', { method: 'POST' }).catch(() => {});
+          }
+        }
+      } else {
+        await fetch('/api/v2/playback/' + action, { method: 'POST' }).catch(() => {});
+      }
+      setTimeout(fetchNowPlaying, 100);
+      setTimeout(fetchNowPlaying, 400);
     }
 
     async function setVolume(val) {
@@ -2199,7 +2220,7 @@
       const card = document.createElement('div');
       card.className = 'album-card';
       card.innerHTML = `
-        <img src="${covUrl}" onerror="this.src='${defaultCoverSvg}'">
+        <img src="${covUrl}" onerror="this.src=defaultCoverSvg">
         <div class="album-card-title">${name}</div>
         <div class="album-card-sub">${artist}${rel ? ' · ' + rel : ''}</div>
       `;
@@ -2221,7 +2242,7 @@
       const card = document.createElement('div');
       card.className = 'album-card';
       card.innerHTML = `
-        <img src="${covUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'160\\' height=\\'160\\'><rect fill=\\'%23e5e5ea\\' width=\\'160\\' height=\\'160\\'/><text x=\\'50%25\\' y=\\'50%25\\' dominant-baseline=\\'middle\' text-anchor=\\'middle\' font-size=\\'36\\'>🎧</text></svg>'">
+        <img src="${covUrl}" onerror="this.src=defaultPlaylistSvg">
         <div class="album-card-title">${name}</div>
         <div class="album-card-sub">${curator}</div>
       `;
@@ -2343,7 +2364,7 @@
           const row = document.createElement('div');
           row.className = 'song-item';
           row.innerHTML = `
-            <img src="${artUrl}" style="border-radius:50%;" onerror="this.src=\'data:image/svg+xml;utf8,<svg xmlns=\\\'http://www.w3.org/2000/svg\\\' width=\\'44\\' height=\\'44\\'><circle cx=\\'22\\' cy=\\'22\\' r=\\'22\\' fill=\\\'%23e5e5ea\\\'/></svg>\'">
+            <img src="${artUrl}" style="border-radius:50%;" onerror="this.src=defaultArtistSvg">
             <div class="song-info">
               <div class="song-title">${a.name}</div>
               <div class="song-sub">${(a.genreNames || []).join(' · ') || 'Apple Music 认证艺人'}</div>
@@ -2455,7 +2476,8 @@
 
       document.getElementById('albHeroTitle').textContent = title;
       document.getElementById('albHeroArtist').textContent = artist + (releaseDate ? ' · ' + releaseDate.substring(0,4) : '');
-      document.getElementById('albHeroCover').src = coverUrl || 'data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'160\' height=\'160\'><rect fill=\'%23e5e5ea\' width=\'160\' height=\'160\'/><text x=\'50%25\' y=\'50%25\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-size=\'36\'>💿</text></svg>';
+      document.getElementById('albHeroCover').src = coverUrl || defaultCoverSvg;
+      document.getElementById('albHeroCover').onerror = function() { this.src = defaultCoverSvg; };
 
       updateAlbumDetailButtons();
 
@@ -2502,6 +2524,22 @@
           } catch (e) {}
         }
 
+        // Fallback: if catalog query returned no tracks, check userLibraryState.songs
+        if (tracks.length === 0) {
+          const normStr = s => String(s || '').trim().toLowerCase();
+          const targetAlb = normStr(title);
+          const targetArt = normStr(artist);
+          const localSongs = (userLibraryState.songs || []).filter(s => {
+            const sAlb = normStr(s.album);
+            const sArt = normStr(s.artist);
+            return (sAlb === targetAlb || (sAlb && targetAlb && (sAlb.includes(targetAlb) || targetAlb.includes(sAlb)))) &&
+                   (!targetArt || !sArt || sArt === targetArt || sArt.includes(targetArt) || targetArt.includes(sArt));
+          });
+          if (localSongs.length > 0) {
+            tracks = localSongs;
+          }
+        }
+
         if (albData && albData.attributes && albData.attributes.artwork && albData.attributes.artwork.url) {
           const hdCov = formatArt(albData.attributes.artwork.url, '360');
           document.getElementById('albHeroCover').src = hdCov;
@@ -2517,7 +2555,7 @@
         }
 
         tracks.forEach((t, i) => {
-          const a = t.attributes || {};
+          const a = t.attributes || t;
           const row = renderSongRow(t, {
             trackNumber: a.trackNumber || (i + 1),
             showCover: false

@@ -1398,6 +1398,18 @@ void RemoteServer::SetupRoutes() {
         res.set_content("{\"data\":{}}", "application/json");
     });
 
+    server_->Post("/api/v2/playback/playpause", [this](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        controller_.TogglePlayPause();
+        res.set_content("{\"data\":{}}", "application/json");
+    });
+
+    server_->Post("/api/v2/playback/play-pause", [this](const httplib::Request&, httplib::Response& res) {
+        res.set_header("Access-Control-Allow-Origin", "*");
+        controller_.TogglePlayPause();
+        res.set_content("{\"data\":{}}", "application/json");
+    });
+
     server_->Post("/api/v2/playback/next", [this](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
         controller_.SkipNext();

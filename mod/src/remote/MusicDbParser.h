@@ -78,6 +78,8 @@ public:
             std::string key = tr.album + "|||" + tr.artist;
             albumTrackCount[key]++;
             albumTrackCount[tr.album]++;
+            if (albumFirstSong.find(key) == albumFirstSong.end()) albumFirstSong[key] = std::to_string(tr.itemId);
+            if (albumFirstSong.find(tr.album) == albumFirstSong.end()) albumFirstSong[tr.album] = std::to_string(tr.itemId);
         }
 
         for (auto& alb : outAlbums) {
@@ -91,6 +93,11 @@ public:
             if (itCnt == albumTrackCount.end()) itCnt = albumTrackCount.find(alb.title);
             if (itCnt != albumTrackCount.end()) {
                 alb.trackCount = itCnt->second;
+            }
+            auto itSong = albumFirstSong.find(key);
+            if (itSong == albumFirstSong.end()) itSong = albumFirstSong.find(alb.title);
+            if (itSong != albumFirstSong.end()) {
+                alb.firstSongId = itSong->second;
             }
         }
 
