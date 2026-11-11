@@ -1227,6 +1227,9 @@ void RemoteServer::SetupRoutes() {
     // Web Remote UI
     server_->Get("/", [](const httplib::Request&, httplib::Response& res) {
         res.set_header("Access-Control-Allow-Origin", "*");
+        res.set_header("Cache-Control", "no-cache, no-store, must-revalidate");
+        res.set_header("Pragma", "no-cache");
+        res.set_header("Expires", "0");
         auto html = GetWebRemoteHtml();
         res.set_content(html.data(), html.size(), "text/html; charset=utf-8");
     });
@@ -1426,8 +1429,16 @@ void RemoteServer::SetupRoutes() {
         res.set_header("Access-Control-Allow-Origin", "*");
         try {
             auto j = json::parse(req.body);
-            if (j.contains("position") && j["position"].is_number()) {
-                controller_.Seek(j["position"].get<double>());
+            double pos = -1.0;
+            if (j.contains("position")) {
+                if (j["position"].is_number()) pos = j["position"].get<double>();
+                else if (j["position"].is_string()) pos = std::stod(j["position"].get<std::string>());
+            } else if (j.contains("time")) {
+                if (j["time"].is_number()) pos = j["time"].get<double>();
+                else if (j["time"].is_string()) pos = std::stod(j["time"].get<std::string>());
+            }
+            if (pos >= 0.0) {
+                controller_.Seek(pos);
             }
         } catch (...) {}
         res.set_content("{\"data\":{}}", "application/json");
@@ -1448,26 +1459,74 @@ void RemoteServer::SetupRoutes() {
             }
             std::string type = j.value("type", "songs");
             std::string name = j.value("name", "");
+            std::string artist = j.value("artist", "");
+            std::string album = j.value("album", "");
+            std::string directUrl = j.value("url", "");
 
-            if (!id.empty()) {
-                std::cout << "[REMOTE] Play Item Type: " << type << ", ID: " << id << ", Name: " << name << std::endl;
-                if (type == "albums" || type == "library-albums") {
-                    auto albInfo = ResolveAlbumInfo(id);
-                    std::cout << "[REMOTE] Resolved Album: " << albInfo.name << ", URL: " << albInfo.url << std::endl;
-                    controller_.PlayTrack(albInfo.url, L"");
-                } else if (type == "playlists" || type == "library-playlists") {
-                    auto plInfo = ResolvePlaylistInfo(id);
-                    std::cout << "[REMOTE] Resolved Playlist: " << plInfo.name << ", URL: " << plInfo.url << std::endl;
-                    controller_.PlayTrack(plInfo.url, L"");
-                } else {
+            std::cout << "[REMOTE] Play Item Type: " << type << ", ID: " << id
+                      << ", Name: " << name << ", Artist: " << artist << ", Album: " << album << std::endl;
+
+            if (type == "albums" || type == "library-albums") {
+                auto albInfo = ResolveAlbumInfo(id);
+                std::cout << "[REMOTE] Resolved Album: " << albInfo.name << ", URL: " << albInfo.url << std::endl;
+                controller_.PlayTrack(albInfo.url, L"");
+            } else if (type == "playlists" || type == "library-playlists") {
+                auto plInfo = ResolvePlaylistInfo(id);
+                std::cout << "[REMOTE] Resolved Playlist: " << plInfo.name << ", URL: " << plInfo.url << std::endl;
+                controller_.PlayTrack(plInfo.url, L"");
+            } else {
+                std::string playUrl = directUrl;
+                if (playUrl.empty()) {
                     auto info = ResolveTrackInfo(id);
-                    std::string trackName = !name.empty() ? name : info.name;
-                    std::cout << "[REMOTE] Resolved Track: " << trackName << ", URL: " << info.url << std::endl;
-                    if (!info.url.empty()) {
-                        controller_.PlayTrack(info.url, Widen(trackName));
-                    } else {
-                        controller_.PlayTrackId(id);
+                    playUrl = info.url;
+                }
+
+                std::string trackName = name;
+
+                // Fallback for Library tracks (lib.trk...) or Recent tracks with empty/invalid ID:
+                if (playUrl.empty() && !trackName.empty()) {
+                    // 1. Try matching album in our local Library.musicdb (am_library_albums.json)
+                    LoadLibAlbumsIfNeeded();
+                    if (!album.empty()) {
+                        std::lock_guard lock(g_libAlbumsMutex);
+                        for (const auto& albObj : g_libAlbums) {
+                            std::string albName = albObj.value("name", "");
+                            std::string albId = albObj.value("albumId", "");
+                            if (albId.empty()) albId = albObj.value("id", "");
+                            if (!albId.empty() && !albName.empty()) {
+                                if (albName == album || albName.find(album) != std::string::npos || album.find(albName) != std::string::npos) {
+                                    playUrl = "https://music.apple.com/cn/album/" + albId;
+                                    break;
+                                }
+                            }
+                        }
                     }
+
+                    // 2. Search Apple Music Catalog API with trackName + artist + album
+                    if (playUrl.empty()) {
+                        std::string q = trackName;
+                        if (!artist.empty()) q += " " + artist;
+                        if (!album.empty() && album != trackName) q += " " + album;
+                        try {
+                            auto sResp = FetchAppleMusicApi("/v1/catalog/cn/search?types=songs&limit=1&term=" + UrlEncode(q));
+                            if (sResp.contains("results") && sResp["results"].contains("songs") &&
+                                sResp["results"]["songs"].contains("data") && !sResp["results"]["songs"]["data"].empty()) {
+                                const auto& songObj = sResp["results"]["songs"]["data"][0];
+                                if (songObj.contains("attributes") && songObj["attributes"].contains("url")) {
+                                    playUrl = songObj["attributes"]["url"].get<std::string>();
+                                }
+                            }
+                        } catch (...) {}
+                    }
+                }
+
+                std::cout << "[REMOTE] Resolved Track: " << trackName << ", URL: " << playUrl << std::endl;
+                if (!playUrl.empty()) {
+                    controller_.PlayTrack(playUrl, Widen(trackName));
+                } else if (!id.empty() && id.rfind("lib.trk.", 0) != 0) {
+                    controller_.PlayTrackId(id);
+                } else if (!trackName.empty()) {
+                    controller_.PlayTrack("", Widen(trackName));
                 }
             }
         } catch (...) {}

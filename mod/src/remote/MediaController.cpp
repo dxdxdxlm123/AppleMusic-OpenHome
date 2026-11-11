@@ -216,7 +216,69 @@ bool MediaController::Play() {
             if (session.TryTogglePlayPauseAsync().get()) return true;
         }
     } catch (...) {}
-    // If Apple Music is not running yet, auto-launch it!
+
+    // Fallback 1: UI Automation PlayButtonElement click
+    {
+        HDESK hDesk = OpenDesktopW(L"default", 0, FALSE, GENERIC_ALL);
+        if (hDesk) SetThreadDesktop(hDesk);
+        CoInitialize(nullptr);
+        IUIAutomation* pAutomation = nullptr;
+        if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                       IID_IUIAutomation, reinterpret_cast<void**>(&pAutomation))) && pAutomation) {
+            HWND amHwnd = nullptr;
+            EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+                if (!IsWindowVisible(hwnd)) return TRUE;
+                wchar_t cls[256]{};
+                GetClassNameW(hwnd, cls, 256);
+                wchar_t title[256]{};
+                GetWindowTextW(hwnd, title, 256);
+                if ((wcscmp(cls, L"WinUIDesktopWin32WindowClass") == 0 || wcscmp(cls, L"ApplicationFrameWindow") == 0) &&
+                    wcsstr(title, L"Apple Music") != nullptr) {
+                    *reinterpret_cast<HWND*>(lParam) = hwnd;
+                    return FALSE;
+                }
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&amHwnd));
+
+            if (amHwnd) {
+                IUIAutomationElement* pRoot = nullptr;
+                if (SUCCEEDED(pAutomation->ElementFromHandle(amHwnd, &pRoot)) && pRoot) {
+                    VARIANT varProp;
+                    varProp.vt = VT_BSTR;
+                    varProp.bstrVal = SysAllocString(L"PlayButtonElement");
+                    IUIAutomationCondition* pCond = nullptr;
+                    pAutomation->CreatePropertyCondition(UIA_AutomationIdPropertyId, varProp, &pCond);
+                    SysFreeString(varProp.bstrVal);
+
+                    if (pCond) {
+                        IUIAutomationElement* pPlayBtn = nullptr;
+                        pRoot->FindFirst(TreeScope_Descendants, pCond, &pPlayBtn);
+                        pCond->Release();
+                        if (pPlayBtn) {
+                            IUIAutomationInvokePattern* pInvoke = nullptr;
+                            if (SUCCEEDED(pPlayBtn->GetCurrentPattern(UIA_InvokePatternId, reinterpret_cast<IUnknown**>(&pInvoke))) && pInvoke) {
+                                pInvoke->Invoke();
+                                pInvoke->Release();
+                                pPlayBtn->Release();
+                                pRoot->Release();
+                                pAutomation->Release();
+                                CoUninitialize();
+                                if (hDesk) CloseDesktop(hDesk);
+                                return true;
+                            }
+                            pPlayBtn->Release();
+                        }
+                    }
+                    pRoot->Release();
+                }
+            }
+            pAutomation->Release();
+        }
+        CoUninitialize();
+        if (hDesk) CloseDesktop(hDesk);
+    }
+
+    // Fallback 2: Launch Apple Music and send media key
     ShellExecuteW(nullptr, L"open", L"music://", nullptr, nullptr, SW_SHOWMINNOACTIVE);
     keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0);
     keybd_event(VK_MEDIA_PLAY_PAUSE, 0, KEYEVENTF_KEYUP, 0);
@@ -256,10 +318,8 @@ bool MediaController::TogglePlayPause() {
             if (session.TryTogglePlayPauseAsync().get()) return true;
         }
     } catch (...) {}
-    // Fallback: media key
-    keybd_event(VK_MEDIA_PLAY_PAUSE, 0, 0, 0);
-    keybd_event(VK_MEDIA_PLAY_PAUSE, 0, KEYEVENTF_KEYUP, 0);
-    return true;
+    // Fallback: Use Play() which has UIA PlayButtonElement
+    return Play();
 }
 
 bool MediaController::SkipNext() {
@@ -283,16 +343,93 @@ bool MediaController::SkipPrevious() {
 }
 
 bool MediaController::Seek(double seconds) {
-    init_apartment(apartment_type::multi_threaded);
+    // 1. Optimistic snapshot update under lock so UI immediately reflects sought position
+    {
+        std::lock_guard lock(mutex_);
+        if (currentSnapshot_.durationMs > 0) {
+            currentSnapshot_.positionMs = static_cast<int64_t>(seconds * 1000.0);
+        }
+    }
+
+    // 2. Try non-blocking GSMTC seek call
     try {
+        init_apartment(apartment_type::multi_threaded);
         auto manager = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().get();
         auto session = GetAppleSession(manager);
         if (session) {
             int64_t pos100ns = static_cast<int64_t>(seconds * 10000000.0);
-            return session.TryChangePlaybackPositionAsync(pos100ns).get();
+            session.TryChangePlaybackPositionAsync(pos100ns);
         }
     } catch (...) {}
-    return false;
+
+    // 3. UI Automation seek on LCDScrubber in a detached background thread
+    // MUST be detached so the HTTP server thread returns immediately with zero blocking!
+    std::thread([seconds]() {
+        HDESK hDesk = OpenDesktopW(L"default", 0, FALSE, GENERIC_ALL);
+        if (hDesk) SetThreadDesktop(hDesk);
+
+        CoInitialize(nullptr);
+        IUIAutomation* pAutomation = nullptr;
+        if (SUCCEEDED(CoCreateInstance(CLSID_CUIAutomation, nullptr, CLSCTX_INPROC_SERVER,
+                                       IID_IUIAutomation, reinterpret_cast<void**>(&pAutomation))) && pAutomation) {
+            HWND amHwnd = nullptr;
+            EnumWindows([](HWND hwnd, LPARAM lParam) -> BOOL {
+                if (!IsWindowVisible(hwnd)) return TRUE;
+                wchar_t cls[256]{};
+                GetClassNameW(hwnd, cls, 256);
+                wchar_t title[256]{};
+                GetWindowTextW(hwnd, title, 256);
+                if ((wcscmp(cls, L"WinUIDesktopWin32WindowClass") == 0 || wcscmp(cls, L"ApplicationFrameWindow") == 0) &&
+                    wcsstr(title, L"Apple Music") != nullptr) {
+                    *reinterpret_cast<HWND*>(lParam) = hwnd;
+                    return FALSE;
+                }
+                return TRUE;
+            }, reinterpret_cast<LPARAM>(&amHwnd));
+
+            if (amHwnd) {
+                IUIAutomationElement* pRoot = nullptr;
+                if (SUCCEEDED(pAutomation->ElementFromHandle(amHwnd, &pRoot)) && pRoot) {
+                    VARIANT varId;
+                    varId.vt = VT_BSTR;
+                    varId.bstrVal = SysAllocString(L"LCDScrubber");
+                    IUIAutomationCondition* pCond = nullptr;
+                    pAutomation->CreatePropertyCondition(UIA_AutomationIdPropertyId, varId, &pCond);
+                    SysFreeString(varId.bstrVal);
+
+                    if (pCond) {
+                        IUIAutomationElement* pScrubber = nullptr;
+                        pRoot->FindFirst(TreeScope_Descendants, pCond, &pScrubber);
+                        pCond->Release();
+
+                        if (pScrubber) {
+                            IUIAutomationRangeValuePattern* pRange = nullptr;
+                            if (SUCCEEDED(pScrubber->GetCurrentPattern(UIA_RangeValuePatternId,
+                                                                      reinterpret_cast<IUnknown**>(&pRange))) && pRange) {
+                                double minVal = 0, maxVal = 0;
+                                pRange->get_CurrentMinimum(&minVal);
+                                pRange->get_CurrentMaximum(&maxVal);
+
+                                double target = seconds;
+                                if (target < minVal) target = minVal;
+                                if (maxVal > 0 && target > maxVal) target = maxVal;
+
+                                pRange->SetValue(target);
+                                pRange->Release();
+                            }
+                            pScrubber->Release();
+                        }
+                    }
+                    pRoot->Release();
+                }
+            }
+            pAutomation->Release();
+        }
+        CoUninitialize();
+        if (hDesk) CloseDesktop(hDesk);
+    }).detach();
+
+    return true;
 }
 
 bool MediaController::PlayTrack(const std::string& albumUrl, const std::wstring& trackName) {
@@ -369,8 +506,10 @@ bool MediaController::PlayTrack(const std::string& albumUrl, const std::wstring&
                 continue;
             }
 
-            if (IsIconic(amHwnd)) ShowWindow(amHwnd, SW_RESTORE);
-            SetForegroundWindow(amHwnd);
+            if (IsIconic(amHwnd)) {
+                ShowWindow(amHwnd, SW_RESTORE);
+                Sleep(250);
+            }
 
             IUIAutomationElement* pRoot = nullptr;
             if (FAILED(pAutomation->ElementFromHandle(amHwnd, &pRoot)) || !pRoot) {
@@ -387,8 +526,6 @@ bool MediaController::PlayTrack(const std::string& albumUrl, const std::wstring&
                 if (SUCCEEDED(pRoot->FindAll(TreeScope_Descendants, pTrueCond, &pArray)) && pArray) {
                     int len = 0;
                     pArray->get_Length(&len);
-                    std::cout << "[CONTROLLER] Attempt " << attempt << ": " << len << " elements in view, looking for: "
-                              << std::string(trackName.begin(), trackName.end()) << std::endl;
                     for (int i = 0; i < len; ++i) {
                         IUIAutomationElement* pElem = nullptr;
                         pArray->GetElement(i, &pElem);
@@ -404,24 +541,22 @@ bool MediaController::PlayTrack(const std::string& albumUrl, const std::wstring&
                                 (!coreTitle.empty() && wcsstr(name, coreTitle.c_str()) != nullptr)) {
                                 RECT rect{};
                                 pElem->get_CurrentBoundingRectangle(&rect);
-                                std::cout << "[CONTROLLER] Found matching ListViewItem! Rect: "
-                                          << rect.left << "," << rect.top << " to " << rect.right << "," << rect.bottom << std::endl;
-                                if (rect.right > rect.left && rect.bottom > rect.top) {
-                                    int cx = rect.left + 80;
+                                if (rect.right > rect.left && rect.bottom > rect.top && rect.left >= 0 && rect.top >= 0) {
+                                    int cx = rect.left + 150;
                                     int cy = (rect.top + rect.bottom) / 2;
 
                                     POINT origPos{};
                                     GetCursorPos(&origPos);
 
+                                    SetForegroundWindow(amHwnd);
                                     SetCursorPos(cx, cy);
                                     mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                                     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
-                                    Sleep(50);
+                                    Sleep(40);
                                     mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
                                     mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
                                     SetCursorPos(origPos.x, origPos.y);
 
-                                    std::cout << "[CONTROLLER] Double-clicked at (" << cx << ", " << cy << ")!" << std::endl;
                                     trackActivated = true;
                                     SysFreeString(name);
                                     pElem->Release();

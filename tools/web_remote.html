@@ -1754,17 +1754,12 @@
 
     async function apiControl(action) {
       if (action === 'playpause') {
-        const isPlaying = (document.getElementById('btnPlay').textContent === '⏸');
-        const target = isPlaying ? 'pause' : 'play';
         try {
-          const res = await fetch('/api/v2/playback/' + target, { method: 'POST' });
-          if (!res.ok) throw new Error();
+          await fetch('/api/v2/playback/playpause', { method: 'POST' });
         } catch (e) {
           try {
-            await fetch('/api/v2/playback/playpause', { method: 'POST' });
-          } catch (e2) {
-            await fetch('/api/v2/playback/toggle', { method: 'POST' }).catch(() => {});
-          }
+            await fetch('/api/v2/playback/toggle', { method: 'POST' });
+          } catch (e2) {}
         }
       } else {
         await fetch('/api/v2/playback/' + action, { method: 'POST' }).catch(() => {});
@@ -2007,11 +2002,14 @@
         const dur = data.time ? data.time.duration : 0;
         currentDuration = dur;
 
-        document.getElementById('timeCur').textContent = formatTime(cur);
-        document.getElementById('timeDur').textContent = formatTime(dur);
-
-        if (!isDraggingSlider && dur > 0) {
-          document.getElementById('progressSlider').value = (cur / dur) * 100;
+        if (!isDraggingSlider) {
+          if (Date.now() - lastUserSeekTime > 2000 && dur > 0) {
+            document.getElementById('progressSlider').value = (cur / dur) * 100;
+            document.getElementById('timeCur').textContent = formatTime(cur);
+          } else if (dur <= 0) {
+            document.getElementById('timeCur').textContent = formatTime(cur);
+          }
+          document.getElementById('timeDur').textContent = formatTime(dur);
         }
 
         const artSrc = '/api/v2/playback/artwork?t=' + Date.now();
@@ -2024,17 +2022,63 @@
     }
 
     const progSlider = document.getElementById('progressSlider');
-    progSlider.addEventListener('mousedown', () => isDraggingSlider = true);
-    progSlider.addEventListener('touchstart', () => isDraggingSlider = true);
+    let lastUserSeekTime = 0;
+    let pendingSeekTarget = -1;
+
+    async function commitSeek(targetSec) {
+      if (targetSec >= 0 && currentDuration > 0) {
+        lastUserSeekTime = Date.now();
+        document.getElementById('timeCur').textContent = formatTime(targetSec);
+        try {
+          await fetch('/api/v2/playback/seek', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ position: targetSec, time: targetSec })
+          });
+        } catch (err) {}
+      }
+    }
+
+    progSlider.addEventListener('mousedown', () => { isDraggingSlider = true; });
+    progSlider.addEventListener('touchstart', () => { isDraggingSlider = true; }, { passive: true });
+
+    progSlider.addEventListener('input', (e) => {
+      isDraggingSlider = true;
+      if (currentDuration > 0) {
+        const previewSec = (parseFloat(e.target.value) / 100) * currentDuration;
+        pendingSeekTarget = previewSec;
+        document.getElementById('timeCur').textContent = formatTime(previewSec);
+      }
+    });
+
     progSlider.addEventListener('change', async (e) => {
       isDraggingSlider = false;
       if (currentDuration > 0) {
-        const targetSec = (e.target.value / 100) * currentDuration;
-        await fetch('/api/v2/playback/seek', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ position: targetSec })
-        });
+        const targetSec = (parseFloat(e.target.value) / 100) * currentDuration;
+        pendingSeekTarget = -1;
+        await commitSeek(targetSec);
+      }
+    });
+
+    // Safety net: whenever mouse or touch is released anywhere on screen, ensure dragging flag is cleared and commit seek
+    window.addEventListener('mouseup', () => {
+      if (isDraggingSlider) {
+        isDraggingSlider = false;
+        if (pendingSeekTarget >= 0) {
+          const t = pendingSeekTarget;
+          pendingSeekTarget = -1;
+          commitSeek(t);
+        }
+      }
+    });
+    window.addEventListener('touchend', () => {
+      if (isDraggingSlider) {
+        isDraggingSlider = false;
+        if (pendingSeekTarget >= 0) {
+          const t = pendingSeekTarget;
+          pendingSeekTarget = -1;
+          commitSeek(t);
+        }
       }
     });
 
@@ -2096,6 +2140,7 @@
       const artist = (item.attributes && item.attributes.artistName) || item.artist || item.artistName || 'Apple Music';
       const album = (item.attributes && item.attributes.albumName) || item.album || item.albumName || '';
       const id = item.id || (item.playParams && item.playParams.id) || item.adamId || '';
+      const trackUrl = (item.attributes && item.attributes.url) || item.url || '';
       let rawArt = item.artworkUrl || '';
       if (!rawArt && item.attributes && item.attributes.artwork) {
         rawArt = item.attributes.artwork.url;
@@ -2168,7 +2213,7 @@
         libBtn.classList.toggle('in-library', nowLib);
       };
 
-      row.onclick = () => playTrackDirect(id, name);
+      row.onclick = () => playTrackDirect(id, name, artist, album, trackUrl);
       return row;
     }
 
@@ -2420,11 +2465,18 @@
       }
     }
 
-    async function playTrackDirect(id, name) {
+    async function playTrackDirect(id, name, artist, album, trackUrl) {
       await fetch('/api/v2/playback/play-item', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ type: 'songs', id: id, name: name })
+        body: JSON.stringify({
+          type: 'songs',
+          id: id,
+          name: name,
+          artist: artist || '',
+          album: album || '',
+          url: trackUrl || ''
+        })
       });
       showToast('正在播放: ' + name);
       setTimeout(() => {
