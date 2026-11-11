@@ -226,6 +226,7 @@ add_custom_command(
     am_exclusive_media_control
     am_exclusive_hook
     am_exclusive_ui
+    am_exclusive_remote
     "${CMAKE_CURRENT_SOURCE_DIR}/config/am-exclusive.ini"
     "${CMAKE_CURRENT_SOURCE_DIR}/scripts/Generate-SetupResources.ps1"
     "${CMAKE_CURRENT_SOURCE_DIR}/scripts/Install-Mod.ps1"
@@ -244,7 +245,8 @@ add_dependencies(am_exclusive_setup
   am_exclusive_broker
   am_exclusive_media_control
   am_exclusive_hook
-  am_exclusive_ui)
+  am_exclusive_ui
+  am_exclusive_remote)
 target_include_directories(am_exclusive_setup PRIVATE src)
 target_compile_definitions(am_exclusive_setup PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 set_target_properties(am_exclusive_setup PROPERTIES OUTPUT_NAME "AMExclusive-Setup")

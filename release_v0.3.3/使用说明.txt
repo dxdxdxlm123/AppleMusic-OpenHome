@@ -1,0 +1,38 @@
+============================================================
+  AMExclusive / Orion r-test-v0.3.3 发布包使用说明
+============================================================
+
+一、版本更新与说明（v0.3.3）：
+  1. 【双向打通 Apple Music 官方真实资料库】：
+     - 采用 Apple Music 官方原生数据库 `Library.musicdb` 极速离线解密与提取机制（86毫秒级瞬时同步），彻底解决控制端与 Apple Music 客户端专辑、歌曲不同步问题。
+     - 深度结合官方 `artwork.sqlite`，全量无损提取官方 Apple mzstatic CDN 高清封面，杜绝空白或损坏图片图标。
+     - 控制端“➕ 添加到资料库”实现与官方 Apple Music 客户端联动，触发官方后台真实入库（入库后直接同步至 Apple ID 云端资料库并写入 `Library.musicdb`）。
+  2. 【手机端窄屏排版与样式彻底修复】：
+     - 独占设置（DLNA / RAAT / 本地优化）针对窄屏手机全面重构为纵向堆叠（.stacked）响应式布局，所有长文本标签与下拉输入框自适应换行，彻底消除字形垂直挤压变形。
+     - “最近播放”历史记录解析全面兼容 Windows SMTC 格式，所有曲目封面自动补全为高分辨率官方大图。
+  3. 【全新单文件一键安装包升级】：
+     - AMExclusive-Setup.exe 升级原生内嵌打包 `am-exclusive-remote.exe`，安装时自动一步到位放置到伴生程序目录，无需额外配置或第三方辅助文件。
+     - 彻底干掉黑框：遥控控制服务完全作为纯 Windows 后台服务运行，无任何 CMD 命令行弹窗干扰。
+
+二、包含文件清单：
+  1. AMExclusive-Setup.exe          : 插件一键安装/更新程序（集成 0.3.3 独占驱动、R设备推流、ASIO/DLNA引擎、原生网页遥控全组件）
+  2. am-exclusive-remote.exe        : 网页远程控制核心服务（Windows GUI 无窗口静默后台运行，可被 AM 设置开关自动拉起）
+  3. 核心二进制组件                 : am-exclusive-audiohost.exe, am-exclusive-broker.exe, am-exclusive-hook.dll, am-exclusive-ui.dll, am_exclusive_media_control.exe
+  4. am-exclusive.ini               : 配置文件（包含 [remote] 遥控配置、[dlna] 网播配置、[r_device] 配置等）
+
+三、使用步骤：
+  1. 安装/更新插件：
+     先退出正在运行的 Apple Music，然后双击运行 AMExclusive-Setup.exe 完成插件更新安装。
+
+  2. 在 Apple Music 中开启远程服务：
+     - 打开 Apple Music，点击左上角齿轮图标进入「设置」->「音频设置」。
+     - 找到「网页远程控制」卡片。
+     - 将开关切换为「开」，点击卡片下方的「保存并应用」。
+     - 界面即刻显示远程服务状态以及具体的局域网访问地址（例如 http://10.2.0.87:10767）。
+     - 【注意】：电脑上不会弹出任何 CMD 黑框，服务完全在后台静默执行！并且以后每次打开 Apple Music 都会自动保持开启状态。
+
+  3. 手机/平板远程选歌控制：
+     - 手机或平板连接到与电脑相同的 Wi-Fi 网络。
+     - 打开手机浏览器（Safari / Chrome / Edge 均可），输入 Apple Music 设置里显示的局域网地址（如 http://10.2.0.87:10767）。
+     - 立即畅享选歌、查专辑、排行榜、资料库收藏与独占音频引擎控制。
+     - 建议：在手机浏览器菜单中点击「添加到主屏幕」，即可免去浏览器边框，作为独立 App 满屏运行。

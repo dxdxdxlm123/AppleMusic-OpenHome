@@ -43,6 +43,7 @@ constexpr ResourceSpec kResources[] = {
     {AMMOD_RESOURCE_LICENSE, L"LICENSE"},
     {AMMOD_RESOURCE_THIRD_PARTY_NOTICES, L"THIRD_PARTY_NOTICES.md"},
     {AMMOD_RESOURCE_AUDIOHOST, L"am-exclusive-audiohost.exe"},
+    {AMMOD_RESOURCE_REMOTE, L"am-exclusive-remote.exe"},
 };
 
 struct ProcessResult {

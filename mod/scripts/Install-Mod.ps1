@@ -154,6 +154,7 @@ $payloadFiles = @(
     'am-exclusive-broker.exe',
     'am-exclusive-audiohost.exe',
     'am_exclusive_media_control.exe',
+    'am-exclusive-remote.exe',
     'am-exclusive-hook.dll',
     'am-exclusive-ui.dll',
     'am-exclusive.ini'
