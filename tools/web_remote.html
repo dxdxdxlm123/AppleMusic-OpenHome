@@ -1010,7 +1010,7 @@
 
     <!-- Album Detail Sub-view -->
     <div class="detail-view" id="albumDetailView">
-      <div class="detail-back" onclick="hideDetailView()">‹ 返回搜索</div>
+      <div class="detail-back" id="albDetailBack" onclick="hideDetailView()">‹ 返回搜索</div>
       <div class="detail-hero">
         <img id="albHeroCover" src="">
         <div class="detail-hero-info">
@@ -1025,7 +1025,7 @@
 
     <!-- Playlist Detail Sub-view -->
     <div class="detail-view" id="playlistDetailView">
-      <div class="detail-back" onclick="hideDetailView()">‹ 返回搜索</div>
+      <div class="detail-back" id="plDetailBack" onclick="hideDetailView()">‹ 返回搜索</div>
       <div class="detail-hero">
         <img id="plHeroCover" src="">
         <div class="detail-hero-info">
@@ -1040,7 +1040,7 @@
 
     <!-- Artist Detail Sub-view -->
     <div class="detail-view" id="artistDetailView">
-      <div class="detail-back" onclick="hideDetailView()">‹ 返回搜索</div>
+      <div class="detail-back" id="artDetailBack" onclick="hideDetailView()">‹ 返回搜索</div>
       <div class="detail-hero">
         <img id="artHeroCover" src="" style="border-radius:50%;">
         <div class="detail-hero-info">
@@ -1478,6 +1478,9 @@
       t._timer = setTimeout(() => t.classList.remove('show'), 2400);
     }
 
+    let navStack = [];
+    let currentLibrarySub = 'recent';
+
     function switchTab(name, elem) {
       currentTab = name;
       document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
@@ -1492,8 +1495,23 @@
         mini.style.display = 'flex';
       }
 
+      if (name !== 'search') {
+        navStack = [];
+        document.querySelectorAll('.detail-view').forEach(d => d.classList.remove('active'));
+        const smv = document.getElementById('searchMainView');
+        if (smv) smv.style.display = 'block';
+      }
+
       if (name === 'settings') loadAmExclusiveConfig();
-      if (name === 'library') loadLibrary('recent');
+      if (name === 'library') {
+        const chips = document.querySelectorAll('#tab-library .chip');
+        if (chips.length >= 3) {
+          chips[0].classList.toggle('active', currentLibrarySub === 'recent');
+          chips[1].classList.toggle('active', currentLibrarySub === 'favorites');
+          chips[2].classList.toggle('active', currentLibrarySub === 'albums');
+        }
+        loadLibrary(currentLibrarySub);
+      }
     }
 
     function expandToPlayer() {
@@ -1604,7 +1622,8 @@
         name: currentTrackSnapshot.name,
         artist: currentTrackSnapshot.artistName,
         album: currentTrackSnapshot.albumName,
-        id: currentTrackSnapshot.playParams ? currentTrackSnapshot.playParams.id : ''
+        id: currentTrackSnapshot.playParams ? currentTrackSnapshot.playParams.id : '',
+        artworkUrl: (currentTrackSnapshot.artwork && currentTrackSnapshot.artwork.url) || ''
       });
       fetchNowPlaying();
     }
@@ -1812,20 +1831,38 @@
 
     // Detail Views
     function hideDetailView() {
+      const prev = navStack.pop() || 'search';
       document.querySelectorAll('.detail-view').forEach(d => d.classList.remove('active'));
-      document.getElementById('searchMainView').style.display = 'block';
+      if (prev === 'artist') {
+        const artView = document.getElementById('artistDetailView');
+        if (artView) artView.classList.add('active');
+      } else if (prev === 'library') {
+        document.getElementById('searchMainView').style.display = 'block';
+        switchTab('library', document.querySelectorAll('.nav-bar .nav-item')[2]);
+      } else {
+        document.getElementById('searchMainView').style.display = 'block';
+      }
     }
 
-    async function showAlbumDetail(albumId, title, artist, coverUrl, releaseDate) {
+    async function showAlbumDetail(albumId, title, artist, coverUrl, releaseDate, fromView = 'search') {
       currentAlbumId = albumId;
+      if (fromView !== 'search') {
+        switchTab('search', document.querySelectorAll('.nav-bar .nav-item')[1]);
+      }
+      navStack.push(fromView);
       document.getElementById('searchMainView').style.display = 'none';
       document.querySelectorAll('.detail-view').forEach(d => d.classList.remove('active'));
       const view = document.getElementById('albumDetailView');
       view.classList.add('active');
 
+      const backBtn = document.getElementById('albDetailBack');
+      if (backBtn) {
+        backBtn.textContent = fromView === 'library' ? '‹ 返回资料库' : (fromView === 'artist' ? '‹ 返回艺人' : '‹ 返回搜索');
+      }
+
       document.getElementById('albHeroTitle').textContent = title;
       document.getElementById('albHeroArtist').textContent = artist + (releaseDate ? ' · ' + releaseDate.substring(0,4) : '');
-      document.getElementById('albHeroCover').src = coverUrl;
+      document.getElementById('albHeroCover').src = coverUrl || 'data:image/svg+xml;utf8,<svg xmlns=\'http://www.w3.org/2000/svg\' width=\'160\' height=\'160\'><rect fill=\'%23e5e5ea\' width=\'160\' height=\'160\'/><text x=\'50%25\' y=\'50%25\' dominant-baseline=\'middle\' text-anchor=\'middle\' font-size=\'36\'>💿</text></svg>';
 
       const trackListDiv = document.getElementById('albTrackList');
       trackListDiv.innerHTML = '<div style="text-align:center;padding:20px;color:var(--subtext);">正在加载专辑曲目...</div>';
@@ -1836,11 +1873,20 @@
         const albData = (json.data && json.data.data && json.data.data[0]) || {};
         const tracks = (albData.relationships && albData.relationships.tracks && albData.relationships.tracks.data) || [];
 
+        if (albData.attributes && albData.attributes.artwork && albData.attributes.artwork.url) {
+          document.getElementById('albHeroCover').src = formatArt(albData.attributes.artwork.url, '360');
+        }
+
         document.getElementById('albTrackCount').textContent = `共 ${tracks.length} 首`;
         trackListDiv.innerHTML = '';
 
+        if (tracks.length === 0) {
+          trackListDiv.innerHTML = '<div style="text-align:center;padding:20px;color:var(--subtext);">暂无曲目信息</div>';
+          return;
+        }
+
         tracks.forEach((t, i) => {
-          const a = t.attributes;
+          const a = t.attributes || {};
           const row = document.createElement('div');
           row.className = 'song-item';
           row.innerHTML = `
@@ -1876,12 +1922,21 @@
       }, 700);
     }
 
-    async function showPlaylistDetail(playlistId, title, coverUrl, curator) {
+    async function showPlaylistDetail(playlistId, title, coverUrl, curator, fromView = 'search') {
       currentPlaylistId = playlistId;
+      if (fromView !== 'search') {
+        switchTab('search', document.querySelectorAll('.nav-bar .nav-item')[1]);
+      }
+      navStack.push(fromView);
       document.getElementById('searchMainView').style.display = 'none';
       document.querySelectorAll('.detail-view').forEach(d => d.classList.remove('active'));
       const view = document.getElementById('playlistDetailView');
       view.classList.add('active');
+
+      const backBtn = document.getElementById('plDetailBack');
+      if (backBtn) {
+        backBtn.textContent = fromView === 'library' ? '‹ 返回资料库' : '‹ 返回搜索';
+      }
 
       document.getElementById('plHeroTitle').textContent = title;
       document.getElementById('plHeroCurator').textContent = curator || 'Apple Music 精选';
@@ -1934,11 +1989,20 @@
       }, 700);
     }
 
-    async function showArtistDetail(artistId, name, coverUrl, genre) {
+    async function showArtistDetail(artistId, name, coverUrl, genre, fromView = 'search') {
+      if (fromView !== 'search') {
+        switchTab('search', document.querySelectorAll('.nav-bar .nav-item')[1]);
+      }
+      navStack.push(fromView);
       document.getElementById('searchMainView').style.display = 'none';
       document.querySelectorAll('.detail-view').forEach(d => d.classList.remove('active'));
       const view = document.getElementById('artistDetailView');
       view.classList.add('active');
+
+      const backBtn = document.getElementById('artDetailBack');
+      if (backBtn) {
+        backBtn.textContent = fromView === 'library' ? '‹ 返回资料库' : '‹ 返回搜索';
+      }
 
       document.getElementById('artHeroName').textContent = name;
       document.getElementById('artHeroGenre').textContent = genre || '流行乐艺人';
@@ -1963,7 +2027,7 @@
             <div class="album-card-title">${a.name}</div>
             <div class="album-card-sub">${(a.releaseDate || '').substring(0,4)} · 共 ${a.trackCount || 0} 首</div>
           `;
-          card.onclick = () => showAlbumDetail(alb.id, a.name, name, covUrl, a.releaseDate);
+          card.onclick = () => showAlbumDetail(alb.id, a.name, name, covUrl, a.releaseDate, 'artist');
           grid.appendChild(card);
         });
       } catch (e) {
@@ -1997,9 +2061,11 @@
           const list = document.createElement('div');
           list.className = 'song-list';
           tracks.forEach(t => {
+            const art = t.artworkUrl ? formatArt(t.artworkUrl, '100') : '';
             const row = document.createElement('div');
             row.className = 'song-item';
             row.innerHTML = `
+              <img src="${art}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><rect fill=\\'%23e5e5ea\\' width=\\'44\\' height=\\'44\\'/></svg>'">
               <div class="song-info">
                 <div class="song-title">${t.title}</div>
                 <div class="song-sub">${t.artist} — ${t.album || ''}</div>
@@ -2030,9 +2096,11 @@
           const list = document.createElement('div');
           list.className = 'song-list';
           favs.forEach(t => {
+            const art = t.artworkUrl ? formatArt(t.artworkUrl, '100') : '';
             const row = document.createElement('div');
             row.className = 'song-item';
             row.innerHTML = `
+              <img src="${art}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'44\\' height=\\'44\\'><rect fill=\\'%23e5e5ea\\' width=\\'44\\' height=\\'44\\'/></svg>'">
               <div class="song-info">
                 <div class="song-title">${t.name}</div>
                 <div class="song-sub">${t.artist} · ${t.album || ''}</div>
@@ -2064,17 +2132,22 @@
           const grid = document.createElement('div');
           grid.className = 'albums-grid';
           albums.forEach(alb => {
+            const covUrl = alb.artworkUrl ? formatArt(alb.artworkUrl, '300') : '';
             const card = document.createElement('div');
             card.className = 'album-card';
             card.innerHTML = `
-              <div style="width:100%;aspect-ratio:1;border-radius:10px;background:#e5e5ea;display:flex;align-items:center;justify-content:center;font-size:36px;margin-bottom:8px;">💿</div>
+              <img src="${covUrl}" onerror="this.src='data:image/svg+xml;utf8,<svg xmlns=\\'http://www.w3.org/2000/svg\\' width=\\'160\\' height=\\'160\\'><rect fill=\\'%23e5e5ea\\' width=\\'160\\' height=\\'160\\'/><text x=\\'50%25\\' y=\\'50%25\' dominant-baseline=\\'middle\' text-anchor=\\'middle\' font-size=\\'36\\'>💿</text></svg>'">
               <div class="album-card-title">${alb.name}</div>
               <div class="album-card-sub">${alb.artist} · ${alb.trackCount} 首</div>
             `;
             card.onclick = () => {
-              document.getElementById('searchInput').value = alb.name;
-              switchTab('search', document.querySelectorAll('.nav-bar .nav-item')[1]);
-              doSearch();
+              if (alb.albumId) {
+                showAlbumDetail(alb.albumId, alb.name, alb.artist, covUrl, alb.releaseDate, 'library');
+              } else {
+                document.getElementById('searchInput').value = alb.name;
+                switchTab('search', document.querySelectorAll('.nav-bar .nav-item')[1]);
+                doSearch();
+              }
             };
             grid.appendChild(card);
           });

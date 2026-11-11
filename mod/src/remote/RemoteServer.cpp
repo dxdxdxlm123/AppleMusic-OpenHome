@@ -68,6 +68,16 @@ std::unordered_map<std::string, CachedResourceInfo> g_trackCache;
 std::unordered_map<std::string, CachedResourceInfo> g_albumCache;
 std::unordered_map<std::string, CachedResourceInfo> g_playlistCache;
 
+struct CachedAlbumMeta {
+    std::string albumId;
+    std::string artworkUrl;
+    std::string releaseDate;
+};
+
+std::mutex g_albumMetaMutex;
+std::unordered_map<std::string, CachedAlbumMeta> g_albumMetaCache;
+std::unordered_map<std::string, std::string> g_songArtworkCache;
+
 // Favorites persistence
 std::mutex g_favoritesMutex;
 json g_favorites = json::array();
@@ -293,11 +303,121 @@ json FetchAppleSearch(const std::string& term, const std::string& types, int lim
     };
 }
 
+void PopulateRecentMetadata(const std::vector<AlbumItem>& albums, const std::vector<LibraryItem>& tracks) {
+    std::vector<std::string> missingSongIds;
+    {
+        std::lock_guard lock(g_albumMetaMutex);
+        for (const auto& alb : albums) {
+            if (!alb.firstAdamId.empty()) {
+                if (g_albumMetaCache.find(alb.firstAdamId) == g_albumMetaCache.end()) {
+                    missingSongIds.push_back(alb.firstAdamId);
+                }
+            }
+        }
+        for (const auto& tr : tracks) {
+            if (!tr.adamId.empty() && g_songArtworkCache.find(tr.adamId) == g_songArtworkCache.end()) {
+                if (std::find(missingSongIds.begin(), missingSongIds.end(), tr.adamId) == missingSongIds.end()) {
+                    missingSongIds.push_back(tr.adamId);
+                }
+            }
+            if (missingSongIds.size() >= 30) break;
+        }
+    }
+
+    if (!missingSongIds.empty()) {
+        std::string idsParam;
+        for (size_t i = 0; i < missingSongIds.size(); ++i) {
+            if (i > 0) idsParam += ",";
+            idsParam += missingSongIds[i];
+        }
+
+        auto songBatch = FetchAppleMusicApi("/v1/catalog/cn/songs", "ids=" + idsParam + "&include=albums");
+        if (songBatch.contains("data") && songBatch["data"].is_array()) {
+            std::lock_guard lock(g_albumMetaMutex);
+            for (const auto& item : songBatch["data"]) {
+                std::string sId = item.value("id", "");
+                const auto& attrs = item.value("attributes", json::object());
+                std::string artUrl = "";
+                if (attrs.contains("artwork") && attrs["artwork"].is_object()) {
+                    artUrl = attrs["artwork"].value("url", "");
+                }
+                std::string relDate = attrs.value("releaseDate", "");
+                std::string albId = "";
+                if (item.contains("relationships") && item["relationships"].contains("albums") &&
+                    item["relationships"]["albums"].contains("data") && !item["relationships"]["albums"]["data"].empty()) {
+                    albId = item["relationships"]["albums"]["data"][0].value("id", "");
+                }
+                if (albId.empty() && attrs.contains("url")) {
+                    std::string u = attrs.value("url", "");
+                    auto pos1 = u.find("/album/");
+                    if (pos1 != std::string::npos) {
+                        auto pos2 = u.find('/', pos1 + 7);
+                        if (pos2 != std::string::npos) {
+                            auto pos3 = u.find('?', pos2 + 1);
+                            albId = (pos3 != std::string::npos) ? u.substr(pos2 + 1, pos3 - (pos2 + 1)) : u.substr(pos2 + 1);
+                        }
+                    }
+                }
+                if (!sId.empty()) {
+                    g_albumMetaCache[sId] = { albId, artUrl, relDate };
+                    if (!artUrl.empty()) g_songArtworkCache[sId] = artUrl;
+                }
+                std::string albName = attrs.value("albumName", "");
+                std::string artName = attrs.value("artistName", "");
+                if (!albName.empty() && !artName.empty()) {
+                    g_albumMetaCache[albName + "|||" + artName] = { albId, artUrl, relDate };
+                }
+            }
+        }
+    }
+
+    // Secondary fallback for any album without resolved albumId
+    for (const auto& alb : albums) {
+        bool resolved = false;
+        {
+            std::lock_guard lock(g_albumMetaMutex);
+            if (!alb.firstAdamId.empty()) {
+                auto it = g_albumMetaCache.find(alb.firstAdamId);
+                if (it != g_albumMetaCache.end() && !it->second.albumId.empty()) {
+                    resolved = true;
+                }
+            }
+            if (!resolved) {
+                auto it2 = g_albumMetaCache.find(alb.name + "|||" + alb.artist);
+                if (it2 != g_albumMetaCache.end() && !it2->second.albumId.empty()) {
+                    resolved = true;
+                }
+            }
+        }
+        if (!resolved && !alb.name.empty()) {
+            auto srch = FetchAppleSearch(alb.name + " " + alb.artist, "albums", 1);
+            if (srch.contains("data") && srch["data"].contains("results") &&
+                srch["data"]["results"].contains("albums") && srch["data"]["results"]["albums"].contains("data") &&
+                !srch["data"]["results"]["albums"]["data"].empty()) {
+                const auto& firstAlb = srch["data"]["results"]["albums"]["data"][0];
+                std::string foundAlbId = firstAlb.value("id", "");
+                const auto& aAttrs = firstAlb.value("attributes", json::object());
+                std::string foundArtUrl = "";
+                if (aAttrs.contains("artwork") && aAttrs["artwork"].is_object()) {
+                    foundArtUrl = aAttrs["artwork"].value("url", "");
+                }
+                std::string foundRelDate = aAttrs.value("releaseDate", "");
+                std::lock_guard lock(g_albumMetaMutex);
+                CachedAlbumMeta meta{ foundAlbId, foundArtUrl, foundRelDate };
+                if (!alb.firstAdamId.empty()) g_albumMetaCache[alb.firstAdamId] = meta;
+                g_albumMetaCache[alb.name + "|||" + alb.artist] = meta;
+            }
+        }
+    }
+}
+
 json HandleLibraryApi(const std::string& path, const std::string& hostAddress, int port) {
     LoadFavoritesIfNeeded();
     auto recentItems = PlayQueueReader::ReadRecentItems();
     auto recentAlbums = PlayQueueReader::ReadRecentAlbums();
     auto recentArtists = PlayQueueReader::ReadRecentArtists();
+
+    PopulateRecentMetadata(recentAlbums, recentItems);
 
     std::string baseArtwork = "http://" + hostAddress + ":" + std::to_string(port) + "/api/v2/playback/artwork";
 
@@ -305,7 +425,27 @@ json HandleLibraryApi(const std::string& path, const std::string& hostAddress, i
         json dataArr = json::array();
         for (size_t i = 0; i < recentAlbums.size() && i < 25; ++i) {
             const auto& alb = recentAlbums[i];
-            std::string albId = alb.firstAdamId.empty() ? ("alb_" + std::to_string(i)) : alb.firstAdamId;
+            std::string albId = "";
+            std::string artUrl = "";
+            {
+                std::lock_guard lock(g_albumMetaMutex);
+                auto it = g_albumMetaCache.find(alb.firstAdamId);
+                if (it != g_albumMetaCache.end() && !it->second.albumId.empty()) {
+                    albId = it->second.albumId;
+                    artUrl = it->second.artworkUrl;
+                } else {
+                    auto it2 = g_albumMetaCache.find(alb.name + "|||" + alb.artist);
+                    if (it2 != g_albumMetaCache.end() && !it2->second.albumId.empty()) {
+                        albId = it2->second.albumId;
+                        artUrl = it2->second.artworkUrl;
+                    }
+                }
+            }
+            if (albId.empty()) {
+                albId = alb.firstAdamId.empty() ? ("alb_" + std::to_string(i)) : alb.firstAdamId;
+            }
+            if (artUrl.empty()) artUrl = baseArtwork;
+
             dataArr.push_back({
                 {"id", albId},
                 {"type", "library-albums"},
@@ -320,7 +460,7 @@ json HandleLibraryApi(const std::string& path, const std::string& hostAddress, i
                         {"isLibrary", true}
                     }},
                     {"artwork", {
-                        {"url", baseArtwork}
+                        {"url", artUrl}
                     }}
                 }},
                 {"relationships", {
@@ -873,24 +1013,62 @@ void RemoteServer::SetupRoutes() {
         auto recentAlbums = PlayQueueReader::ReadRecentAlbums();
         auto recentArtists = PlayQueueReader::ReadRecentArtists();
 
+        PopulateRecentMetadata(recentAlbums, recentItems);
+
         json tracksArr = json::array();
         for (const auto& it : recentItems) {
+            std::string artUrl = "";
+            {
+                std::lock_guard lock(g_albumMetaMutex);
+                auto f = g_songArtworkCache.find(it.adamId);
+                if (f != g_songArtworkCache.end()) {
+                    artUrl = f->second;
+                } else {
+                    auto f2 = g_albumMetaCache.find(it.album + "|||" + it.artist);
+                    if (f2 != g_albumMetaCache.end()) {
+                        artUrl = f2->second.artworkUrl;
+                    }
+                }
+            }
             tracksArr.push_back({
                 {"title", it.title},
                 {"artist", it.artist},
                 {"album", it.album},
                 {"adamId", it.adamId},
-                {"date", it.date}
+                {"date", it.date},
+                {"artworkUrl", artUrl}
             });
         }
 
         json albumsArr = json::array();
         for (const auto& alb : recentAlbums) {
+            std::string albId = "";
+            std::string artUrl = "";
+            std::string relDate = "";
+            {
+                std::lock_guard lock(g_albumMetaMutex);
+                auto it = g_albumMetaCache.find(alb.firstAdamId);
+                if (it != g_albumMetaCache.end()) {
+                    albId = it->second.albumId;
+                    artUrl = it->second.artworkUrl;
+                    relDate = it->second.releaseDate;
+                } else {
+                    auto it2 = g_albumMetaCache.find(alb.name + "|||" + alb.artist);
+                    if (it2 != g_albumMetaCache.end()) {
+                        albId = it2->second.albumId;
+                        artUrl = it2->second.artworkUrl;
+                        relDate = it2->second.releaseDate;
+                    }
+                }
+            }
             albumsArr.push_back({
                 {"name", alb.name},
                 {"artist", alb.artist},
                 {"trackCount", alb.trackCount},
-                {"firstAdamId", alb.firstAdamId}
+                {"firstAdamId", alb.firstAdamId},
+                {"albumId", albId},
+                {"artworkUrl", artUrl},
+                {"releaseDate", relDate}
             });
         }
 
