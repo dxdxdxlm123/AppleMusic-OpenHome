@@ -39,7 +39,7 @@ using ammod::audio_v2::kHostDataEventPrefix;
 using ammod::audio_v2::kHostPipePrefix;
 using ammod::audio_v2::kHostRingPrefix;
 using ammod::audio_v2::kHostSpaceEventPrefix;
-using ammod::audio_v2::kSharedRingBytes;
+using ammod::audio_v2::kSharedRingFallbackBytes;
 using ammod::audio_v2::kSharedRingMagic;
 using ammod::audio_v2::kSharedRingMaxFrames;
 using ammod::audio_v2::kSharedRingVersion;
@@ -193,15 +193,27 @@ ammod::audio_v2::LocalPlaybackTuning ReadTuning() noexcept {
     return tuning;
 }
 
-// Size of the large-page section that backs the cross-process ring. This is a
-// *reservation/pinning* size, not the logical ring depth: OpenTarget() still
-// clamps capacityFrames to kSharedRingMaxFrames (~10 s at 192 kHz), so a big
-// pool buys TLB reach and guaranteed residency without adding playback delay.
+// Size of the large-page section that backs the cross-process ring. The
+// logical ring depth is chosen from this (see ReadRingBufferSeconds below);
+// a bigger section means more headroom, not a fixed 10 s ceiling anymore.
 std::uint32_t ReadLargePagePoolMb() noexcept {
     const std::wstring path = ExeDirectory() + L"\\am-exclusive.ini";
     const auto value = static_cast<std::uint32_t>(
         GetPrivateProfileIntW(L"local", L"large_page_pool_mb", 512, path.c_str()));
     if (value == 0 || value > 4096u) return 512u;
+    return value;
+}
+
+// Logical ring depth in seconds at the current sample rate. The hook sends
+// the same default as a hint, but the host owns the final number because it
+// alone knows the mapped section size. 120 s = ~176 MiB at 192 kHz / 2 ch /
+// 32-bit; the 512 MiB large-page pool covers it with room to spare.
+std::uint32_t ReadRingBufferSeconds() noexcept {
+    const std::wstring path = ExeDirectory() + L"\\am-exclusive.ini";
+    const auto value = static_cast<std::uint32_t>(
+        GetPrivateProfileIntW(L"local", L"ring_buffer_seconds", 120, path.c_str()));
+    if (value < 30u) return 30u;
+    if (value > 600u) return 600u;
     return value;
 }
 
@@ -240,12 +252,26 @@ HRESULT OpenTarget(HostState& state, const HostMessage& request) noexcept {
     }
 
     if (state.header) {
-        std::uint32_t capacity = request.ringFrames;
+        // v0.3.5: depth is seconds * sampleRate, not a fixed ~10 s. It is
+        // clamped first to the protocol ceiling, then to the section that
+        // was actually mapped (large-page ladder may have stepped down).
+        // request.ringFrames stays as a hook-side hint for wire compatibility.
+        const std::uint32_t seconds = ReadRingBufferSeconds();
+        const std::uint64_t desired =
+            static_cast<std::uint64_t>(params.format.sampleRate) * seconds;
+        std::uint32_t capacity = static_cast<std::uint32_t>(
+            desired > kSharedRingMaxFrames ? kSharedRingMaxFrames : desired);
         if (capacity < 4096u) capacity = 4096u;
-        if (capacity > kSharedRingMaxFrames) capacity = kSharedRingMaxFrames;
         if (state.ringCapacityFrames != 0 && capacity > state.ringCapacityFrames) {
             capacity = state.ringCapacityFrames;
         }
+        wchar_t detail[160]{};
+        _snwprintf_s(detail, sizeof(detail) / sizeof(detail[0]), _TRUNCATE,
+                     L"ring depth: %u s target, %u frames (~%u s at %u Hz), section cap %u frames",
+                     seconds, capacity,
+                     params.format.sampleRate ? capacity / params.format.sampleRate : 0u,
+                     params.format.sampleRate, state.ringCapacityFrames);
+        Log(detail);
         ammod::audio_v2::SharedRingReset(
             state.header, params.format.sampleRate,
             params.format.validBits ? params.format.validBits : params.format.containerBits,
@@ -383,10 +409,10 @@ int wmain(int argc, wchar_t** argv) {
         (getLargePageMinimum && getLargePageMinimum() != 0)
             ? static_cast<std::size_t>(getLargePageMinimum()) : (2ull << 20);
 
-    // The section is a pinned large-page *pool*, not the logical ring depth:
-    // OpenTarget() still clamps capacityFrames to kSharedRingMaxFrames (~10 s
-    // at 192 kHz). The extra space buys TLB reach and guaranteed residency,
-    // and never turns into extra playback latency.
+    // The section IS the ring's backing store; its size is the hard ceiling
+    // on depth. OpenTarget() picks seconds * sampleRate (default 120 s) and
+    // clamps to whatever the ladder actually mapped. 512 MiB at 192 kHz is
+    // ~349 s of headroom; the ordinary-page fallback is 128 MiB (~87 s).
     const std::uint32_t poolMb = ReadLargePagePoolMb();
     bool usingLargePages = false;
     if (largePagePrivilege) {
@@ -411,7 +437,7 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     if (!state.ringMapping) {
-        state.ringBytes = kSharedRingBytes;
+        state.ringBytes = kSharedRingFallbackBytes;
         state.ringMapping = CreateFileMappingW(
             INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
             static_cast<DWORD>(state.ringBytes), ringName.c_str());
@@ -427,8 +453,9 @@ int wmain(int argc, wchar_t** argv) {
         const std::size_t computedFrames =
             (state.ringBytes - sizeof(SharedRingHeader)) /
             (ammod::audio_v2::kSharedRingChannels * sizeof(std::int32_t));
-        // The pool is deliberately larger than the logical ring. Clamp here
-        // so no later code can mistake the section size for buffer depth.
+        // Hard ceiling only. Unlike v0.3.3, the section size is no longer
+        // collapsed to ~10 s: OpenTarget() now selects a real depth from
+        // ring_buffer_seconds and only clamps to the ceiling + mapped size.
         state.ringCapacityFrames = static_cast<std::uint32_t>(
             computedFrames > kSharedRingMaxFrames ? kSharedRingMaxFrames : computedFrames);
         if (usingLargePages) {

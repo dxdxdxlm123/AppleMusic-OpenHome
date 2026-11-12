@@ -42,6 +42,11 @@ inline constexpr std::uint32_t kHostProtocolVersion = 5;
 // Bump this whenever the wire behaviour changes, not just the struct layout.
 inline constexpr std::uint64_t kHostBuildId = 0x4F524930'4E763035ULL; // "ORIONv05"
 
+// v0.3.5: hook-side hint for ring depth, in seconds at the source rate
+// (replaces the old fixed 10 s). The audiohost owns the final capacity
+// because only it knows the section size that was actually mapped.
+inline constexpr std::uint32_t kDefaultRingBufferSeconds = 120u;
+
 // Which engine the audiohost should build: 0 WASAPI, 1 DLNA, 2 ASIO, 3 RAAT.
 enum class HostTargetKind : std::uint32_t {
     Wasapi = 0,

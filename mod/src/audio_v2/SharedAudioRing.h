@@ -20,8 +20,15 @@ namespace ammod::audio_v2 {
 inline constexpr std::uint32_t kSharedRingMagic = 0x31454D41; // 'AME1'
 inline constexpr std::uint32_t kSharedRingVersion = 2;
 inline constexpr std::uint32_t kSharedRingChannels = 2;
-// 2,000,000 frames * 2 ch * 4 B = 16 MB. At 192 kHz that is ~10.4 s.
-inline constexpr std::uint32_t kSharedRingMaxFrames = 2000000u;
+// v0.3.5: the ring is no longer capped at ~10 s. A 512 MiB section holds
+// 67,108,800 frames = ~349 s (5.8 min) at 192 kHz / 2 ch / 32-bit Q31.
+// The logical depth is chosen per format by the host (default 120 s), and is
+// always clamped to both this ceiling and the mapped section's real capacity.
+inline constexpr std::uint32_t kSharedRingMaxFrames = 67108800u;
+// Ordinary-page fallback still needs to clear one minute at 192 kHz:
+// 128 MiB = ~87 s. Keeping it smaller than the large-page pool avoids a
+// 512 MiB working-set floor / VirtualLock request on the fallback path.
+inline constexpr std::size_t kSharedRingFallbackBytes = 128ull << 20;
 
 struct SharedRingHeader final {
     std::uint32_t magic{};

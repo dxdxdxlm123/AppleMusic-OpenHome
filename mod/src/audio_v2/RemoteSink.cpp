@@ -195,9 +195,12 @@ HRESULT RemoteSink::Open(const AudioSinkOpenParams& params) noexcept {
     open.format = params.format;
     open.periodFrames = params.periodFrames;
     open.bufferMs = params.periodFrames ? params.periodFrames : 20;
+    // v0.3.5: the 10 s ceiling is gone. Ask for 120 s at the source rate;
+    // the host clamps to kSharedRingMaxFrames and to the section it mapped.
     open.ringFrames = std::min<std::uint32_t>(
         kSharedRingMaxFrames,
-        std::max<std::uint32_t>(params.format.sampleRate * 10u, 48000u));
+        std::max<std::uint32_t>(
+            params.format.sampleRate * kDefaultRingBufferSeconds, 48000u));
     open.alignmentRetries = params.alignmentRetries;
     open.streamBufferMs = params.streamBufferMs;
     open.streamSeconds = params.streamSeconds;
