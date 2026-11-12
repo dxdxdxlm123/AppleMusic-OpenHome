@@ -69,6 +69,32 @@ void RebindDiag(const AudioCoreRuntimeCallbacks& cb, const wchar_t* tag,
 
 } // namespace
 
+// v0.3.5 P0-1. player_mode=hifi replaces profile.kind with Remote, which
+// makes every `outputKind_ == <engine>` branch dead. In-process modes still
+// carry the concrete engine, so only the host deployment needs derivation.
+// DLNA is tested first: HostMessage::endpointId holds a UDN for DLNA, so an
+// endpoint-id-first test would misclassify DLNA as WASAPI.
+AudioCoreRuntime::EffectiveEngine AudioCoreRuntime::ResolvedEngine() const noexcept {
+    switch (outputKind_) {
+    case AudioSinkKind::Dlna:
+        return EffectiveEngine::Dlna;
+    case AudioSinkKind::Asio:
+        return EffectiveEngine::Asio;
+    case AudioSinkKind::Raat:
+        return EffectiveEngine::Raat;
+    case AudioSinkKind::Wasapi:
+        return EffectiveEngine::Wasapi;
+    case AudioSinkKind::Remote:
+        break;
+    }
+    if (!dlnaTarget_.location.empty()) return EffectiveEngine::Dlna;
+    if (!raatTarget_.address.empty() || !raatTarget_.deviceId.empty()) {
+        return EffectiveEngine::Raat;
+    }
+    if (!asioDriverClsid_.empty()) return EffectiveEngine::Asio;
+    return EffectiveEngine::Wasapi;
+}
+
 AudioCoreRuntime::AudioCoreRuntime() noexcept
     : coordinator_(coordinatorOwner_.Get()), tap_(coordinator_) {}
 
@@ -1945,7 +1971,7 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
                        reinterpret_cast<std::uintptr_t>(graphConverter_), trackChangePending_);
             return;
         }
-        if (outputKind_ == AudioSinkKind::Dlna &&
+        if (ResolvedEngine() == EffectiveEngine::Dlna &&
             coordinator_.Phase() == AudioCoreGatePhase::Active &&
             !coordinator_.EndOfStreamSubmitted()) {
             const bool userInitiated =
@@ -2036,15 +2062,14 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
     config.sink.onLifecycle = callbacks_.onSinkLifecycle;
     // JPLAY-style deep reservoir applies to local outputs only. The network
     // renderer keeps its own buffer policy completely untouched.
-    const bool isNetworkSink = outputKind_ == AudioSinkKind::Dlna ||
-                               outputKind_ == AudioSinkKind::Raat ||
-                               (outputKind_ == AudioSinkKind::Remote &&
-                                (!dlnaTarget_.location.empty() || !raatTarget_.address.empty() || !raatTarget_.deviceId.empty()));
+    const bool isNetworkSink = ResolvedEngine() == EffectiveEngine::Dlna ||
+                               ResolvedEngine() == EffectiveEngine::Raat;
     const bool localTuned = !isNetworkSink && localTuning_.enabled;
     std::size_t queueCapacity = kProductionQueueCapacity;
-    // r-test v0.3.4 / fix 1: only the RAAT path needs the deeper startup
-    // reservoir; local and DLNA buffer policies stay exactly as before.
-    if (outputKind_ == AudioSinkKind::Raat) {
+    // v0.3.5: fix 1 gated on a bare `outputKind_ == Raat`, which is dead in
+    // hifi mode because profile.kind becomes Remote. Gate on the resolved
+    // engine so the deeper startup reservoir actually applies there.
+    if (ResolvedEngine() == EffectiveEngine::Raat) {
         queueCapacity = kRaatStartupQueueCapacity;
     }
     std::uint64_t reservoirFrames = 0;
@@ -2109,7 +2134,7 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
     requiredPrebufferFrames_ = std::max<std::uint32_t>(
         config.sink.periodFrames ? config.sink.periodFrames * 5u : 0u,
         std::max<std::uint32_t>(1u, format.sampleRate / 10u));
-    if (outputKind_ == AudioSinkKind::Dlna) {
+    if (ResolvedEngine() == EffectiveEngine::Dlna) {
         const auto networkFrames = static_cast<std::uint64_t>(format.sampleRate) *
             std::max<std::uint32_t>(streamBufferMs_, 200u) / 1000u;
         requiredPrebufferFrames_ = std::max<std::uint32_t>(
@@ -2125,16 +2150,14 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
             requiredPrebufferFrames_, static_cast<std::uint32_t>(usableFrames));
     }
     const auto rate = static_cast<std::uint64_t>(format.sampleRate);
-    const bool isNetworkTarget = outputKind_ == AudioSinkKind::Dlna ||
-                                 outputKind_ == AudioSinkKind::Raat ||
-                                 (outputKind_ == AudioSinkKind::Remote &&
-                                  (!dlnaTarget_.location.empty() || !raatTarget_.address.empty() || !raatTarget_.deviceId.empty()));
+    const auto engine = ResolvedEngine();
+    const bool isNetworkTarget = engine == EffectiveEngine::Dlna ||
+                                 engine == EffectiveEngine::Raat;
     if (isNetworkTarget) {
         // Keep the reservoir near the configured target. The existing 9/10/11 ms
         // software pump performs the coarse drift correction; +/-10% covers
         // ordinary DAC clock drift with a 1-1.5 s reservoir.
-        const bool isRaatStream = outputKind_ == AudioSinkKind::Raat ||
-                                  (outputKind_ == AudioSinkKind::Remote && (!raatTarget_.address.empty() || !raatTarget_.deviceId.empty()));
+        const bool isRaatStream = engine == EffectiveEngine::Raat;
         const auto effectiveBufferMs = isRaatStream
             ? std::min<std::uint32_t>(streamBufferMs_, 1000u)
             : streamBufferMs_;
@@ -2353,7 +2376,17 @@ void AudioCoreRuntime::FinalizeEndOfStreamDrainLocked() noexcept {
     // v7 diagnostic: DlnaSink holds natural live EOS for 35 s after the FLAC
     // tail. Do not retire that session through the old 3 s fallback before the
     // delayed EOS is submitted. Other outputs retain their original timeout.
-    const auto drainTimeoutMs = outputKind_ == AudioSinkKind::Dlna ? 45000u : 3000u;
+    // v0.3.5 P0-1: resolve the real engine instead of profile.kind. Under
+    // hifi the old expression saw Remote and every non-DLNA sink fell into
+    // the 3000 ms bucket - including RAAT's tail wait. The host now stamps
+    // real drain evidence in the ring, so this timeout is only a safety net.
+    const auto engine = ResolvedEngine();
+    const auto drainTimeoutMs =
+        engine == EffectiveEngine::Dlna ? 45000u :
+        engine == EffectiveEngine::Raat ? 20000u : 3000u;
+    // Read-only diagnostic: proves which engine the branches actually saw.
+    RebindDiag(callbacks_, L"engine-resolved", static_cast<std::uint64_t>(engine),
+               drainTimeoutMs, static_cast<std::uint64_t>(outputKind_));
     const bool timedOut = endOfStreamDrainStartTick_ != 0 &&
                           now - endOfStreamDrainStartTick_ > drainTimeoutMs;
     if (!complete && !timedOut) {

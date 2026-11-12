@@ -18,7 +18,7 @@
 namespace ammod::audio_v2 {
 
 inline constexpr std::uint32_t kSharedRingMagic = 0x31454D41; // 'AME1'
-inline constexpr std::uint32_t kSharedRingVersion = 1;
+inline constexpr std::uint32_t kSharedRingVersion = 2;
 inline constexpr std::uint32_t kSharedRingChannels = 2;
 // 2,000,000 frames * 2 ch * 4 B = 16 MB. At 192 kHz that is ~10.4 s.
 inline constexpr std::uint32_t kSharedRingMaxFrames = 2000000u;
@@ -40,6 +40,15 @@ struct SharedRingHeader final {
     alignas(8) std::atomic<std::uint64_t> producedFrames{};
     alignas(8) std::atomic<std::uint64_t> droppedFrames{};
     alignas(8) std::atomic<std::uint64_t> underrunFrames{};
+    // v2: host -> hook completion signal. The host stamps the generation of
+    // the sink that actually finished its device-clock drain; the hook only
+    // accepts a stamp matching the generation it opened. Without this the
+    // Remote sink's EndOfStreamComplete() was a dead flag and every track had
+    // to be retired by the runtime's timeout instead of real drain evidence.
+    alignas(8) std::atomic<std::uint64_t> eosCompleteGeneration{};
+    // A never-used generation is 0, so a freshly reset ring cannot look like
+    // a completed one. Generations handed out by the hook start at 1.
+    inline static constexpr std::uint64_t kNoGeneration = 0;
 };
 
 inline constexpr std::size_t kSharedRingHeaderBytes = sizeof(SharedRingHeader);
@@ -70,6 +79,10 @@ inline void SharedRingReset(SharedRingHeader* header, std::uint32_t sampleRate,
     header->producedFrames.store(0, std::memory_order_relaxed);
     header->droppedFrames.store(0, std::memory_order_relaxed);
     header->underrunFrames.store(0, std::memory_order_relaxed);
+    // Retire any completion stamp left by the previous track before the new
+    // generation becomes visible to the hook.
+    header->eosCompleteGeneration.store(SharedRingHeader::kNoGeneration,
+                                        std::memory_order_release);
 }
 
 // Producer side (hook). Never blocks the caller for long: the pump thread may
@@ -142,6 +155,12 @@ public:
         if (header_) header_->endOfStream = 1;
     }
 
+    // True only when the host has confirmed drain of this exact generation.
+    bool HostEosComplete(std::uint64_t generation) const noexcept {
+        if (!header_ || generation == SharedRingHeader::kNoGeneration) return false;
+        return header_->eosCompleteGeneration.load(std::memory_order_acquire) == generation;
+    }
+
     void MarkHostState(std::uint32_t value) noexcept {
         if (header_) header_->hostState = value;
     }
@@ -179,6 +198,16 @@ public:
     }
 
     bool EndOfStream() const noexcept { return header_ && header_->endOfStream != 0; }
+
+    // Called by the audiohost's EOS monitor thread once the real sink reports
+    // completion. Stamping generation (rather than a bool) prevents a late
+    // completion from the previous track from retiring the next one.
+    void MarkEosComplete() noexcept {
+        if (!header_) return;
+        const auto generation = header_->generation.load(std::memory_order_acquire);
+        if (generation == SharedRingHeader::kNoGeneration) return;
+        header_->eosCompleteGeneration.store(generation, std::memory_order_release);
+    }
 
     std::uint32_t Read(std::int32_t* destination, std::uint32_t frames) noexcept {
         if (!header_ || !destination || frames == 0 || !data_) return 0;

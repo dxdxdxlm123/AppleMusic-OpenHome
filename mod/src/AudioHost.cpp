@@ -16,6 +16,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -30,6 +31,7 @@ using ammod::audio_v2::HostMessageType;
 using ammod::audio_v2::HostObjectName;
 using ammod::audio_v2::HostTargetKind;
 using ammod::audio_v2::IAudioSink;
+using ammod::audio_v2::kHostBuildId;
 using ammod::audio_v2::kHostProtocolVersion;
 using ammod::audio_v2::RingPcmSource;
 using ammod::audio_v2::SharedRingHeader;
@@ -44,6 +46,11 @@ using ammod::audio_v2::kSharedRingVersion;
 
 std::wstring g_logPath;
 CRITICAL_SECTION g_logLock;
+// v5: ServeClient() blocks in ReadMessage(), so sink completion is observed
+// by a dedicated monitor thread. This lock only guards the unique_ptr itself;
+// sink teardown is moved out before Stop()/Close() so the lock stays short.
+CRITICAL_SECTION g_sinkLock;
+std::atomic<bool> g_eosMonitorRunning{false};
 
 void Log(const wchar_t* text) noexcept {
     if (!text || g_logPath.empty()) return;
@@ -117,12 +124,39 @@ bool EnableLockMemoryPrivilege() noexcept {
 }
 
 void CloseSink(HostState& state) noexcept {
-    if (state.sink) {
-        state.sink->Stop();
-        state.sink->Close();
-        state.sink.reset();
+    // Retire the pointer under the lock, then tear the sink down outside it.
+    std::unique_ptr<IAudioSink> doomed;
+    EnterCriticalSection(&g_sinkLock);
+    doomed = std::move(state.sink);
+    LeaveCriticalSection(&g_sinkLock);
+    if (doomed) {
+        doomed->Stop();
+        doomed->Close();
     }
     if (state.header) state.header->hostState = 0;
+}
+
+// ServeClient() owns the only pipe loop and blocks on ReadMessage(); there is
+// no idle window to poll the sink. A 10 ms monitor is cheap and keeps the
+// completion stamp off the audio threads entirely.
+DWORD WINAPI EosMonitorThunk(void* context) noexcept {
+    auto* state = static_cast<HostState*>(context);
+    while (g_eosMonitorRunning.load(std::memory_order_acquire)) {
+        bool complete = false;
+        EnterCriticalSection(&g_sinkLock);
+        if (state->sink) complete = state->sink->EndOfStreamComplete();
+        LeaveCriticalSection(&g_sinkLock);
+        if (complete && state->header) {
+            const auto generation =
+                state->header->generation.load(std::memory_order_acquire);
+            if (generation != SharedRingHeader::kNoGeneration) {
+                state->header->eosCompleteGeneration.store(
+                    generation, std::memory_order_release);
+            }
+        }
+        Sleep(10);
+    }
+    return 0;
 }
 
 bool ReadMessage(HANDLE pipe, HostMessage& message) noexcept {
@@ -157,6 +191,18 @@ ammod::audio_v2::LocalPlaybackTuning ReadTuning() noexcept {
     tuning.maxQueueBlocks = number(L"max_queue_blocks", 4096);
     tuning.Clamp();
     return tuning;
+}
+
+// Size of the large-page section that backs the cross-process ring. This is a
+// *reservation/pinning* size, not the logical ring depth: OpenTarget() still
+// clamps capacityFrames to kSharedRingMaxFrames (~10 s at 192 kHz), so a big
+// pool buys TLB reach and guaranteed residency without adding playback delay.
+std::uint32_t ReadLargePagePoolMb() noexcept {
+    const std::wstring path = ExeDirectory() + L"\\am-exclusive.ini";
+    const auto value = static_cast<std::uint32_t>(
+        GetPrivateProfileIntW(L"local", L"large_page_pool_mb", 512, path.c_str()));
+    if (value == 0 || value > 4096u) return 512u;
+    return value;
 }
 
 HRESULT OpenTarget(HostState& state, const HostMessage& request) noexcept {
@@ -205,23 +251,29 @@ HRESULT OpenTarget(HostState& state, const HostMessage& request) noexcept {
             params.format.validBits ? params.format.validBits : params.format.containerBits,
             params.format.containerBits,
             static_cast<std::uint32_t>(params.format.encoding),
-            0, capacity);
+            request.generation, capacity);
     }
 
+    std::unique_ptr<IAudioSink> created;
     if (!params.raat.address.empty() || !params.raat.deviceId.empty()) {
-        state.sink = std::make_unique<ammod::audio_v2::RaatSink>();
+        created = std::make_unique<ammod::audio_v2::RaatSink>();
     } else if (!params.dlna.location.empty()) {
         // Network renderer: the engine owns the SOAP control client, the
         // HTTP stream server and the encoder, none of which belong in the
         // Apple Music process.
-        state.sink = std::make_unique<ammod::audio_v2::DlnaSink>();
+        created = std::make_unique<ammod::audio_v2::DlnaSink>();
     } else if (!params.asioDriverClsid.empty()) {
-        state.sink = std::make_unique<ammod::audio_v2::AsioExclusiveSink>();
+        created = std::make_unique<ammod::audio_v2::AsioExclusiveSink>();
     } else {
-        state.sink = std::make_unique<ammod::audio_v2::WasapiExclusiveSink>();
+        created = std::make_unique<ammod::audio_v2::WasapiExclusiveSink>();
     }
-    if (!state.sink) return E_OUTOFMEMORY;
-    return state.sink->Open(params);
+    if (!created) return E_OUTOFMEMORY;
+    const HRESULT hr = created->Open(params);
+    if (FAILED(hr)) return hr;
+    EnterCriticalSection(&g_sinkLock);
+    state.sink = std::move(created);
+    LeaveCriticalSection(&g_sinkLock);
+    return S_OK;
 }
 
 void ServeClient(HostState& state) noexcept {
@@ -239,7 +291,9 @@ void ServeClient(HostState& state) noexcept {
             // A mismatched layout can only be refused; the hook falls back to
             // its in-process sinks instead of corrupting the ring.
             reply.protocol = kHostProtocolVersion;
-            reply.result = request.protocol == kHostProtocolVersion
+            reply.buildId = kHostBuildId;
+            reply.result = (request.protocol == kHostProtocolVersion &&
+                            request.buildId == kHostBuildId)
                 ? S_OK : E_NOT_VALID_STATE;
             break;
         case HostMessageType::Open:
@@ -278,6 +332,7 @@ void ServeClient(HostState& state) noexcept {
 
 int wmain(int argc, wchar_t** argv) {
     InitializeCriticalSection(&g_logLock);
+    InitializeCriticalSection(&g_sinkLock);
     g_logPath = ExeDirectory() + L"\\am-exclusive-audiohost.log";
 
     std::uint32_t session = 0;
@@ -314,23 +369,45 @@ int wmain(int argc, wchar_t** argv) {
     const bool largePagePrivilege = EnableLockMemoryPrivilege();
     Log(largePagePrivilege ? L"lock-memory privilege enabled"
                            : L"lock-memory privilege unavailable");
-    // Ladder: 16 -> 8 -> 4 -> 2 MB large-page sections, then ordinary pages.
-    // A smaller section just means a shorter reservoir; the hook reads the
-    // final capacity from the header. Large pages need the privilege above;
-    // without it we go straight to the ordinary section and rely on the hard
-    // working-set floor plus VirtualLock.
-    for (const std::size_t megabytes : {std::size_t{16}, std::size_t{8},
-                                        std::size_t{4}, std::size_t{2}}) {
-        if (!largePagePrivilege) break;
-        const std::size_t bytes = megabytes << 20;
-        state.ringMapping = CreateFileMappingW(
-            INVALID_HANDLE_VALUE, nullptr,
-            PAGE_READWRITE | SEC_COMMIT | SEC_LARGE_PAGES, 0,
-            static_cast<DWORD>(bytes), ringName.c_str());
-        if (state.ringMapping) {
-            state.ringBytes = bytes;
-            Log(L"ring uses large pages");
-            break;
+    if (!largePagePrivilege) {
+        Log(L"large pages need SeLockMemoryPrivilege granted to the host account "
+            L"(Local Security Policy > Lock pages in memory), not just enabled in the token");
+    }
+    // Query the platform large-page unit dynamically (usually 2 MB) so the
+    // requested pool can be rounded to a legal section size without hardcoding
+    // an SDK level.
+    using GetLargePageMinimumFn = SIZE_T(WINAPI*)();
+    auto getLargePageMinimum = reinterpret_cast<GetLargePageMinimumFn>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetLargePageMinimum"));
+    const std::size_t largePageUnit =
+        (getLargePageMinimum && getLargePageMinimum() != 0)
+            ? static_cast<std::size_t>(getLargePageMinimum()) : (2ull << 20);
+
+    // The section is a pinned large-page *pool*, not the logical ring depth:
+    // OpenTarget() still clamps capacityFrames to kSharedRingMaxFrames (~10 s
+    // at 192 kHz). The extra space buys TLB reach and guaranteed residency,
+    // and never turns into extra playback latency.
+    const std::uint32_t poolMb = ReadLargePagePoolMb();
+    bool usingLargePages = false;
+    if (largePagePrivilege) {
+        for (std::size_t megabytes = poolMb; megabytes >= 1u; megabytes /= 2u) {
+            std::size_t bytes = static_cast<std::size_t>(megabytes) << 20;
+            bytes = ((bytes + largePageUnit - 1) / largePageUnit) * largePageUnit;
+            if (bytes == 0 || bytes > (4ull << 30)) continue;
+            state.ringMapping = CreateFileMappingW(
+                INVALID_HANDLE_VALUE, nullptr,
+                PAGE_READWRITE | SEC_COMMIT | SEC_LARGE_PAGES, 0,
+                static_cast<DWORD>(bytes), ringName.c_str());
+            if (state.ringMapping) {
+                state.ringBytes = bytes;
+                usingLargePages = true;
+                wchar_t detail[128]{};
+                _snwprintf_s(detail, sizeof(detail) / sizeof(detail[0]), _TRUNCATE,
+                             L"ring uses large pages: %u MB pool, %llu MB section",
+                             poolMb, static_cast<unsigned long long>(bytes >> 20));
+                Log(detail);
+                break;
+            }
         }
     }
     if (!state.ringMapping) {
@@ -344,19 +421,35 @@ int wmain(int argc, wchar_t** argv) {
         ? MapViewOfFile(state.ringMapping, FILE_MAP_ALL_ACCESS, 0, 0, 0) : nullptr;
     if (state.ringView && state.ringBytes != 0) {
         // Commit and touch every page once so the render thread never takes a
-        // demand-zero fault on the audio path.
+        // demand-zero fault on the audio path. For a 512 MB pool this is a
+        // one-off startup cost, paid before the first track opens.
         std::memset(state.ringView, 0, state.ringBytes);
-        state.ringCapacityFrames = static_cast<std::uint32_t>(
+        const std::size_t computedFrames =
             (state.ringBytes - sizeof(SharedRingHeader)) /
-            (ammod::audio_v2::kSharedRingChannels * sizeof(std::int32_t)));
-        // Ordinary pages still need to be pinned. The hard working-set floor
-        // is what makes VirtualLock cover the whole ring; if either step is
-        // refused the ring keeps working, just less protected.
-        const bool floor = ammod::audio_v2::EnsureLockableWorkingSet(state.ringBytes);
-        const bool locked = VirtualLock(state.ringView, state.ringBytes) != FALSE;
-        Log(locked ? L"ring locked in memory"
-                   : (floor ? L"ring not locked; working-set floor only"
-                            : L"ring not locked; no working-set floor"));
+            (ammod::audio_v2::kSharedRingChannels * sizeof(std::int32_t));
+        // The pool is deliberately larger than the logical ring. Clamp here
+        // so no later code can mistake the section size for buffer depth.
+        state.ringCapacityFrames = static_cast<std::uint32_t>(
+            computedFrames > kSharedRingMaxFrames ? kSharedRingMaxFrames : computedFrames);
+        if (usingLargePages) {
+            // SEC_LARGE_PAGES sections are already non-pageable and resident;
+            // raising a 512 MB working-set floor would be both unnecessary and
+            // likely refused by the quota. Try VirtualLock as a best effort
+            // and report it, but never treat its refusal as a degradation.
+            const bool locked = VirtualLock(state.ringView, state.ringBytes) != FALSE;
+            Log(locked ? L"ring pinned: large pages resident + VirtualLock"
+                       : L"ring pinned: large pages resident (VirtualLock quota-limited, "
+                         L"large pages cannot be paged out)");
+        } else {
+            // Ordinary pages still need to be pinned. The hard working-set
+            // floor is what makes VirtualLock cover the whole ring; if either
+            // step is refused the ring keeps working, just less protected.
+            const bool floor = ammod::audio_v2::EnsureLockableWorkingSet(state.ringBytes);
+            const bool locked = VirtualLock(state.ringView, state.ringBytes) != FALSE;
+            Log(locked ? L"ring locked in memory"
+                       : (floor ? L"ring not locked; working-set floor only"
+                                : L"ring not locked; no working-set floor"));
+        }
     }
     state.dataEvent = CreateEventW(nullptr, FALSE, FALSE, dataName.c_str());
     state.spaceEvent = CreateEventW(nullptr, FALSE, FALSE, spaceName.c_str());
@@ -381,6 +474,15 @@ int wmain(int argc, wchar_t** argv) {
     if (state.pipe == INVALID_HANDLE_VALUE) {
         Log(L"init failed: named pipe unavailable");
         return 1;
+    }
+    // v5: the pipe loop blocks, so sink completion is published to the ring
+    // from a separate monitor. Started once; the process exits with it running.
+    g_eosMonitorRunning.store(true, std::memory_order_release);
+    HANDLE monitorThread = CreateThread(nullptr, 0, &EosMonitorThunk, &state, 0, nullptr);
+    if (monitorThread) {
+        CloseHandle(monitorThread);
+    } else {
+        Log(L"warning: eos monitor thread unavailable; host completion will not be signalled");
     }
     Log(L"audiohost ready");
 

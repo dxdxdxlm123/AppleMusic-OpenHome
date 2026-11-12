@@ -118,6 +118,10 @@ bool RemoteSink::Connect() noexcept {
         LogRemote(L"connect: host protocol mismatch");
         return false;
     }
+    if (reply.buildId != kHostBuildId) {
+        LogRemote(L"connect: host build-id mismatch, falling back in-process");
+        return false;
+    }
     LogRemote(L"connect: handshake ok");
     return true;
 }
@@ -197,7 +201,12 @@ HRESULT RemoteSink::Open(const AudioSinkOpenParams& params) noexcept {
     open.alignmentRetries = params.alignmentRetries;
     open.streamBufferMs = params.streamBufferMs;
     open.streamSeconds = params.streamSeconds;
-    open.generation = 0;
+    // v5: the host stamps EOS completion with this generation. A monotonic
+    // value per Open() is what lets the hook reject a late stamp from the
+    // previous track (the host used to hardcode 0, which made every track
+    // look like the same generation).
+    open.generation = ++generation_;
+    open.buildId = kHostBuildId;
     if (targetKind_ == static_cast<std::uint32_t>(HostTargetKind::Raat)) {
         wcsncpy_s(open.endpointId, params.raat.deviceId.c_str(), _TRUNCATE);
         wcsncpy_s(open.asioName, params.raat.friendlyName.c_str(), _TRUNCATE);
@@ -289,7 +298,6 @@ HRESULT RemoteSink::Start(IIntegerPcmSource& source) noexcept {
     source_ = &source;
     stopPump_.store(false, std::memory_order_release);
     eosSubmitted_.store(false, std::memory_order_release);
-    eosComplete_.store(false, std::memory_order_release);
     pumpStopEvent_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     pumpThread_ = CreateThread(nullptr, 0, &RemoteSink::PumpThreadThunk, this, 0, nullptr);
     if (!pumpThread_) {

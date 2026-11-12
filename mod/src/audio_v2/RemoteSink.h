@@ -34,7 +34,13 @@ enum class HostMessageType : std::uint32_t {
 // identical; PcmFormat is POD and contains no pointers. Bump kHostProtocol
 // whenever the layout changes - the host refuses older/newer peers, and the
 // hook falls back to its in-process sinks.
-inline constexpr std::uint32_t kHostProtocolVersion = 4;
+inline constexpr std::uint32_t kHostProtocolVersion = 5;
+
+// v5: both peers must be built from the same source revision. The old v4
+// handshake only compared a protocol number, so a freshly built hook could
+// silently pair with an online audiohost that lacked the matching EOS path.
+// Bump this whenever the wire behaviour changes, not just the struct layout.
+inline constexpr std::uint64_t kHostBuildId = 0x4F524930'4E763035ULL; // "ORIONv05"
 
 // Which engine the audiohost should build: 0 WASAPI, 1 DLNA, 2 ASIO, 3 RAAT.
 enum class HostTargetKind : std::uint32_t {
@@ -60,6 +66,7 @@ struct HostMessage final {
     std::uint32_t streamBufferMs{0};
     std::uint32_t streamSeconds{0};
     std::uint64_t generation{};
+    std::uint64_t buildId{kHostBuildId};
     wchar_t asioClsid[64]{};
     wchar_t asioName[128]{};
     // WASAPI: endpoint id. DLNA: the renderer's UDN. RAAT: deviceId.
@@ -133,8 +140,11 @@ public:
                          : eosSubmitted_.load(std::memory_order_acquire);
     }
     bool EndOfStreamComplete() const noexcept override {
-        return fallback_ ? fallback_->EndOfStreamComplete()
-                         : eosComplete_.load(std::memory_order_acquire);
+        if (fallback_) return fallback_->EndOfStreamComplete();
+        // No local flag: completion is owned by the host, which alone can see
+        // the real sink's device-clock drain. The generation check rejects a
+        // stamp from the previous track.
+        return ring_.HostEosComplete(generation_);
     }
     void SetResumeBlocked(bool blocked) noexcept override {
         if (fallback_) {
@@ -178,11 +188,13 @@ private:
     std::atomic<bool> stopPump_{};
     std::atomic<bool> resumeBlocked_{};
     std::atomic<bool> eosSubmitted_{};
-    std::atomic<bool> eosComplete_{};
     std::atomic<AudioSinkState> state_{AudioSinkState::Closed};
     AudioSinkStats stats_{};
     std::uint32_t sessionId_{};
     std::uint32_t targetKind_{static_cast<std::uint32_t>(HostTargetKind::Wasapi)};
+    // v5: a monotonic generation per Open() so the host's completion stamp
+    // can be matched to exactly one track. Starts at 1 (0 means "no stamp").
+    std::uint64_t generation_{SharedRingHeader::kNoGeneration};
 };
 
 } // namespace ammod::audio_v2

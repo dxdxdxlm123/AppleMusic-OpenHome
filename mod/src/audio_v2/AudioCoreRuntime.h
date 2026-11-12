@@ -325,6 +325,13 @@ private:
                      PcmFormat& output) const noexcept;
     std::uint32_t PeriodFrames(std::uint32_t sampleRate) const noexcept;
 
+    // v0.3.5 P0-1: player_mode=hifi collapses profile.kind to Remote, so any
+    // `outputKind_ == <engine>` test silently stops matching. Engine choice
+    // and deployment location are orthogonal; this resolves the real engine
+    // from the target descriptors when the kind only says "host".
+    enum class EffectiveEngine : std::uint8_t { Wasapi, Dlna, Asio, Raat };
+    EffectiveEngine ResolvedEngine() const noexcept;
+
     AudioCoreRuntimeCallbacks callbacks_{};
     std::atomic<bool> running_{};
     std::atomic<bool> uiEnabled_{};
