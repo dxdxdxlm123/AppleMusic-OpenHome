@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(AMExclusive VERSION 0.3.4 LANGUAGES CXX RC)
+project(AMExclusive VERSION 0.3.5 LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "AMExclusive supports Windows x64 only")
