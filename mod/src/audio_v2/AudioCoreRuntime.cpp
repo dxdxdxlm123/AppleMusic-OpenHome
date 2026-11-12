@@ -30,6 +30,11 @@ constexpr std::uint32_t kReferenceTimePerSecond = 10000000u;
 // 512 blocks cover 5.46 s at 192 kHz; the usable-capacity clamp below also
 // prevents oversized custom buffer_ms values from creating the same deadlock.
 constexpr std::size_t kProductionQueueCapacity = 512;
+// r-test v0.3.4 / fix 1: RAAT session setup (SOOD refresh, control connect,
+// load_script x4, setup/stream, audio connect, prefill) can outlast the
+// 512-block reservoir when the source is 192 kHz. A deeper startup queue keeps
+// Apple's decoder callback from being blocked with no sink to drain into.
+constexpr std::size_t kRaatStartupQueueCapacity = 1024;
 
 constexpr std::uint64_t NativePumpLowWaterFrames(std::uint32_t sampleRate) noexcept {
     return (static_cast<std::uint64_t>(sampleRate) * 3u) / 10u;
@@ -1886,7 +1891,15 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
     if (!registry_.Snapshot(graphConverter_, snapshot)) return;
     // Remember the exact observed successor, not a general permission to retry
     // any unbound graph. Keep the old queue/sink until its own drain completes.
-    if ((endOfStreamDrainPending_ || streamingProducerDrainPending_) && graphBound_) {
+    // r-test v0.3.4 / fix 3: Apple Music eagerly pre-decodes the next track
+    // and creates its converter while the current graph is still playing. That
+    // is not a real track boundary; binding it immediately tears down and
+    // rebuilds the graph mid-track. Defer such registrations as a successor
+    // until the genuine end-of-stream boundary, unless the user is pausing or
+    // a graph control transition is already in flight.
+    const bool activeGraph = graphBound_ && graphStarted_ && !graphPaused_ &&
+                             !graphControlPending_ && !userPauseIntent_;
+    if (((endOfStreamDrainPending_ || streamingProducerDrainPending_) || activeGraph) && graphBound_) {
         if (graphConverter_ != boundConverter_.load(std::memory_order_acquire)) {
             pendingGraphBind_ = {graphUnit_, graphConverter_, snapshot.registration.observationId,
                                  snapshot.registrationId};
@@ -2029,6 +2042,11 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
                                 (!dlnaTarget_.location.empty() || !raatTarget_.address.empty() || !raatTarget_.deviceId.empty()));
     const bool localTuned = !isNetworkSink && localTuning_.enabled;
     std::size_t queueCapacity = kProductionQueueCapacity;
+    // r-test v0.3.4 / fix 1: only the RAAT path needs the deeper startup
+    // reservoir; local and DLNA buffer policies stay exactly as before.
+    if (outputKind_ == AudioSinkKind::Raat) {
+        queueCapacity = kRaatStartupQueueCapacity;
+    }
     std::uint64_t reservoirFrames = 0;
     if (localTuned) {
         reservoirFrames = static_cast<std::uint64_t>(format.sampleRate) *
@@ -2388,7 +2406,13 @@ void AudioCoreRuntime::FinalizeEndOfStreamDrainLocked() noexcept {
     // capturedFrames climbs while submittedFrames stalls and the renderer goes
     // silent. Re-arm the drained converter here. OpenEndpoint still requires
     // real PCM before it touches a sink, so a genuine stop stays quiet.
-    if (!graphBound_ && drainedConverter && graphUnit_) {
+    // r-test v0.3.4 / fix 2: re-arm the drained converter only when no
+    // successor is already registered or pending. Reinstating the retired old
+    // converter here made a 192 kHz successor inherit the previous rate.
+    const bool hasSuccessor =
+        (graphConverter_ && graphConverter_ != drainedConverter) ||
+        pendingGraphBind_.converter != nullptr;
+    if (!graphBound_ && drainedConverter && graphUnit_ && !hasSuccessor) {
         ConverterRegistrationSnapshot snapshot{};
         if (registry_.Snapshot(drainedConverter, snapshot) &&
             IsP0Converter(drainedConverter) &&
