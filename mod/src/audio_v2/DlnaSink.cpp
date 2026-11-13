@@ -7,6 +7,7 @@
 #include "../UpnpXml.h"
 #include "DlnaLog.h"
 #include "DlnaResolve.h"
+#include "LocalPlaybackTuning.h"
 
 #include <windows.h>
 #include <oleauto.h>
@@ -1203,6 +1204,8 @@ void DlnaSink::ProducerMain() noexcept {
     // responsive without competing with MMCSS audio threads.
     const int previousPriority = GetThreadPriority(GetCurrentThread());
     (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    // v0.3.5-tuneall: same thread policy as the RAAT path. Real-time safe.
+    LocalPlaybackTuningRuntime::Instance().ApplyToCurrentThread();
     // The sample buffer is sized in int32 slots: one slot per channel per
     // frame. Hard-coding 2 here silently corrupts mono sources (Fill writes
     // half the buffer, PackChunk then reads the uninitialised tail as noise)

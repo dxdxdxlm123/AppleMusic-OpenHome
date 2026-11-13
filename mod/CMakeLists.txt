@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(AMExclusive VERSION 0.3.5 LANGUAGES CXX RC)
+project(AMExclusive VERSION 0.3.7 LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "AMExclusive supports Windows x64 only")
@@ -209,6 +209,18 @@ if(MSVC)
   target_link_options(am_exclusive_broker PRIVATE
     /guard:cf /SUBSYSTEM:WINDOWS /ENTRY:wmainCRTStartup
     "/MANIFESTDEPENDENCY:type='win32' name='Microsoft.Windows.Common-Controls' version='6.0.0.0' processorArchitecture='*' publicKeyToken='6595b64144ccf1df' language='*'")
+
+  # v0.3.5-tune: whole-program optimization plus AVX2 codegen for the audio
+  # components. The reference CPU is a 13th-gen Core (Raptor Lake): AVX2 is
+  # available, AVX-512 is fused off on consumer parts, so /arch:AVX2 is the
+  # highest level that cannot fault at runtime. /GL requires /LTCG at link
+  # time and is compatible with /guard:cf. The setup stub is left alone so the
+  # installer keeps its original size and startup behaviour.
+  foreach(tgt am_exclusive_hook am_exclusive_audiohost am_exclusive_broker
+              am_exclusive_ui am_exclusive_remote am_exclusive_media_control)
+    target_compile_options(${tgt} PRIVATE /arch:AVX2 /GL)
+    target_link_options(${tgt} PRIVATE /LTCG)
+  endforeach()
 endif()
 
 # Single-file setup. Only the fixed production payload and installer support

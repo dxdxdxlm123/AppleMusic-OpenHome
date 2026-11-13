@@ -1,6 +1,7 @@
 #include "RaatSink.h"
 
 #include "DlnaLog.h"
+#include "LocalPlaybackTuning.h"
 #include "PcmTypes.h"
 #include "RaatDiscovery.h"
 #include "../AudioErrors.h"
@@ -8,9 +9,6 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
-#include <timeapi.h>
-
-#pragma comment(lib, "winmm.lib")
 
 #include <algorithm>
 #include <chrono>
@@ -33,6 +31,45 @@ constexpr std::uint32_t kRaatDefaultLookaheadMs = 1000;
 constexpr std::uint32_t kRaatDefaultStartLeadMs = 300;
 constexpr std::uint32_t kRaatConnectTimeoutMs = 2500;
 constexpr std::uint32_t kRaatRequestTimeoutMs = 5000;
+
+// Replaces timeBeginPeriod(1)/timeEndPeriod(1) with the NT timer API so the
+// RAAT transport uses the same mechanism as LocalPlaybackTuning instead of a
+// second, independent knob. NtSetTimerResolution sets an absolute value, so
+// the previous one is captured and restored on scope exit. Control-plane
+// only: one pair of ntdll calls per pump thread lifetime.
+class TimerResolutionScope final {
+public:
+    TimerResolutionScope() noexcept {
+        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        if (!ntdll) return;
+        set_ = reinterpret_cast<SetFn>(GetProcAddress(ntdll, "NtSetTimerResolution"));
+        if (!set_) return;
+        unsigned long minimum = 0, maximum = 0, current = 0;
+        if (auto query = reinterpret_cast<QueryFn>(
+                GetProcAddress(ntdll, "NtQueryTimerResolution"))) {
+            (void)query(&minimum, &maximum, &current);
+        }
+        previous_ = current != 0 ? current : kDefault100ns;
+        unsigned long actual = 0;
+        if (set_(kRequested100ns, 1, &actual) >= 0) active_ = true;
+    }
+    ~TimerResolutionScope() noexcept {
+        if (!active_) return;
+        unsigned long actual = 0;
+        (void)set_(previous_, 1, &actual);
+    }
+    TimerResolutionScope(const TimerResolutionScope&) = delete;
+    TimerResolutionScope& operator=(const TimerResolutionScope&) = delete;
+
+private:
+    using QueryFn = long(WINAPI*)(unsigned long*, unsigned long*, unsigned long*);
+    using SetFn = long(WINAPI*)(unsigned long, unsigned char, unsigned long*);
+    static constexpr unsigned long kRequested100ns = 10000;  // 1 ms; was timeBeginPeriod(1)
+    static constexpr unsigned long kDefault100ns = 156250;   // 15.625 ms
+    SetFn set_{};
+    unsigned long previous_{};
+    bool active_{};
+};
 
 std::wstring IniPath() {
     wchar_t publicDir[MAX_PATH]{};
@@ -1114,10 +1151,13 @@ void RaatSink::StopKeepalive() noexcept {
 }
 
 void RaatSink::PumpMain() noexcept {
-    struct TimePeriodScope {
-        TimePeriodScope() noexcept { timeBeginPeriod(1); }
-        ~TimePeriodScope() noexcept { timeEndPeriod(1); }
-    } timeScope;
+    TimerResolutionScope timeScope;
+
+    // v0.3.5-tuneall: apply the tuning thread policy (disable the dynamic
+    // priority boost, optionally pin to one physical core) to the RAAT
+    // transport thread. Real-time safe: reads cached atomics and calls two
+    // kernel32 APIs; it never allocates, logs or takes a lock.
+    LocalPlaybackTuningRuntime::Instance().ApplyToCurrentThread();
 
     bool reconnected = false;
     while (!stop_.load(std::memory_order_acquire)) {

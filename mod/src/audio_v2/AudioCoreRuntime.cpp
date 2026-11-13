@@ -2060,11 +2060,16 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
     config.sink.alignmentRetries = 3;
     config.sink.lifecycleContext = callbacks_.context;
     config.sink.onLifecycle = callbacks_.onSinkLifecycle;
-    // JPLAY-style deep reservoir applies to local outputs only. The network
-    // renderer keeps its own buffer policy completely untouched.
-    const bool isNetworkSink = ResolvedEngine() == EffectiveEngine::Dlna ||
-                               ResolvedEngine() == EffectiveEngine::Raat;
-    const bool localTuned = !isNetworkSink && localTuning_.enabled;
+    // v0.3.5-tuneall: the [local] tuning block now applies to EVERY output
+    // path, including DLNA and RAAT. Two invariants are preserved:
+    //  1. The reservoir only ever grows the queue. `neededBlocks` is compared
+    //     against the capacity the engine already chose, so a short
+    //     reservoir_ms can never shrink the RAAT startup reservoir
+    //     (kRaatStartupQueueCapacity) back to kProductionQueueCapacity.
+    //  2. The affinity half stays inert inside the hook process. The engine
+    //     threads in audiohost pick it up through ApplyToCurrentThread() in
+    //     RaatSink::PumpMain and DlnaSink::ProducerMain.
+    const bool tuned = localTuning_.enabled;
     std::size_t queueCapacity = kProductionQueueCapacity;
     // v0.3.5: fix 1 gated on a bare `outputKind_ == Raat`, which is dead in
     // hifi mode because profile.kind becomes Remote. Gate on the resolved
@@ -2073,24 +2078,27 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
         queueCapacity = kRaatStartupQueueCapacity;
     }
     std::uint64_t reservoirFrames = 0;
-    if (localTuned) {
+    if (tuned) {
         reservoirFrames = static_cast<std::uint64_t>(format.sampleRate) *
                           localTuning_.reservoirMs / 1000u;
         const std::uint64_t neededBlocks =
             (reservoirFrames * 5u / 4u + kMaxBlockFrames - 1u) / kMaxBlockFrames;
         queueCapacity = static_cast<std::size_t>(std::clamp<std::uint64_t>(
-            std::max<std::uint64_t>(neededBlocks, kProductionQueueCapacity),
+            std::max<std::uint64_t>(neededBlocks, queueCapacity),
             kProductionQueueCapacity, localTuning_.maxQueueBlocks));
         const std::uint64_t usableBlocks = queueCapacity > 16u ? queueCapacity - 16u : 0u;
         reservoirFrames = std::min<std::uint64_t>(
             reservoirFrames, static_cast<std::uint64_t>(usableBlocks) * kMaxBlockFrames);
     }
     config.queueCapacity = queueCapacity;
-    config.preferLargePages = localTuned && localTuning_.largePages;
-    // Process-wide OS state belongs to the local path only; binding a DLNA
-    // generation restores the defaults immediately.
-    LocalPlaybackTuningRuntime::Instance().Configure(
-        localTuned ? localTuning_ : LocalPlaybackTuning{});
+    config.preferLargePages = tuned && localTuning_.largePages;
+    // Affinity pinning is audiohost-only: this code runs inside the Apple
+    // Music process, so pinning here would also pin Apple's decoder, UI and
+    // network threads and strip the scheduler of its ability to migrate them
+    // off a busy core. The timer/boost/large-page half applies everywhere.
+    LocalPlaybackTuning hookTuning = tuned ? localTuning_ : LocalPlaybackTuning{};
+    hookTuning.dedicatedCore = false;
+    LocalPlaybackTuningRuntime::Instance().Configure(hookTuning);
     config.mediaGeneration = generation;
     // Local int32 has already passed through Apple's float32 P0 output. In
     // compatibility mode accept that decoded stream via the bounded float
@@ -2166,7 +2174,7 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
     } else {
         const std::uint64_t baselineLow = rate * 3u / 10u;
         const std::uint64_t baselineHigh = rate / 2u;
-        if (localTuned && reservoirFrames != 0) {
+        if (tuned && reservoirFrames != 0) {
             // Keep the 0.3/0.5 s floor and let the existing 9/10/11 ms
             // software pump chase the deep target. It never changes the
             // bit-perfect samples or the DAC-driven submission clock.

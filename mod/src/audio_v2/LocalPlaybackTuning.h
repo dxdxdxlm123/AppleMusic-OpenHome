@@ -18,6 +18,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace ammod::audio_v2 {
 
@@ -37,9 +38,11 @@ struct LocalPlaybackTuning final {
     // This is the mild, opt-in equivalent of JPLAY Throttle: it raises only
     // this process, it never lowers or suspends anyone else's threads.
     bool processPriority{};
-    // Disable Windows' dynamic priority boost on the audio threads so their
-    // scheduling stays deterministic (MMCSS still owns the base priority).
-    bool disableThreadBoost{true};
+    // Disable Windows' dynamic priority boost on the audio threads.
+    // Default OFF: MMCSS relies on that boost to recover a thread that
+    // overran its deadline. Disabling it turns a single late callback into a
+    // permanent underrun instead of a one-off hiccup.
+    bool disableThreadBoost{};
     // Try MEM_LARGE_PAGES for the capture queue; silently falls back to the
     // ordinary allocator when the privilege or contiguous memory is missing.
     bool largePages{};
@@ -103,7 +106,7 @@ public:
             processAffinity == 0) {
             processAffinity = 1;
         }
-        coreMask_.store(static_cast<std::uint64_t>(HighestAffinityBit(processAffinity)),
+        coreMask_.store(static_cast<std::uint64_t>(PreferredAudioCore(processAffinity)),
                         std::memory_order_release);
         dedicatedCore_.store(tuning.dedicatedCore, std::memory_order_release);
         disableThreadBoost_.store(tuning.disableThreadBoost, std::memory_order_release);
@@ -198,13 +201,75 @@ private:
             GetProcAddress(ntdll, "NtSetTimerResolution"));
     }
 
-    static DWORD_PTR HighestAffinityBit(DWORD_PTR mask) noexcept {
-        DWORD_PTR chosen = 0;
+    static DWORD_PTR FirstAffinityBit(DWORD_PTR mask) noexcept {
         for (unsigned index = 0; index < sizeof(DWORD_PTR) * 8u; ++index) {
             const DWORD_PTR bit = static_cast<DWORD_PTR>(1) << index;
-            if (mask & bit) chosen = bit;
+            if (mask & bit) return bit;
         }
-        return chosen != 0 ? chosen : 1;
+        return 1;
+    }
+
+    // Pick a physical core for the audio thread.
+    //
+    // The previous implementation took the HIGHEST set affinity bit. On an
+    // Intel hybrid part (12th gen and newer) Windows enumerates the P-cores
+    // first and the E-cores after them, so the highest bit is the LAST E-core
+    // - the slowest core in the machine, roughly half the single-thread
+    // throughput of a P-core. Pinning an AVRT_PRIORITY_CRITICAL thread there
+    // also removes the scheduler's ability to migrate it away from a DPC.
+    //
+    // Enumerate physical cores instead: prefer the highest EfficiencyClass
+    // (P-core on hybrid parts, all zero on homogeneous parts) and take that
+    // core's FIRST logical processor, not its last.
+    static DWORD_PTR PreferredAudioCore(DWORD_PTR allowedMask) noexcept {
+        DWORD length = 0;
+        (void)GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &length);
+        if (length == 0) return FirstAffinityBit(allowedMask);
+
+        std::vector<BYTE> buffer(length);
+        if (!GetLogicalProcessorInformationEx(
+                RelationProcessorCore,
+                reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data()),
+                &length)) {
+            return FirstAffinityBit(allowedMask);
+        }
+
+        DWORD_PTR first = 0;
+        DWORD_PTR second = 0;
+        unsigned bestClass = 0;
+        for (DWORD offset = 0;
+             offset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) <= length;) {
+            auto* info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
+                buffer.data() + offset);
+            if (info->Size == 0) break;
+            if (info->Relationship == RelationProcessorCore) {
+                const unsigned efficiency = info->Processor.EfficiencyClass;
+                for (WORD group = 0; group < info->Processor.GroupCount; ++group) {
+                    const KAFFINITY mask = info->Processor.GroupMask[group].Mask;
+                    for (unsigned bit = 0; bit < sizeof(KAFFINITY) * 8u; ++bit) {
+                        const DWORD_PTR candidate = static_cast<DWORD_PTR>(1) << bit;
+                        if ((mask & candidate) == 0) continue;
+                        if ((allowedMask & candidate) == 0) break;
+                        if (candidate == 0 || efficiency > bestClass) {
+                            first = candidate;
+                            second = 0;
+                            bestClass = efficiency;
+                        } else if (efficiency == bestClass) {
+                            if (first == 0) first = candidate;
+                            else if (second == 0 && candidate != first) second = candidate;
+                        }
+                        break;  // first logical CPU of this physical core only
+                    }
+                }
+            }
+            offset += info->Size;
+        }
+        // LP0 carries the bulk of Windows' default interrupt affinity, so a
+        // real-time thread pinned there fights the DPC/ISR stream. Prefer the
+        // second physical core of the same efficiency class.
+        if (second != 0) return second;
+        if (first != 0) return first;
+        return FirstAffinityBit(allowedMask);
     }
 
     static bool EnableLockMemoryPrivilege() noexcept {
