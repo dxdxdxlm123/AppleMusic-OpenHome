@@ -18,7 +18,7 @@
 namespace ammod::audio_v2 {
 
 inline constexpr std::uint32_t kSharedRingMagic = 0x31454D41; // 'AME1'
-inline constexpr std::uint32_t kSharedRingVersion = 2;
+inline constexpr std::uint32_t kSharedRingVersion = 3;
 inline constexpr std::uint32_t kSharedRingChannels = 2;
 // v0.3.5: the ring is no longer capped at ~10 s. A 512 MiB section holds
 // 67,108,800 frames = ~349 s (5.8 min) at 192 kHz / 2 ch / 32-bit Q31.
@@ -53,6 +53,11 @@ struct SharedRingHeader final {
     // Remote sink's EndOfStreamComplete() was a dead flag and every track had
     // to be retired by the runtime's timeout instead of real drain evidence.
     alignas(8) std::atomic<std::uint64_t> eosCompleteGeneration{};
+    // v3: host -> hook fault signal. Stamped with generation when the host sink
+    // faults mid-stream so RemoteSink::State() reports Faulted instead of
+    // staying silently Running.
+    alignas(8) std::atomic<std::uint64_t> faultedGeneration{};
+    alignas(4) std::atomic<std::int32_t> hostLastError{};
     // A never-used generation is 0, so a freshly reset ring cannot look like
     // a completed one. Generations handed out by the hook start at 1.
     inline static constexpr std::uint64_t kNoGeneration = 0;
@@ -90,6 +95,9 @@ inline void SharedRingReset(SharedRingHeader* header, std::uint32_t sampleRate,
     // generation becomes visible to the hook.
     header->eosCompleteGeneration.store(SharedRingHeader::kNoGeneration,
                                         std::memory_order_release);
+    header->faultedGeneration.store(SharedRingHeader::kNoGeneration,
+                                    std::memory_order_release);
+    header->hostLastError.store(0, std::memory_order_release);
 }
 
 // Producer side (hook). Never blocks the caller for long: the pump thread may
@@ -166,6 +174,16 @@ public:
     bool HostEosComplete(std::uint64_t generation) const noexcept {
         if (!header_ || generation == SharedRingHeader::kNoGeneration) return false;
         return header_->eosCompleteGeneration.load(std::memory_order_acquire) == generation;
+    }
+
+    // True when the host sink faulted during this exact generation.
+    bool HostFaulted(std::uint64_t generation, HRESULT& lastError) const noexcept {
+        if (!header_ || generation == SharedRingHeader::kNoGeneration) return false;
+        if (header_->faultedGeneration.load(std::memory_order_acquire) != generation) {
+            return false;
+        }
+        lastError = static_cast<HRESULT>(header_->hostLastError.load(std::memory_order_acquire));
+        return true;
     }
 
     void MarkHostState(std::uint32_t value) noexcept {

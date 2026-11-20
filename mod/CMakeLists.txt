@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(AMExclusive VERSION 0.3.7 LANGUAGES CXX RC)
+project(AMExclusive VERSION 0.3.10 LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "AMExclusive supports Windows x64 only")
@@ -49,12 +49,19 @@ target_link_libraries(am_exclusive_dlna_selftest PRIVATE ole32 oleaut32 uuid ws2
   msxml6 iphlpapi)
 
 include(FetchContent)
-FetchContent_Declare(
-  minhook
-  GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
-  GIT_TAG v1.3.4
-  GIT_SHALLOW TRUE
-)
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/minhook/CMakeLists.txt")
+  FetchContent_Declare(
+    minhook
+    SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/minhook"
+  )
+else()
+  FetchContent_Declare(
+    minhook
+    GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
+    GIT_TAG v1.3.4
+    GIT_SHALLOW TRUE
+  )
+endif()
 FetchContent_MakeAvailable(minhook)
 
 # Fallback only: Build-Mod.ps1 resolves the installed package dynamically and

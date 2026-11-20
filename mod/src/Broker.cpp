@@ -1136,6 +1136,7 @@ DWORD WINAPI ProcessWatcher(void*) {
 }
 
 void Log(const std::wstring& text) {
+    if (!ammod::logging::IsFileLoggingActive()) return;
     SYSTEMTIME now{};
     GetLocalTime(&now);
     std::wostringstream line;

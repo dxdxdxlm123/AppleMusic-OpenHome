@@ -157,12 +157,15 @@ HRESULT RaatSink::Open(const AudioSinkOpenParams& params) noexcept {
     startLeadMs_ = std::clamp<std::uint32_t>(
         static_cast<std::uint32_t>(std::max(lead, 300)), 300u, 4000u);
 
-    // 2048 frames (42.7 ms at 48 kHz) is the largest block the capture queue
-    // hands out and is close to the renderer's own 50 ms output period.
-    blockFrames_ = std::min<std::uint32_t>(kMaxBlockFrames, 2048u);
+    // Target ~10-12 ms per RAAT DATA frame across sample rates to smooth out
+    // network bursts and keep renderer FIFO levels steady.
+    const std::uint32_t targetBlockFrames =
+        format_.sampleRate >= 176400u ? 2048u
+      : format_.sampleRate >= 88200u  ? 1024u
+                                      : 512u;
+    blockFrames_ = std::min<std::uint32_t>(kMaxBlockFrames, targetBlockFrames);
     block_.assign(static_cast<std::size_t>(blockFrames_) * format_.channels, 0);
-    pcm_.resize(static_cast<std::size_t>(blockFrames_) * format_.channels * 4u);
-    frame_.reserve(pcm_.size() + 16u);
+    frame_.reserve(static_cast<std::size_t>(blockFrames_) * format_.channels * 4u + 16u);
 
     streamId_ = static_cast<std::uint32_t>((GetTickCount64() & 0x7fffffffu) | 1u);
     lastError_.store(S_OK, std::memory_order_release);
@@ -392,6 +395,9 @@ bool RaatSink::EnsureSession() noexcept {
     clockStop_.store(false, std::memory_order_release);
     clockSocket_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (clockSocket_ != INVALID_SOCKET) {
+        int dscp = 0xB8; // DSCP EF (46) << 2
+        (void)::setsockopt(clockSocket_, IPPROTO_IP, IP_TOS,
+                           reinterpret_cast<const char*>(&dscp), sizeof(dscp));
         sockaddr_in local{};
         local.sin_family = AF_INET;
         local.sin_addr.s_addr = INADDR_ANY;
@@ -872,12 +878,19 @@ bool RaatSink::SendSetup(std::wstring& error) noexcept {
             if (JsonStatus(response) == "OutputMessage") {
                 const std::uint32_t rid = control_.LastRequestRid();
                 LogRaat(L"setup output message received; waiting for the port frame");
-                for (int attempt = 0; attempt < 4; ++attempt) {
+                const auto waitDeadline = std::chrono::steady_clock::now() +
+                                          std::chrono::milliseconds(6000);
+                for (int attempt = 0; attempt < 6; ++attempt) {
+                    if (std::chrono::steady_clock::now() >= waitDeadline) break;
                     std::string follow;
                     bool followFinal = false;
                     std::wstring followError;
-                    if (!control_.ReadFrame(rid, 1500, follow, followFinal, followError)) {
+                    if (!control_.ReadFrame(rid, 3000, follow, followFinal, followError)) {
                         LogRaat(L"setup port frame wait failed: " + followError);
+                        if (followError.find(L"timed out") != std::wstring::npos &&
+                            std::chrono::steady_clock::now() < waitDeadline) {
+                            continue;
+                        }
                         break;
                     }
                     response = follow;
@@ -1209,8 +1222,7 @@ void RaatSink::PumpMain() noexcept {
         }
         if (FAILED(filled) || written == 0) {
             if (endOfStream) {
-                endOfStreamSubmitted_.store(true, std::memory_order_release);
-                endOfStreamComplete_.store(true, std::memory_order_release);
+                FinishEndOfStream();
             }
             return;
         }
@@ -1238,7 +1250,40 @@ void RaatSink::PumpMain() noexcept {
                     paceStartTick_ = 0;
                     continue;
                 }
-                LogRaat(L"audio reconnect failed: " + error);
+                LogRaat(L"audio quick reconnect failed (" + error + L"); rebuilding full RAAT session");
+                StopClock();
+                {
+                    std::lock_guard lock(controlMutex_);
+                    control_.Close();
+                }
+                bool rebuilt = false;
+                for (int attempt = 0; attempt < 2 && !stop_.load(std::memory_order_acquire); ++attempt) {
+                    if (attempt > 0) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+                    }
+                    sampleIndex_ = 0;
+                    streamId_ = static_cast<std::uint32_t>((GetTickCount64() & 0x7fffffffu) | 1u);
+                    if (EnsureSession()) {
+                        rebuilt = true;
+                        break;
+                    }
+                    StopClock();
+                    {
+                        std::lock_guard lock(controlMutex_);
+                        control_.Close();
+                    }
+                    {
+                        std::lock_guard lock(audioMutex_);
+                        audio_.Close();
+                    }
+                }
+                if (rebuilt) {
+                    LogRaat(L"full RAAT session rebuilt mid-stream");
+                    reconnected = false;
+                    paceStartTick_ = 0;
+                    continue;
+                }
+                LogRaat(L"audio reconnect failed: full session rebuild unsuccessful");
             }
             RecordError(ammod::audio::kRaatStreamFailed);
             return;
@@ -1251,38 +1296,40 @@ void RaatSink::PumpMain() noexcept {
         // when `sampleIndex_ > allowed`, loop and wait until the DAC's playback
         // catches up, keeping alive and observing stop/pause signals.
         if (paceStartTick_ == 0) {
-            paceStartTick_ = GetTickCount64();
+            paceStartTick_ = NowMicroseconds();
             paceStartSample_ = sampleIndex_;
             paceLastLogTick_ = paceStartTick_;
         }
 
+        const auto allowedFramesAt = [&](std::uint64_t nowUs) noexcept -> std::uint64_t {
+            const std::uint64_t elapsedUs =
+                nowUs > paceStartTick_ ? (nowUs - paceStartTick_) : 0u;
+            const std::uint64_t wholeSeconds = elapsedUs / 1000000ull;
+            const std::uint64_t remUs = elapsedUs % 1000000ull;
+            return paceStartSample_ +
+                   wholeSeconds * format_.sampleRate +
+                   (remUs * format_.sampleRate) / 1000000ull;
+        };
+
         while (!stop_.load(std::memory_order_acquire) &&
                !paused_.load(std::memory_order_acquire)) {
-            const std::uint64_t nowTick = GetTickCount64();
-            const std::uint64_t elapsedMs = nowTick - paceStartTick_;
-            const std::uint64_t allowed =
-                paceStartSample_ +
-                static_cast<std::uint64_t>(format_.sampleRate) * elapsedMs / 1000u;
-
+            const std::uint64_t allowed = allowedFramesAt(NowMicroseconds());
             if (sampleIndex_ <= allowed) {
                 break;
             }
 
             const std::uint64_t excessFrames = sampleIndex_ - allowed;
-            const std::uint64_t waitMs = (excessFrames * 1000u) / format_.sampleRate;
+            const std::uint64_t waitUs = (excessFrames * 1000000ull) / format_.sampleRate;
             const std::uint32_t sleepMs = static_cast<std::uint32_t>(
-                std::clamp<std::uint64_t>(waitMs, 1u, 10u));
+                std::clamp<std::uint64_t>(waitUs / 1000ull, 1u, 10u));
 
             std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
         }
 
-        const std::uint64_t nowLogTick = GetTickCount64();
-        if (nowLogTick - paceLastLogTick_ >= 5000) {
-            paceLastLogTick_ = nowLogTick;
-            const std::uint64_t elapsedMs = nowLogTick - paceStartTick_;
-            const std::uint64_t allowed =
-                paceStartSample_ +
-                static_cast<std::uint64_t>(format_.sampleRate) * elapsedMs / 1000u;
+        const std::uint64_t nowLogUs = NowMicroseconds();
+        if (nowLogUs - paceLastLogTick_ >= 5000000ull) {
+            paceLastLogTick_ = nowLogUs;
+            const std::uint64_t allowed = allowedFramesAt(nowLogUs);
             LogRaat(L"pace sent=" + std::to_wstring(sampleIndex_) +
                     L" allowed=" + std::to_wstring(allowed) +
                     L" lead=" +
@@ -1299,6 +1346,24 @@ void RaatSink::PumpMain() noexcept {
 
 void RaatSink::FinishEndOfStream() noexcept {
     endOfStreamSubmitted_.store(true, std::memory_order_release);
+    // Official roon_tcp.lua's req_end_stream calls raat.output.stop() and
+    // cleanup_stream() immediately, discarding any audio still queued in the
+    // renderer. Wait for the prefill + start-lead buffer to finish playing out
+    // BEFORE sending end_stream so the track tail is never chopped off.
+    const std::uint32_t prefillCap = format_.sampleRate >= 176400u ? 300u
+                                   : format_.sampleRate >= 88200u  ? 400u
+                                                                   : 1000u;
+    const std::uint32_t effectivePrefillMs = std::min<std::uint32_t>(lookaheadMs_, prefillCap);
+    const std::uint32_t effectiveLeadMs = std::clamp<std::uint32_t>(startLeadMs_, 300u, 1000u);
+    const auto drainMs =
+        std::min<std::uint32_t>(effectivePrefillMs + effectiveLeadMs, 2500u) + 350u;
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(drainMs);
+    while (!stop_.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (stop_.load(std::memory_order_acquire)) return;
     if (control_.IsOpen()) {
         std::lock_guard lock(controlMutex_);
         std::string response;
@@ -1307,16 +1372,6 @@ void RaatSink::FinishEndOfStream() noexcept {
         (void)control_.Request("{\"request\":\"end_stream\"}", 1500,
                                response, final, error);
     }
-    // The device still holds roughly one look-ahead of audio. Reporting
-    // completion immediately would let the runtime tear the session down and
-    // cut the tail; wait for that buffer to play out instead.
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::milliseconds(std::min<std::uint32_t>(lookaheadMs_, 1000u) + 200u);
-    while (!stop_.load(std::memory_order_acquire) &&
-           std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    if (stop_.load(std::memory_order_acquire)) return;
     endOfStreamComplete_.store(true, std::memory_order_release);
     state_.store(AudioSinkState::Open, std::memory_order_release);
     LogRaat(L"end of stream");
@@ -1327,15 +1382,22 @@ bool RaatSink::SendData(const std::int32_t* samples, std::uint32_t frames) noexc
     const std::uint32_t samplesPerFrame = format_.channels;
     const std::size_t sampleCount = static_cast<std::size_t>(frames) * samplesPerFrame;
     const std::uint32_t bytesPerSample = wireBits_ / 8u;
-    if (!PackCanonicalPcm32(samples, pcm_.data(), sampleCount, wireBits_)) return false;
     const std::uint32_t bodyBytes = static_cast<std::uint32_t>(
         sampleCount * bytesPerSample);
 
-    frame_.clear();
-    frame_.push_back(0); // DATA
-    AppendBe32(frame_, frames);
-    AppendBe32(frame_, bodyBytes);
-    frame_.insert(frame_.end(), pcm_.begin(), pcm_.begin() + bodyBytes);
+    frame_.resize(9u + bodyBytes);
+    frame_[0] = 0; // DATA
+    frame_[1] = static_cast<std::uint8_t>(frames >> 24u);
+    frame_[2] = static_cast<std::uint8_t>(frames >> 16u);
+    frame_[3] = static_cast<std::uint8_t>(frames >> 8u);
+    frame_[4] = static_cast<std::uint8_t>(frames);
+    frame_[5] = static_cast<std::uint8_t>(bodyBytes >> 24u);
+    frame_[6] = static_cast<std::uint8_t>(bodyBytes >> 16u);
+    frame_[7] = static_cast<std::uint8_t>(bodyBytes >> 8u);
+    frame_[8] = static_cast<std::uint8_t>(bodyBytes);
+    if (!PackCanonicalPcm32(samples, frame_.data() + 9u, sampleCount, wireBits_)) {
+        return false;
+    }
 
     std::lock_guard lock(audioMutex_);
     if (!audio_.SendAll(frame_.data(), frame_.size(), 2000)) return false;
@@ -1356,6 +1418,8 @@ bool RaatSink::SendSilence(std::uint32_t frames) noexcept {
 
 void RaatSink::ClockMain() noexcept {
     if (clockSocket_ == INVALID_SOCKET) return;
+    LocalPlaybackTuningRuntime::Instance().ApplyToCurrentThread();
+    (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     while (!clockStop_.load(std::memory_order_acquire)) {
         fd_set set;
         FD_ZERO(&set);
@@ -1374,6 +1438,30 @@ void RaatSink::ClockMain() noexcept {
                                       reinterpret_cast<sockaddr*>(&from), &fromLength);
         if (received < 12) continue;
         if (std::memcmp(buffer, "RAATCLKQ", 8) != 0) continue;
+
+        // Reply immediately on the hot path using a stack buffer and zero file
+        // I/O so initial RAAT clock sync RTT and offset stay jitter-free.
+        std::uint8_t reply[28]{};
+        std::memcpy(reply, "RAATCLKR", 8);
+        reply[8] = buffer[8];
+        reply[9] = buffer[9];
+        reply[10] = buffer[10];
+        reply[11] = buffer[11];
+        // RAATCLKR local_time / output_delay live in the device's
+        // nanosecond clock domain: req_start adds min_offset to
+        // get_local_time(), and req_sync rejects rtt >= 30000000 (30 ms).
+        // Replying with microseconds seeds set_remote_time with a
+        // master clock that runs 1000x too slow.
+        const std::uint64_t now = NowNanoseconds();
+        for (int index = 0; index < 8; ++index) {
+            reply[12 + index] = static_cast<std::uint8_t>(now >> (56 - index * 8));
+        }
+        // output delay = 0 ns (bytes 20..27 already zero-initialized)
+        const int sent = sendto(clockSocket_, reinterpret_cast<const char*>(reply),
+                                static_cast<int>(sizeof(reply)), 0,
+                                reinterpret_cast<const sockaddr*>(&from), fromLength);
+        if (sent > 0) clockRepliesOut_.fetch_add(1, std::memory_order_relaxed);
+
         const std::uint32_t probes =
             clockProbesIn_.fetch_add(1, std::memory_order_relaxed) + 1;
         if (probes <= 8) {
@@ -1384,31 +1472,6 @@ void RaatSink::ClockMain() noexcept {
                     std::to_wstring(ntohs(from.sin_port)) +
                     L" len=" + std::to_wstring(received));
         }
-        const std::uint32_t rid =
-            (static_cast<std::uint32_t>(buffer[8]) << 24u) |
-            (static_cast<std::uint32_t>(buffer[9]) << 16u) |
-            (static_cast<std::uint32_t>(buffer[10]) << 8u) |
-            static_cast<std::uint32_t>(buffer[11]);
-        std::vector<std::uint8_t> reply(28);
-        std::memcpy(reply.data(), "RAATCLKR", 8);
-        reply[8] = static_cast<std::uint8_t>(rid >> 24u);
-        reply[9] = static_cast<std::uint8_t>(rid >> 16u);
-        reply[10] = static_cast<std::uint8_t>(rid >> 8u);
-        reply[11] = static_cast<std::uint8_t>(rid);
-        // RAATCLKR local_time / output_delay live in the device's
-        // nanosecond clock domain: req_start adds min_offset to
-        // get_local_time(), and req_sync rejects rtt >= 30000000 (30 ms).
-        // Replying with microseconds seeds set_remote_time with a
-        // master clock that runs 1000x too slow.
-        const std::uint64_t now = NowNanoseconds();
-        for (int index = 0; index < 8; ++index) {
-            reply[12 + index] = static_cast<std::uint8_t>(now >> (56 - index * 8));
-        }
-        // output delay = 0 ns
-        const int sent = sendto(clockSocket_, reinterpret_cast<const char*>(reply.data()),
-                                static_cast<int>(reply.size()), 0,
-                                reinterpret_cast<const sockaddr*>(&from), fromLength);
-        if (sent > 0) clockRepliesOut_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 
@@ -1439,6 +1502,13 @@ bool RaatSink::ReadSettingInt(int& value, const wchar_t* key, int fallback) cons
     if (path.empty()) {
         value = fallback;
         return false;
+    }
+    wchar_t probe[32]{};
+    if (GetPrivateProfileStringW(L"r_device", key, L"", probe,
+                                 static_cast<DWORD>(std::size(probe)),
+                                 path.c_str()) > 0) {
+        value = GetPrivateProfileIntW(L"r_device", key, fallback, path.c_str());
+        return true;
     }
     value = GetPrivateProfileIntW(L"roon", key, fallback, path.c_str());
     return true;

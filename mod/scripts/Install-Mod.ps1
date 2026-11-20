@@ -294,6 +294,10 @@ if ($null -ne $previousIni) {
         $existing = [regex]::Replace($existing, '(?m)(^\[mod\][^\[]*)', "`$1player_mode=am`r`n")
         $rewritten = $true
     }
+    if ($existing -notmatch '(?m)^\s*logging\s*=') {
+        $existing = [regex]::Replace($existing, '(?m)(^\[mod\][^\[]*)', "`$1logging=1`r`n")
+        $rewritten = $true
+    }
     if ($existing -notmatch '(?m)^\s*\[local\]') {
         $localSection = [regex]::Match($template, '(?s)\[local\].*?(?=\[dlna\])')
         if ($localSection.Success) {

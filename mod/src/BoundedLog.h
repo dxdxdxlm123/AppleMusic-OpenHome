@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -11,6 +12,25 @@
 #include <system_error>
 
 namespace ammod::logging {
+
+inline bool IsFileLoggingActive() noexcept {
+    static std::atomic<bool> s_enabled{true};
+    static std::atomic<ULONGLONG> s_nextCheckTick{0};
+    const ULONGLONG now = GetTickCount64();
+    if (now >= s_nextCheckTick.load(std::memory_order_relaxed)) {
+        wchar_t publicDir[MAX_PATH]{};
+        if (GetEnvironmentVariableW(L"PUBLIC", publicDir, static_cast<DWORD>(std::size(publicDir))) > 0) {
+            std::wstring iniPath = std::wstring(publicDir) + L"\\AMExclusive\\am-exclusive.ini";
+            int val = GetPrivateProfileIntW(L"mod", L"logging", -1, iniPath.c_str());
+            if (val < 0) {
+                val = GetPrivateProfileIntW(L"mod", L"enable_logging", 1, iniPath.c_str());
+            }
+            s_enabled.store(val != 0, std::memory_order_relaxed);
+        }
+        s_nextCheckTick.store(now + 1000, std::memory_order_relaxed);
+    }
+    return s_enabled.load(std::memory_order_relaxed);
+}
 
 inline std::filesystem::path BackupPath(const std::filesystem::path& path,
                                         unsigned index) {
@@ -61,6 +81,7 @@ inline void AppendWideLine(const std::filesystem::path& path,
                            std::wstring_view line,
                            std::uintmax_t maxBytes,
                            unsigned backups = 2) noexcept {
+    if (!IsFileLoggingActive()) return;
     const auto utf8 = Utf8(line);
     if (utf8.empty() && !line.empty()) return;
     std::lock_guard lock(mutex);

@@ -1,4 +1,5 @@
 #include "RemoteSink.h"
+#include "../BoundedLog.h"
 
 #include "AsioExclusiveSink.h"
 #include "DlnaSink.h"
@@ -16,6 +17,7 @@ namespace {
 // The hook cannot use HookDll's logger from this translation unit, and a
 // failed host connection must be diagnosable without a debugger.
 void LogRemote(const wchar_t* text) noexcept {
+    if (!ammod::logging::IsFileLoggingActive()) return;
     // The hook runs inside AppleMusic/AMPLibraryAgent, whose package directory
     // is read-only. Diagnostics belong next to the main log under Public.
     wchar_t publicPath[MAX_PATH]{};

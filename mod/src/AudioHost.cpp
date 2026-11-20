@@ -13,6 +13,7 @@
 #include "audio_v2/RingPcmSource.h"
 #include "audio_v2/SharedAudioRing.h"
 #include "audio_v2/WasapiExclusiveSink.h"
+#include "BoundedLog.h"
 
 #include <windows.h>
 
@@ -54,6 +55,7 @@ std::atomic<bool> g_eosMonitorRunning{false};
 
 void Log(const wchar_t* text) noexcept {
     if (!text || g_logPath.empty()) return;
+    if (!ammod::logging::IsFileLoggingActive()) return;
     EnterCriticalSection(&g_logLock);
     FILE* file = nullptr;
     if (_wfopen_s(&file, g_logPath.c_str(), L"a, ccs=UTF-8") == 0 && file) {
@@ -143,15 +145,32 @@ DWORD WINAPI EosMonitorThunk(void* context) noexcept {
     auto* state = static_cast<HostState*>(context);
     while (g_eosMonitorRunning.load(std::memory_order_acquire)) {
         bool complete = false;
+        bool faulted = false;
+        HRESULT lastError = S_OK;
         EnterCriticalSection(&g_sinkLock);
-        if (state->sink) complete = state->sink->EndOfStreamComplete();
+        if (state->sink) {
+            complete = state->sink->EndOfStreamComplete();
+            if (state->sink->State() == ammod::audio_v2::AudioSinkState::Faulted) {
+                faulted = true;
+                lastError = state->sink->Stats().lastError;
+            }
+        }
         LeaveCriticalSection(&g_sinkLock);
-        if (complete && state->header) {
+        if (state->header) {
             const auto generation =
                 state->header->generation.load(std::memory_order_acquire);
             if (generation != SharedRingHeader::kNoGeneration) {
-                state->header->eosCompleteGeneration.store(
-                    generation, std::memory_order_release);
+                if (complete) {
+                    state->header->eosCompleteGeneration.store(
+                        generation, std::memory_order_release);
+                }
+                if (faulted) {
+                    state->header->hostLastError.store(
+                        static_cast<std::int32_t>(FAILED(lastError) ? lastError : E_UNEXPECTED),
+                        std::memory_order_release);
+                    state->header->faultedGeneration.store(
+                        generation, std::memory_order_release);
+                }
             }
         }
         Sleep(10);

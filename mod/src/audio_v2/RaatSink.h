@@ -152,7 +152,6 @@ private:
     std::uint64_t sampleIndex_{0};
     std::uint64_t lastSendTick_{0};
     std::vector<std::int32_t> block_;
-    std::vector<std::uint8_t> pcm_;
     std::vector<std::uint8_t> frame_;
 
     static inline std::mutex s_variantMutex;

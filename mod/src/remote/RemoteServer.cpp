@@ -1,4 +1,5 @@
 #include "RemoteServer.h"
+#include "../BoundedLog.h"
 #include "AmPluginClient.h"
 #include "WebRemoteHtml.h"
 #include "PlayQueueReader.h"
@@ -345,6 +346,7 @@ bool ToggleLibAlbum(const json& item) {
 }
 
 void LogDebugMsg(const char* msg) {
+    if (!ammod::logging::IsFileLoggingActive()) return;
     FILE* f = fopen("C:\\Users\\Public\\AMExclusive\\remote_debug.log", "a");
     if (f) {
         fprintf(f, "%s\n", msg);

@@ -232,6 +232,7 @@ std::wstring Localized(std::wstring_view chinese, std::wstring_view english) {
 }
 
 void Log(const std::wstring& message) {
+    if (!ammod::logging::IsFileLoggingActive()) return;
     SYSTEMTIME now{};
     GetLocalTime(&now);
     std::wostringstream line;
@@ -1589,7 +1590,11 @@ void AttachTransportObservers(const Xaml::Window& window, const std::wstring& wi
                         [](auto&&, Input::PointerRoutedEventArgs const& args) {
                             ScheduleTransportObserverAttach();
                             auto current = args.OriginalSource().try_as<Xaml::DependencyObject>();
+                            bool clickedRowButton = false;
                             for (unsigned depth = 0; current && depth < 16; ++depth) {
+                                if (!clickedRowButton && current.try_as<Primitives::ButtonBase>()) {
+                                    clickedRowButton = true;
+                                }
                                 if (auto row = current.try_as<Controls::ListViewItem>()) {
                                     const auto rowIdentity = DependencyObjectIdentity(row);
                                     const auto now = GetTickCount64();
@@ -1612,6 +1617,14 @@ void AttachTransportObservers(const Xaml::Window& window, const std::wstring& wi
                                                 g_transportEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
                                             g_lastTrackRowPressEpoch = epoch;
                                             QueueTransport(L"selection_arm", epoch);
+                                            if (clickedRowButton) {
+                                                // Single-clicking a row's Play button starts the
+                                                // track without a second press; confirm the direct
+                                                // selection immediately (AudioCoreRuntime still
+                                                // waits for Apple's Stop/Dispose, so non-play row
+                                                // buttons like "..." will never interrupt audio).
+                                                QueueTransport(L"skip", epoch);
+                                            }
                                         }
                                     }
                                     break;

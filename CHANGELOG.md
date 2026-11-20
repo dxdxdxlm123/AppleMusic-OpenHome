@@ -6,6 +6,52 @@ upstream [AntiOblivionis/AMExclusive](https://github.com/AntiOblivionis/AMExclus
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.10] - 2026-11-20
+
+### Fixed
+- **Immediate manual track switching (list click / double-click / row Play button)**:
+  - Widened `directSelectionArmDeadlineTick_` from `750 ms` to `2500 ms` and refreshed it on the confirming `skip` event so high-latency lossless/Hi-Res track switches never expire before Apple Music calls `IAudioClient::Stop` (fixing the 8–10 s stale drain and 20 s successor stall).
+  - Detected single-clicks on row `ButtonBase` controls (e.g., hover Play button inside a `ListViewItem`) in `UiAdapter.cpp` and added `DirectSelectionActiveForStop()` in `AudioCoreRuntime.cpp` so single-click manual switches retire immediately without waiting 500 ms for producer EOF or draining the old buffer.
+  - Preserved full natural-EOF tail drain (`BeginEndOfStreamDrainLocked` + `RaatSink::FinishEndOfStream`) for automatic playlist playback whenever no manual switch is armed or natural producer EOF has already been signaled.
+- **Global logging switch with hot-reload**:
+  - Added logging=1 (default on) to [mod] in m-exclusive.ini and BoundedLog.h. Setting logging=0 immediately stops all disk log writing across all components (m-exclusive.log, m-exclusive-dlna.log, m-exclusive-audiohost.log, etc.) without requiring an Apple Music restart.
+- **Special Acknowledgement**:
+  - Special thanks to gemini neon, what a good cat! (感谢 gemini neon，真是个好喵 🐱)
+
+## [0.3.9] - 2026-11-20
+
+### Fixed
+
+- **RAAT script injection regression on VEGA G2 (fixed from 0.3.8).**
+  - Reverted `RaatSink::LoadScripts()` to keep the control TCP socket open across script variants (`variant 0 -> 1 -> 2`) instead of closing and reopening the connection between variants. Closing the control socket wiped the renderer's Lua VM state (dropping `dkjson` module registration from variant 0), causing `protocol.lua -> ScriptError` on variants 1 and 2, forcing fallback to clean-room scripts and hanging VEGA G2's RAAT service (`hr=0x8004020D`).
+  - Restored the `echo/info/info` greeting probes in `RaatSink::EnsureSession()` to match the working 0.3.7 handshake sequence.
+- **RAAT tail audio cut off at natural track end.**
+  - `RaatSink::FinishEndOfStream()` now waits for the renderer's buffered tail (`effectivePrefillMs + effectiveLeadMs + 350 ms`) to finish playing out *before* sending `{"request":"end_stream"}`. Official `roon_tcp.lua` executes `raat.output.stop()` + `cleanup_stream()` immediately on `end_stream`, so sending it before the drain wait previously discarded the final 1–2 seconds of every track.
+- **RAAT `[r_device]` configuration section mismatch.**
+  - `RaatSink::ReadSettingInt()` now reads `[r_device]` (matching `am-exclusive.ini`) before falling back to legacy `[roon]`, so `buffer_ms`, `start_lead_ms`, and `wire_bits` take effect.
+
+### Changed
+
+- **RAAT HiFi transport & clock sync optimizations.**
+  - `RaatSink::ClockMain()` now applies thread tuning + `THREAD_PRIORITY_HIGHEST`, replies with a stack-allocated 28-byte buffer immediately before any probe logging (eliminating disk I/O jitter and heap allocations during initial clock sync), and tags the UDP clock socket with DSCP EF (`0xB8`).
+  - `RaatSink::PumpMain()` switches from `GetTickCount64()` to microsecond `steady_clock` pacing with sample-rate-scaled ~10–12 ms packets (`512` frames at 44.1/48 kHz, `1024` at 88.2/96 kHz, `2048` at 176.4/192 kHz).
+  - `RaatSink::SendData()` packs PCM directly into `frame_ + 9` (eliminating an intermediate full-block copy), and `TcpConnection::Connect()` tags RAAT TCP sockets with DSCP EF (`0xB8`).
+
+## [0.3.8] - 2026-11-20
+
+### Fixed
+
+- **Tail audio cut off at natural track end (DLNA & RAAT).**
+  - `AudioCoreRuntime::OnConverterDisposed()` now seals EOS (`BeginEndOfStreamDrainLocked`) when a streaming converter in `streamingProducerDrainPending_` is disposed at a natural track boundary, instead of immediately retiring and aborting/stopping the sink while buffered tail audio is still playing.
+  - `RingPcmSource::Prepare()` now returns `S_OK` when `EndOfStream()` is set and `0 < Available() < capacityFrames`, fixing a cross-process ring deadlock that trapped the final `< blockFrames_` frames and prevented EOS completion in AudioHost (HiFi) mode.
+  - `RaatSink::PumpMain()` now invokes `FinishEndOfStream()` on `written == 0 && endOfStream`, and `FinishEndOfStream()` accounts for `startLeadMs_` in its drain window.
+- **Occasional silence requiring manual replay (RAAT & AudioHost).**
+  - `SharedRingHeader` (v3 / `ORIONv06`), `AudioHost::EosMonitorThunk()`, and `RemoteSink::State()/Stats()` now propagate host-side `Faulted` state and `lastError` back to the hook process, eliminating silent hangs after mid-stream sink faults.
+  - `RaatSink::SendSetup()` extends the post-`OutputMessage` port-frame wait window to 3000 ms per read (6000 ms total) for DAC sample-rate/relay switches.
+  - `RaatSink::EnsureSession()` removes duplicate `echo/info/info` probes, and `RaatSink::LoadScripts()` reconnects a clean control socket before trying fallback script variants.
+  - `RaatSink::PumpMain()` falls back to full `EnsureSession()` (with SOOD port refresh and retry) when quick mid-stream audio reconnect fails.
+  - `AudioCoreRuntime::TryActivateLocked()` performs up to 2 bounded backoff retries (600 ms / 1200 ms) on transient RAAT/DLNA network start failures instead of immediately calling `registry_.RetireAll()`.
+
 ## [0.4.8] - 2026-11-09
 
 ### Fixed

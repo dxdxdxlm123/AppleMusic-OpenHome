@@ -22,7 +22,9 @@ public:
     HRESULT Prepare(std::uint32_t capacityFrames) noexcept override {
         if (!ring_.Attached() || capacityFrames == 0) return kAudioSourceWouldBlock;
         if (ring_.Available() >= capacityFrames) return S_OK;
-        if (ring_.EndOfStream() && ring_.Available() == 0) return S_FALSE;
+        if (ring_.EndOfStream()) {
+            return ring_.Available() > 0 ? S_OK : S_FALSE;
+        }
         return kAudioSourceWouldBlock;
     }
 

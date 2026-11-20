@@ -897,6 +897,7 @@ std::wstring AddressLocation(void* address) {
 void Log(const std::wstring& message);
 
 void Log(const std::wstring& message) {
+    if (!ammod::logging::IsFileLoggingActive()) return;
     SYSTEMTIME now{};
     GetLocalTime(&now);
     std::wostringstream line;

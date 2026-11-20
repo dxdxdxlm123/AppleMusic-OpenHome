@@ -40,7 +40,7 @@ inline constexpr std::uint32_t kHostProtocolVersion = 5;
 // handshake only compared a protocol number, so a freshly built hook could
 // silently pair with an online audiohost that lacked the matching EOS path.
 // Bump this whenever the wire behaviour changes, not just the struct layout.
-inline constexpr std::uint64_t kHostBuildId = 0x4F524930'4E763035ULL; // "ORIONv05"
+inline constexpr std::uint64_t kHostBuildId = 0x4F524930'4E763036ULL; // "ORIONv06"
 
 // v0.3.5: hook-side hint for ring depth, in seconds at the source rate
 // (replaces the old fixed 10 s). The audiohost owns the final capacity
@@ -113,7 +113,12 @@ public:
     void Close() noexcept override;
 
     AudioSinkState State() const noexcept override {
-        return fallback_ ? fallback_->State() : state_.load(std::memory_order_acquire);
+        if (fallback_) return fallback_->State();
+        HRESULT hostError = S_OK;
+        if (ring_.HostFaulted(generation_, hostError)) {
+            return AudioSinkState::Faulted;
+        }
+        return state_.load(std::memory_order_acquire);
     }
     // When the host is unavailable this sink delegates to the in-process one;
     // the counters must come from whoever is actually feeding the endpoint.
@@ -122,6 +127,11 @@ public:
         AudioSinkStats value = stats_;
         value.kind = AudioSinkKind::Remote;
         value.state = state_.load(std::memory_order_acquire);
+        HRESULT hostError = S_OK;
+        if (ring_.HostFaulted(generation_, hostError)) {
+            value.state = AudioSinkState::Faulted;
+            value.lastError = FAILED(hostError) ? hostError : E_UNEXPECTED;
+        }
         value.submittedFrames = ring_.ConsumedFrames();
         value.bufferedFrames = ring_.BufferedFrames();
         return value;

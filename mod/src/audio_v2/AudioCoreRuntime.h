@@ -315,6 +315,8 @@ private:
     void TryResumePausedSinkLocked(bool requireFreshProducer = false) noexcept;
     void ExtendSeekQuietPeriodLocked() noexcept;
     bool DirectSelectionPending() const noexcept;
+    bool DirectSelectionArmed() const noexcept;
+    bool DirectSelectionActiveForStop(void* converter) const noexcept;
     bool RetireDirectSelectionLocked() noexcept;
     bool BeginEndOfStreamDrainLocked(void* converter, bool requireShortTail) noexcept;
     void FinalizeEndOfStreamDrainLocked() noexcept;
@@ -444,6 +446,8 @@ private:
     // and a pending format-change rebind is never applied (second track mute).
     std::uint64_t endOfStreamDrainStartTick_{};
     std::uint64_t nextFinalizeDiagTick_{};
+    std::uint32_t activateRetryCount_{};
+    ULONGLONG nextActivateRetryTick_{};
     std::atomic<std::uint64_t> directSelectionArmEpoch_{};
     std::atomic<std::uint64_t> directSelectionArmGeneration_{};
     std::atomic<std::uint64_t> transportSkipArmEpoch_{};

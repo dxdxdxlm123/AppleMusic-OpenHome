@@ -346,6 +346,9 @@ bool TcpConnection::Connect(const std::wstring& address, std::uint16_t port,
     BOOL noDelay = TRUE;
     (void)::setsockopt(socket_, IPPROTO_TCP, TCP_NODELAY,
                        reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+    int dscp = 0xB8; // DSCP EF (46) << 2
+    (void)::setsockopt(socket_, IPPROTO_IP, IP_TOS,
+                       reinterpret_cast<const char*>(&dscp), sizeof(dscp));
     return true;
 }
 
