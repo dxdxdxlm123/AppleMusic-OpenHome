@@ -29,7 +29,7 @@ bit-perfect 输出通路：
 - **ASIO** —— 任意已注册的 ASIO 驱动，采样率逐曲跟随
 - **OpenHome** —— 网播设备，带播放列表控制，支持连播无间隙滚动
 - **DLNA / UPnP** —— 文件形态的 WAV / FLAC 流，声明真实字节数，网播能显示
-  正确时长并在缓冲窗口内拖动
+  正确时长并在缓冲窗口内拖动；支持向网播 WAV 流内嵌 ID3 标签与封面以及 DIDL-Lite 原生元数据，山灵 EM7、AURALiC VEGA G2.2 等数播机身屏幕可直接显示歌曲名、歌手、专辑与高清封面（默认开启，可在设置面板随时切换）
 
 同时强制 Apple Music 请求最高可用无损规格而不是悄悄降级，把它变成一台在受支持
 硬件与配置下可以做到 bit-perfect 的 Hi-Fi 播放器。
@@ -200,7 +200,7 @@ bypassing the Windows mixer, with four bit-perfect output paths:
 - **ASIO** — any registered ASIO driver, sample rate followed per track
 - **OpenHome** — network renderers with playlist control (gapless auto-advance)
 - **DLNA / UPnP** — file-shaped WAV or FLAC stream with a real byte count, so the
-  renderer shows the correct duration and can seek inside the burst window
+  renderer shows the correct duration and can seek inside the burst window; supports embedded ID3v2 metadata & artwork as well as DIDL-Lite, allowing network streamer screens (Shanling EM7, AURALiC VEGA G2.2, etc.) to display track title, artist, album and album art (enabled by default, configurable in settings)
 
 It also forces Apple Music to request the highest available lossless tier instead
 of silently downgrading, turning it into a Hi-Fi player that can reach bit-perfect

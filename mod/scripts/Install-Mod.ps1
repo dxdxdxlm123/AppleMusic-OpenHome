@@ -298,6 +298,10 @@ if ($null -ne $previousIni) {
         $existing = [regex]::Replace($existing, '(?m)(^\[mod\][^\[]*)', "`$1logging=1`r`n")
         $rewritten = $true
     }
+    if ($existing -notmatch '(?m)^\s*wav_id3_metadata\s*=') {
+        $existing = [regex]::Replace($existing, '(?m)(^\[dlna\][^\[]*)', "`$1wav_id3_metadata=1`r`n")
+        $rewritten = $true
+    }
     if ($existing -notmatch '(?m)^\s*\[local\]') {
         $localSection = [regex]::Match($template, '(?s)\[local\].*?(?=\[dlna\])')
         if ($localSection.Success) {

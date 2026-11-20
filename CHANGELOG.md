@@ -8,15 +8,21 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.3.10] - 2026-11-20
 
+### Added
+- **Apple Music Settings UI Cards**:
+  - **内嵌标签 (Embedded ID3 Tags)**: Toggle switch (default on). Embeds ID3v2.3 metadata (title, artist, album) and album art into DLNA/OpenHome WAV streams to resolve Unknown track/artist/album/missing cover issues on network streamer screens (e.g. Shanling EM7, AURALiC VEGA G2.2). Can be turned off if a renderer has strict bare WAV requirements.
+  - **日志开关 (Diagnostic Logging)**: Toggle switch (default on). Controls whether diagnostic logs are written to disk; turning off reduces disk I/O overhead. Takes effect dynamically without restarting Apple Music.
+- **DLNA / OpenHome Metadata & Artwork Support (Issue #2)**:
+  - Added bounded SMTC metadata worker and thumbnail fetching (`TrackMetadata.h`, `MediaSessionControl.cpp`).
+  - Added ID3v2.3 UTF-16LE chunk builder (`WavMetadata.h`) and dynamic RIFF header adjustment (`DlnaStreamServer.h/cpp`).
+  - Added renderer-accessible HTTP artwork endpoint `/artwork/<token>` with MIME sniffing and LRU cache.
+  - Upgraded UPnP DIDL-Lite metadata formatting with XML 1.0 surrogate protection and Performer role (`UpnpXml.h/cpp`).
+
 ### Fixed
 - **Immediate manual track switching (list click / double-click / row Play button)**:
   - Widened `directSelectionArmDeadlineTick_` from `750 ms` to `2500 ms` and refreshed it on the confirming `skip` event so high-latency lossless/Hi-Res track switches never expire before Apple Music calls `IAudioClient::Stop` (fixing the 8–10 s stale drain and 20 s successor stall).
   - Detected single-clicks on row `ButtonBase` controls (e.g., hover Play button inside a `ListViewItem`) in `UiAdapter.cpp` and added `DirectSelectionActiveForStop()` in `AudioCoreRuntime.cpp` so single-click manual switches retire immediately without waiting 500 ms for producer EOF or draining the old buffer.
   - Preserved full natural-EOF tail drain (`BeginEndOfStreamDrainLocked` + `RaatSink::FinishEndOfStream`) for automatic playlist playback whenever no manual switch is armed or natural producer EOF has already been signaled.
-- **Global logging switch with hot-reload**:
-  - Added logging=1 (default on) to [mod] in m-exclusive.ini and BoundedLog.h. Setting logging=0 immediately stops all disk log writing across all components (m-exclusive.log, m-exclusive-dlna.log, m-exclusive-audiohost.log, etc.) without requiring an Apple Music restart.
-- **Special Acknowledgement**:
-  - Special thanks to gemini neon, what a good cat! (感谢 gemini neon，真是个好喵 🐱)
 
 ## [0.3.9] - 2026-11-20
 

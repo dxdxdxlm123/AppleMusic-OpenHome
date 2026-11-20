@@ -131,6 +131,8 @@ winrt::weak_ref<Controls::TextBlock> g_outputTargetStatus;
 std::atomic<int> g_activeOutputTab{0}; // 0 = local, 1 = network, 2 = Roon
 winrt::weak_ref<Controls::ToggleSwitch> g_remoteToggle;
 winrt::weak_ref<Controls::TextBlock> g_remoteStatusText;
+winrt::weak_ref<Controls::ToggleSwitch> g_wavId3Toggle;
+winrt::weak_ref<Controls::ToggleSwitch> g_loggingToggle;
 void ApplyRemoteSettings();
 void StartRemoteServerProcess(int port = 10767);
 void StopRemoteServerProcess();
@@ -1287,6 +1289,8 @@ void RefreshUiWindow(const std::shared_ptr<UiWindowContext>& context) {
                             g_statusRefreshTimer = nullptr;
                             g_toggle = {}; g_hardwareBufferBox = {};
                             g_resamplingToggle = {}; g_outputFormatCard = {};
+                g_wavId3Toggle = {}; g_loggingToggle = {};
+                            g_wavId3Toggle = {}; g_loggingToggle = {};
                             g_dispatcher = nullptr;
                             g_settingsWindow = {};
                         }
@@ -1312,6 +1316,7 @@ void RefreshUiWindow(const std::shared_ptr<UiWindowContext>& context) {
                 g_statusRefreshTimer = nullptr;
                 g_toggle = {}; g_hardwareBufferBox = {};
                 g_resamplingToggle = {}; g_outputFormatCard = {};
+                g_wavId3Toggle = {}; g_loggingToggle = {};
                 g_dispatcher = context->dispatcher;
             }
             g_settingsWindow = context->window;
@@ -3450,6 +3455,146 @@ Controls::Border CreateRemoteControlCard(
     return card;
 }
 
+Controls::Border CreateWavId3Card(
+    const Controls::Border& appearance,
+    const Controls::ToggleSwitch& templateToggle,
+    const std::vector<Controls::TextBlock>& nativeText) {
+
+    Controls::TextBlock title;
+    title.Text(Localized(L"内嵌标签", L"Embedded ID3 Tags"));
+    title.TextWrapping(Xaml::TextWrapping::Wrap);
+
+    Controls::TextBlock description;
+    description.Text(Localized(
+        L"为网播 WAV 流内嵌 ID3 标签与封面，用于修复山灵等部分数播机身屏幕显示 Unknown 歌手/专辑/无封面的问题；默认开启，如遇极少数挑剔设备无法识别时可关闭。",
+        L"Embeds ID3 metadata and album art into the DLNA/OpenHome WAV stream to fix Unknown artist/album/artwork display on renderers like Shanling EM7. Default on; turn off if your renderer has compatibility issues."));
+    description.TextWrapping(Xaml::TextWrapping::Wrap);
+
+    if (!nativeText.empty()) title.Style(nativeText[0].Style());
+    if (nativeText.size() > 1) description.Style(nativeText[1].Style());
+
+    Controls::StackPanel labels;
+    labels.VerticalAlignment(Xaml::VerticalAlignment::Center);
+    labels.Margin(Xaml::Thickness{0, 0, 16, 0});
+    labels.Children().Append(title);
+    labels.Children().Append(description);
+
+    Controls::ToggleSwitch toggle;
+    toggle.Name(L"AMExclusiveWavId3Toggle");
+    toggle.Header(nullptr);
+    toggle.OnContent(nullptr);
+    toggle.OffContent(nullptr);
+    toggle.Style(templateToggle.Style());
+    toggle.Margin(templateToggle.Margin());
+    toggle.Padding(templateToggle.Padding());
+    toggle.MinWidth(templateToggle.MinWidth());
+    toggle.VerticalAlignment(Xaml::VerticalAlignment::Center);
+    Automation::AutomationProperties::SetName(toggle, title.Text());
+    Automation::AutomationProperties::SetHelpText(toggle, description.Text());
+
+    const auto ini = StreamFormatIniPath();
+    const bool saved = GetPrivateProfileIntW(L"dlna", L"wav_id3_metadata", 1, ini.c_str()) != 0;
+    toggle.IsOn(saved);
+
+    toggle.Toggled([](auto&& sender, auto&&) {
+        try {
+            const bool enabled = sender.template as<Controls::ToggleSwitch>().IsOn();
+            const auto ini = StreamFormatIniPath();
+            if (!ini.empty()) {
+                WritePrivateProfileStringW(L"dlna", L"wav_id3_metadata", enabled ? L"1" : L"0", ini.c_str());
+                (void)WritePrivateProfileStringW(nullptr, nullptr, nullptr, ini.c_str());
+            }
+            Log(L"wav_id3_metadata setting changed enabled=" + std::to_wstring(enabled));
+        } catch (...) {
+        }
+    });
+
+    g_wavId3Toggle = winrt::make_weak(toggle);
+
+    Controls::ColumnDefinition labelColumn;
+    labelColumn.Width(Xaml::GridLength{1.0, Xaml::GridUnitType::Star});
+    Controls::ColumnDefinition toggleColumn;
+    toggleColumn.Width(Xaml::GridLength{1.0, Xaml::GridUnitType::Auto});
+    Controls::Grid content;
+    content.ColumnDefinitions().Append(labelColumn);
+    content.ColumnDefinitions().Append(toggleColumn);
+    content.Children().Append(labels);
+    Controls::Grid::SetColumn(toggle, 1);
+    content.Children().Append(toggle);
+
+    return CreateSettingsCard(appearance, L"AMExclusiveWavId3Card", content);
+}
+
+Controls::Border CreateLoggingCard(
+    const Controls::Border& appearance,
+    const Controls::ToggleSwitch& templateToggle,
+    const std::vector<Controls::TextBlock>& nativeText) {
+
+    Controls::TextBlock title;
+    title.Text(Localized(L"日志开关", L"Diagnostic Logging"));
+    title.TextWrapping(Xaml::TextWrapping::Wrap);
+
+    Controls::TextBlock description;
+    description.Text(Localized(
+        L"控制是否向本地写入诊断日志，关闭可减少磁盘写入与 I/O 开销；默认开启，修改后即时生效。",
+        L"Controls whether diagnostic logs are written to disk. Turning this off reduces disk I/O; default on, changes take effect immediately without restarting."));
+    description.TextWrapping(Xaml::TextWrapping::Wrap);
+
+    if (!nativeText.empty()) title.Style(nativeText[0].Style());
+    if (nativeText.size() > 1) description.Style(nativeText[1].Style());
+
+    Controls::StackPanel labels;
+    labels.VerticalAlignment(Xaml::VerticalAlignment::Center);
+    labels.Margin(Xaml::Thickness{0, 0, 16, 0});
+    labels.Children().Append(title);
+    labels.Children().Append(description);
+
+    Controls::ToggleSwitch toggle;
+    toggle.Name(L"AMExclusiveLoggingToggle");
+    toggle.Header(nullptr);
+    toggle.OnContent(nullptr);
+    toggle.OffContent(nullptr);
+    toggle.Style(templateToggle.Style());
+    toggle.Margin(templateToggle.Margin());
+    toggle.Padding(templateToggle.Padding());
+    toggle.MinWidth(templateToggle.MinWidth());
+    toggle.VerticalAlignment(Xaml::VerticalAlignment::Center);
+    Automation::AutomationProperties::SetName(toggle, title.Text());
+    Automation::AutomationProperties::SetHelpText(toggle, description.Text());
+
+    const auto ini = StreamFormatIniPath();
+    const bool saved = GetPrivateProfileIntW(L"mod", L"logging", 1, ini.c_str()) != 0;
+    toggle.IsOn(saved);
+
+    toggle.Toggled([](auto&& sender, auto&&) {
+        try {
+            const bool enabled = sender.template as<Controls::ToggleSwitch>().IsOn();
+            const auto ini = StreamFormatIniPath();
+            if (!ini.empty()) {
+                WritePrivateProfileStringW(L"mod", L"logging", enabled ? L"1" : L"0", ini.c_str());
+                (void)WritePrivateProfileStringW(nullptr, nullptr, nullptr, ini.c_str());
+            }
+            Log(L"logging setting changed enabled=" + std::to_wstring(enabled));
+        } catch (...) {
+        }
+    });
+
+    g_loggingToggle = winrt::make_weak(toggle);
+
+    Controls::ColumnDefinition labelColumn;
+    labelColumn.Width(Xaml::GridLength{1.0, Xaml::GridUnitType::Star});
+    Controls::ColumnDefinition toggleColumn;
+    toggleColumn.Width(Xaml::GridLength{1.0, Xaml::GridUnitType::Auto});
+    Controls::Grid content;
+    content.ColumnDefinitions().Append(labelColumn);
+    content.ColumnDefinitions().Append(toggleColumn);
+    content.Children().Append(labels);
+    Controls::Grid::SetColumn(toggle, 1);
+    content.Children().Append(toggle);
+
+    return CreateSettingsCard(appearance, L"AMExclusiveLoggingCard", content);
+}
+
 
 bool AttachOrRefreshToggle(const Xaml::DependencyObject& page) {
     try {
@@ -3495,6 +3640,18 @@ bool AttachOrRefreshToggle(const Xaml::DependencyObject& page) {
                     bool isRunning = IsRemoteServerProcessRunning();
                     UpdateRemoteStatusDisplay(isRunning && (savedEnabled == 1), savedPort);
                 }
+                ++complete;
+            }
+            if (auto wavId3Toggle = FindByName(page, L"AMExclusiveWavId3Toggle").try_as<Controls::ToggleSwitch>()) {
+                g_wavId3Toggle = winrt::make_weak(wavId3Toggle);
+                const auto ini = StreamFormatIniPath();
+                wavId3Toggle.IsOn(GetPrivateProfileIntW(L"dlna", L"wav_id3_metadata", 1, ini.c_str()) != 0);
+                ++complete;
+            }
+            if (auto loggingToggle = FindByName(page, L"AMExclusiveLoggingToggle").try_as<Controls::ToggleSwitch>()) {
+                g_loggingToggle = winrt::make_weak(loggingToggle);
+                const auto ini = StreamFormatIniPath();
+                loggingToggle.IsOn(GetPrivateProfileIntW(L"mod", L"logging", 1, ini.c_str()) != 0);
                 ++complete;
             }
             return complete >= 5;
@@ -3823,10 +3980,12 @@ bool AttachOrRefreshToggle(const Xaml::DependencyObject& page) {
         auto formatCard = CreateOutputFormatCard(card, nativeText);
         auto outputTargetCard = CreateOutputTargetCard(card, nativeText);
         auto remoteCard = CreateRemoteControlCard(card, toggle, nativeText);
+        auto wavId3Card = CreateWavId3Card(card, toggle, nativeText);
+        auto loggingCard = CreateLoggingCard(card, toggle, nativeText);
         // Construct all cards before publishing any. If an append fails, only
         // remove this batch, so the next readiness callback can retry cleanly.
         const Xaml::UIElement cards[]{card, bufferCard, resamplingCard, formatCard,
-                                      outputTargetCard, remoteCard};
+                                      outputTargetCard, wavId3Card, remoteCard, loggingCard};
         auto children = target.Children();
         try {
             for (const auto& item : cards) children.Append(item);
@@ -3850,7 +4009,9 @@ bool AttachOrRefreshToggle(const Xaml::DependencyObject& page) {
         Log(L"Resampling settings card attached to PlaybackSettingsPage");
         Log(L"Audio format settings card attached to PlaybackSettingsPage");
         Log(L"Output target settings card attached to PlaybackSettingsPage");
+        Log(L"WAV ID3 metadata settings card attached to PlaybackSettingsPage");
         Log(L"Remote control settings card attached to PlaybackSettingsPage");
+        Log(L"Logging settings card attached to PlaybackSettingsPage");
         return true;
     } catch (const hresult_error& error) {
         std::wostringstream text;

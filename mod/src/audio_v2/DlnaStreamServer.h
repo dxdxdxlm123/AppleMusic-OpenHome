@@ -30,7 +30,7 @@ class DlnaStreamSession final {
 public:
     DlnaStreamSession(std::wstring token, PcmFormat format, DlnaStreamShape shape,
                       std::uint32_t capacityBytes, std::wstring contentFeatures,
-                      std::uint64_t totalBytes) noexcept;
+                      std::uint64_t totalBytes, std::vector<BYTE> wavMetadata = {});
     ~DlnaStreamSession();
 
     DlnaStreamSession(const DlnaStreamSession&) = delete;
@@ -49,13 +49,13 @@ public:
     bool Wav() const noexcept { return DlnaStreamShapeUsesWavContainer(shape_); }
     const std::wstring& ContentFeatures() const noexcept { return contentFeatures_; }
 
-    // Declared length of the whole entity, WAV header included. AURALiC-class
-    // renderers refuse a body with no total: they probe once, then re-request
-    // the payload as "Range: bytes=44-" and stop if the answer carries no
-    // Content-Range total. This value is what the response advertises, so it
-    // must be fixed before the first response is written.
+    // Constructor totalBytes uses the legacy 44 + PCM convention for WAV. An
+    // accepted metadata chunk is added once; TotalBytes is the final immutable
+    // entity size used by HTTP and DIDL. Malformed chunks are ignored.
     std::uint64_t TotalBytes() const noexcept { return totalBytes_; }
-    static constexpr std::uint64_t kWavHeaderBytes = 44;
+    static constexpr std::uint64_t kWavHeaderBytes = 44; // no-metadata default
+    std::uint64_t HeaderBytes() const noexcept { return wavPrefix_.size(); }
+    const std::vector<BYTE>& WavPrefix() const noexcept { return wavPrefix_; }
 
     bool Append(const BYTE* data, std::size_t bytes, bool endOfStream) noexcept;
 
@@ -89,7 +89,7 @@ public:
     };
 
     // A reader positioned at an absolute entity offset (WAV header included).
-    // Renderers re-request the payload with "Range: bytes=44-" after probing,
+    // Renderers re-request the payload at HeaderBytes() after probing,
     // so the server must be able to attach at an offset that is behind the
     // producer. `reachable` is false when that offset has already been
     // reclaimed; the caller then answers 416 instead of serving wrong bytes.
@@ -113,8 +113,8 @@ public:
     void RequestAppendCancel() noexcept;
     // Clear a previous graceful cancel when the same session is resumed.
     void ResetAppendCancel() noexcept;
-    // Any byte-range request means the renderer has committed to the real
-    // pull, so the ring may start discarding the head of the stream. Without
+    // A byte-range GET that includes PCM means the renderer has committed to
+    // the real pull; prefix-only probes must not call this. Without
     // this a renderer that asks for "bytes=0-" would stall the producer
     // forever once the ring filled.
     void MarkRangeRequested() noexcept;
@@ -201,6 +201,7 @@ private:
     std::wstring mime_;
     std::wstring contentFeatures_;
     std::uint64_t totalBytes_{};
+    std::vector<BYTE> wavPrefix_; // constructed once, before AddSession/publication
     std::uint32_t bytesPerFrame_{};
     std::uint32_t capacityBytes_{};
     std::vector<BYTE> ring_;
@@ -232,7 +233,8 @@ private:
 };
 
 // Minimal HTTP/1.1 streaming server. It intentionally supports only GET/HEAD
-// for /ame/<session-token> and closes the connection at end of stream.
+// for /ame/<session-token> and bounded /artwork/<opaque-token> assets. Each
+// response closes the connection at end of stream/body.
 class DlnaStreamServer final {
 public:
     DlnaStreamServer() = default;
@@ -248,6 +250,12 @@ public:
     std::wstring BaseUrl() const;
     bool Running() const noexcept;
 
+    // Copies at most 2 MiB of PNG/JPEG data; MIME is inferred from its signature,
+    // never trusted from the hint. Returns a full same-listener URL, or empty
+    // on invalid data / stopped server / allocation failure. Retains the newest
+    // 8 images (at most 16 MiB), independent of audio-session removal.
+    std::wstring AddArtwork(const std::vector<BYTE>& bytes, const std::wstring& mime);
+
     void AddSession(const std::shared_ptr<DlnaStreamSession>& session);
     void RemoveSession(const std::wstring& token);
     // Live-mode alias: `alias` resolves to the session the renderer should
@@ -262,12 +270,13 @@ public:
     std::shared_ptr<DlnaStreamSession> FindSession(const std::wstring& token) const;
 
     static std::vector<BYTE> WavHeader(const PcmFormat& format,
-                                       std::uint64_t totalBytes);
+                                       std::uint64_t totalBytes,
+                                       const std::vector<BYTE>& wavMetadata = {});
     static std::wstring ContentType(const PcmFormat& format, DlnaStreamShape shape);
 
 private:
     struct State;
-    std::shared_ptr<State> state_;
+    std::atomic<std::shared_ptr<State>> state_;
 };
 
 } // namespace ammod::audio_v2

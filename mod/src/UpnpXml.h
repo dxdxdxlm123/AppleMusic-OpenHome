@@ -49,7 +49,16 @@ bool ParseSoapResponse(const std::wstring& xml,
                        int& errorCode,
                        std::wstring& errorDescription) noexcept;
 
-// Minimal DIDL-Lite for an LPCM/WAV stream. protocolInfo is copied verbatim.
+// Optional item metadata. Artwork is an immutable, renderer-accessible HTTP URL;
+// no JPEG_TN profile is claimed for an arbitrary SMTC thumbnail.
+struct ItemMetadata final {
+    std::wstring artist;
+    std::wstring album;
+    std::wstring albumArtUri;
+    std::uint32_t trackNumber{};
+};
+
+// Minimal DIDL-Lite for an LPCM/WAV stream. protocolInfo is escaped as an attribute.
 // broadcast selects the network-radio item class. A live stream that declares
 // no length must be an audioBroadcast: a musicTrack without a duration is
 // reported as a zero-length item by OpenHome playlist renderers, which then
@@ -65,6 +74,7 @@ std::wstring BuildDidlLite(const std::wstring& id,
                            std::uint64_t sizeBytes = 0,
                            std::uint32_t sampleRate = 0,
                            std::uint32_t bitsPerSample = 0,
-                           std::uint32_t channels = 0);
+                           std::uint32_t channels = 0,
+                           const ItemMetadata& metadata = {});
 
 } // namespace ammod::upnp

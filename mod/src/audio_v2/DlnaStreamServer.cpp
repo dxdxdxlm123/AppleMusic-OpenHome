@@ -5,8 +5,10 @@
 
 #include "DlnaLog.h"
 #include "MemoryLock.h"
+#include "../WavMetadata.h"
 
 #include <windows.h>
+#include <objbase.h>
 
 #include <algorithm>
 #include <optional>
@@ -14,8 +16,11 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <limits>
+#include <stdexcept>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace ammod::audio_v2 {
@@ -24,6 +29,34 @@ namespace {
 constexpr std::uint32_t kMaxHttpHeaderBytes = 4096;
 constexpr std::uint32_t kSendChunkBytes = 65536;
 constexpr std::uint32_t kMaxSessionBytes = 32u * 1024u * 1024u;
+constexpr std::size_t kMaxArtworkBytes = 2u * 1024u * 1024u;
+constexpr std::size_t kMaxArtworkCount = 8;
+constexpr std::size_t kMaxArtworkCacheBytes = 16u * 1024u * 1024u;
+
+// Signature checks only, not an image decoder: no supplied MIME can inject an
+// HTTP header or expose arbitrary HTML/SVG through this listener.
+const wchar_t* ArtworkContentType(const std::vector<BYTE>& bytes) noexcept {
+    static constexpr BYTE png[] = {0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a};
+    if (bytes.size() >= sizeof(png) &&
+        std::memcmp(bytes.data(), png, sizeof(png)) == 0) return L"image/png";
+    if (bytes.size() >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 &&
+        bytes[2] == 0xff) return L"image/jpeg";
+    return nullptr;
+}
+
+std::string NewArtworkPath() {
+    GUID guid{};
+    // Do not fall back to a predictable counter or shared URL on failure.
+    if (FAILED(CoCreateGuid(&guid))) return {};
+    static constexpr char hex[] = "0123456789abcdef";
+    std::string path = "/artwork/";
+    const auto* bytes = reinterpret_cast<const BYTE*>(&guid);
+    for (std::size_t i = 0; i != sizeof(guid); ++i) {
+        path.push_back(hex[bytes[i] >> 4]);
+        path.push_back(hex[bytes[i] & 0x0f]);
+    }
+    return path;
+}
 
 bool EnsureWinsock() {
     static std::once_flag once;
@@ -84,6 +117,73 @@ std::wstring CommonHeaders() {
     return headers;
 }
 
+std::string_view TrimHttpSpace(std::string_view value) noexcept {
+    while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
+    while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.remove_suffix(1);
+    return value;
+}
+
+bool HttpEquals(std::string_view a, std::string_view b) noexcept {
+    if (a.size() != b.size()) return false;
+    for (std::size_t i = 0; i != a.size(); ++i) {
+        const char ch = a[i] >= 'A' && a[i] <= 'Z' ? static_cast<char>(a[i] + ('a' - 'A')) : a[i];
+        if (ch != b[i]) return false;
+    }
+    return true;
+}
+
+bool ParseUnsigned(std::string_view text, std::uint64_t& value) noexcept {
+    if (text.empty()) return false;
+    value = 0;
+    for (char ch : text) {
+        if (ch < '0' || ch > '9') return false;
+        const auto digit = static_cast<unsigned>(ch - '0');
+        if (value > (std::numeric_limits<std::uint64_t>::max() - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    return true;
+}
+
+// One bounded file range. Reject malformed, overflowing, duplicate, or multipart
+// fields instead of accidentally answering a full 200 to a partial request.
+bool ParseFileRange(std::string_view request, std::uint64_t total,
+                    std::uint64_t& first, std::uint64_t& last, bool& present) noexcept {
+    first = 0; last = total - 1; present = false;
+    auto position = request.find("\r\n");
+    if (position == std::string_view::npos) return false;
+    position += 2;
+    while (position < request.size()) {
+        const auto end = request.find("\r\n", position);
+        if (end == std::string_view::npos) return false;
+        if (end == position) break;
+        const auto line = request.substr(position, end - position);
+        position = end + 2;
+        const auto colon = line.find(':');
+        if (colon == std::string_view::npos || !HttpEquals(line.substr(0, colon), "range")) continue;
+        if (present) return false;
+        present = true;
+        auto value = TrimHttpSpace(line.substr(colon + 1));
+        if (value.size() < 6 || !HttpEquals(value.substr(0, 6), "bytes=")) return false;
+        value.remove_prefix(6);
+        const auto dash = value.find('-');
+        if (dash == std::string_view::npos) return false;
+        const auto left = value.substr(0, dash);
+        const auto right = value.substr(dash + 1);
+        if (left.empty()) {
+            std::uint64_t suffix = 0;
+            if (!ParseUnsigned(right, suffix) || suffix == 0) return false;
+            first = suffix >= total ? 0 : total - suffix;
+        } else {
+            if (!ParseUnsigned(left, first) || first >= total) return false;
+            if (!right.empty()) {
+                if (!ParseUnsigned(right, last) || last < first) return false;
+                last = std::min(last, total - 1);
+            }
+        }
+    }
+    return first <= last;
+}
+
 void WriteLE16(std::vector<BYTE>& bytes, std::uint16_t value) {
     bytes.push_back(static_cast<BYTE>(value & 0xFF));
     bytes.push_back(static_cast<BYTE>((value >> 8) & 0xFF));
@@ -102,7 +202,8 @@ DlnaStreamSession::DlnaStreamSession(std::wstring token, PcmFormat format,
                                      DlnaStreamShape shape,
                                      std::uint32_t capacityBytes,
                                      std::wstring contentFeatures,
-                                     std::uint64_t totalBytes) noexcept
+                                     std::uint64_t totalBytes,
+                                     std::vector<BYTE> wavMetadata)
     : token_(std::move(token)), format_(format), shape_(shape),
       contentFeatures_(std::move(contentFeatures)),
       totalBytes_(shape == DlnaStreamShape::WavFile
@@ -112,7 +213,17 @@ DlnaStreamSession::DlnaStreamSession(std::wstring token, PcmFormat format,
                      (static_cast<std::uint32_t>(format.containerBits) / 8u)),
       capacityBytes_(std::max<std::uint32_t>(256u * 1024u,
                                              std::min<std::uint32_t>(capacityBytes, kMaxSessionBytes))),
-      ring_(capacityBytes_) {}
+      ring_(capacityBytes_) {
+    if (shape_ == DlnaStreamShape::WavFile) {
+        if (!metadata::IsWavId3Chunk(wavMetadata)) wavMetadata.clear();
+        constexpr auto maxRiffTotal = std::uint64_t(std::numeric_limits<std::uint32_t>::max()) + 8;
+        if (totalBytes_ > maxRiffTotal - wavMetadata.size()) {
+            throw std::length_error("WAV entity exceeds RIFF 32-bit size");
+        }
+        totalBytes_ += wavMetadata.size();
+        wavPrefix_ = DlnaStreamServer::WavHeader(format_, totalBytes_, wavMetadata);
+    }
+}
 
 DlnaStreamSession::~DlnaStreamSession() = default;
 
@@ -271,7 +382,7 @@ void DlnaStreamSession::ReclaimLocked() noexcept {
     // see NewReaderAt.
     const bool isFileShape =
         (shape_ == DlnaStreamShape::WavFile || shape_ == DlnaStreamShape::FlacFile) &&
-        totalBytes_ > kWavHeaderBytes;
+        totalBytes_ > (shape_ == DlnaStreamShape::WavFile ? HeaderBytes() : kWavHeaderBytes);
     if (isFileShape && !rangeRequested_) {
         bool hasCommittedReader = false;
         for (const auto& entry : readers_) {
@@ -404,19 +515,15 @@ bool DlnaStreamSession::Reader::Read(BYTE* destination, std::size_t maxBytes,
 DlnaStreamSession::Reader DlnaStreamSession::NewReaderAt(std::uint64_t entityOffset,
                                                          bool& reachable) noexcept {
     std::lock_guard lock(mutex_);
-    // Entity offset -> payload cursor. Bytes [0, 44) are the RIFF header, which
-    // the HTTP layer synthesises itself, so every offset below the header maps
-    // to the first payload byte.
-    // Only a WAV entity carries the synthesised 44-byte header; a FLAC file
-    // shape streams its own container bytes, so offsets map one to one.
-    const std::uint64_t cursor = shape_ == DlnaStreamShape::WavFile
-        ? (entityOffset > kWavHeaderBytes ? entityOffset - kWavHeaderBytes : 0)
-        : entityOffset;
+    // The immutable WAV prefix is outside the PCM ring. FLAC has prefix size
+    // zero and already carries its own container, so its offsets are unchanged.
+    const std::uint64_t prefix = HeaderBytes();
+    const std::uint64_t cursor = entityOffset > prefix ? entityOffset - prefix : 0;
     // A renderer that asks for a byte offset has committed to the real pull;
     // only from that moment may the ring discard the head of the stream. Until
     // then the entity must stay addressable from byte 0, because the probe
     // connections that precede it read a few tens of KB and hang up - if those
-    // were allowed to reclaim, the subsequent "Range: bytes=44-" would land
+    // were allowed to reclaim, the subsequent payload range would land
     // outside the retained window and be answered with 416.
     const std::uint64_t oldest = produced_ - size_;
     if (cursor > produced_ || cursor < oldest) {
@@ -541,25 +648,42 @@ struct DlnaStreamServer::State final {
     // Live-mode aliases (see SetAliasSession). Guarded by sessionsMutex.
     std::map<std::wstring, std::shared_ptr<DlnaStreamSession>> aliases;
 
+    struct Artwork final {
+        std::string path;
+        std::wstring mime;
+        std::vector<BYTE> bytes;
+    };
+    // FIFO retention is separate from sessions: late cover GETs remain valid
+    // after RemoveSession. Readers hold a shared immutable asset after unlock.
+    std::mutex artworkMutex;
+    std::deque<std::shared_ptr<const Artwork>> artwork;
+    std::size_t artworkBytes{};
+
     void ClientThread(SOCKET client) noexcept;
 };
 
 std::vector<BYTE> DlnaStreamServer::WavHeader(const PcmFormat& format,
-                                             std::uint64_t totalBytes) {
+                                             std::uint64_t totalBytes,
+                                             const std::vector<BYTE>& wavMetadata) {
+    if (!wavMetadata.empty() && !metadata::IsWavId3Chunk(wavMetadata)) {
+        throw std::invalid_argument("invalid WAV ID3 chunk");
+    }
+    const std::uint64_t prefixBytes = DlnaStreamSession::kWavHeaderBytes + wavMetadata.size();
+    if (totalBytes < prefixBytes || totalBytes - 8 > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::length_error("WAV entity exceeds RIFF 32-bit size");
+    }
     std::vector<BYTE> header;
-    header.reserve(44);
+    header.reserve(static_cast<std::size_t>(prefixBytes));
     const std::uint16_t channels = std::max<std::uint16_t>(1, format.channels);
     const std::uint16_t containerBytes =
         static_cast<std::uint16_t>(format.containerBits / 8u);
     const std::uint16_t blockAlign = static_cast<std::uint16_t>(channels * containerBytes);
     // The RIFF and data sizes must agree with the Content-Length the response
-    // declares. AURALiC-class renderers parse this header and then re-request
-    // the payload as "Range: bytes=44-", so 0xFFFFFFFF ("unknown") is rejected
-    // as an unsupported format long before any audio is decoded.
-    const std::uint32_t dataBytes = static_cast<std::uint32_t>(
-        std::max<std::uint64_t>(0, totalBytes > 44 ? totalBytes - 44 : 0));
+    // declares. Renderers parse the actual data offset (including ID3), so the
+    // prefix, RIFF length, data length, and HTTP entity must agree exactly.
+    const auto dataBytes = static_cast<std::uint32_t>(totalBytes - prefixBytes);
     header.insert(header.end(), {'R', 'I', 'F', 'F'});
-    WriteLE32(header, 36u + dataBytes);
+    WriteLE32(header, static_cast<std::uint32_t>(totalBytes - 8));
     header.insert(header.end(), {'W', 'A', 'V', 'E'});
     header.insert(header.end(), {'f', 'm', 't', ' '});
     WriteLE32(header, 16);
@@ -569,6 +693,7 @@ std::vector<BYTE> DlnaStreamServer::WavHeader(const PcmFormat& format,
     WriteLE32(header, format.sampleRate * blockAlign);
     WriteLE16(header, blockAlign);
     WriteLE16(header, format.containerBits);
+    header.insert(header.end(), wavMetadata.begin(), wavMetadata.end());
     header.insert(header.end(), {'d', 'a', 't', 'a'});
     WriteLE32(header, dataBytes);
     return header;
@@ -630,7 +755,6 @@ bool DlnaStreamServer::Start(const std::wstring& bindAddress, std::uint16_t& por
     state->listenSocket.store(socket, std::memory_order_release);
     state->bindIp = bindAddress;
     state->port = ntohs(actual.sin_port);
-    state_ = state;
     state->acceptThread = std::thread([state] {
         while (!state->stopping.load(std::memory_order_acquire)) {
             const SOCKET listenSocket = state->listenSocket.load(std::memory_order_acquire);
@@ -651,13 +775,16 @@ bool DlnaStreamServer::Start(const std::wstring& bindAddress, std::uint16_t& por
             }).detach();
         }
     });
+    // Publish only after the accept thread is owned, so Stop never observes a
+    // partially initialized State. Start calls themselves remain serialized.
+    state_.store(state, std::memory_order_release);
     port = state->port;
     return true;
 }
 
 void DlnaStreamServer::Stop() noexcept {
-    if (!state_) return;
-    auto state = std::move(state_);
+    auto state = state_.exchange(nullptr, std::memory_order_acq_rel);
+    if (!state) return;
     state->stopping.store(true, std::memory_order_release);
     const auto socket = state->listenSocket.exchange(INVALID_SOCKET,
                                                      std::memory_order_acq_rel);
@@ -673,34 +800,81 @@ void DlnaStreamServer::Stop() noexcept {
         state->sessions.clear();
         state->aliases.clear();
     }
+    {
+        std::lock_guard lock(state->artworkMutex);
+        state->artwork.clear();
+        state->artworkBytes = 0;
+    }
     if (state->acceptThread.joinable()) state->acceptThread.join();
 }
 
 bool DlnaStreamServer::Running() const noexcept {
-    return state_ &&
-        state_->listenSocket.load(std::memory_order_acquire) != INVALID_SOCKET;
+    const auto state = state_.load(std::memory_order_acquire);
+    return state && !state->stopping.load(std::memory_order_acquire) &&
+        state->listenSocket.load(std::memory_order_acquire) != INVALID_SOCKET;
 }
 
 std::wstring DlnaStreamServer::BaseUrl() const {
-    if (!state_) return {};
-    return L"http://" + state_->bindIp + L":" + std::to_wstring(state_->port);
+    const auto state = state_.load(std::memory_order_acquire);
+    if (!state) return {};
+    return L"http://" + state->bindIp + L":" + std::to_wstring(state->port);
+}
+
+std::wstring DlnaStreamServer::AddArtwork(const std::vector<BYTE>& bytes,
+                                          const std::wstring& mime) {
+    (void)mime; // Untrusted hint. Only the actual signature selects Content-Type.
+    if (bytes.empty() || bytes.size() > kMaxArtworkBytes) return {};
+    const auto* contentType = ArtworkContentType(bytes);
+    if (!contentType) return {};
+    const auto state = state_.load(std::memory_order_acquire);
+    if (!state || state->stopping.load(std::memory_order_acquire)) return {};
+    try {
+        auto asset = std::make_shared<State::Artwork>();
+        asset->path = NewArtworkPath();
+        if (asset->path.empty()) return {};
+        asset->mime = contentType;
+        asset->bytes = bytes;
+        const std::wstring url = L"http://" + state->bindIp + L":" +
+            std::to_wstring(state->port) +
+            std::wstring(asset->path.begin(), asset->path.end());
+        std::lock_guard lock(state->artworkMutex);
+        if (state->stopping.load(std::memory_order_acquire)) return {};
+        for (const auto& existing : state->artwork) {
+            if (existing->path == asset->path) return {};
+        }
+        // Push first: an allocation failure must not evict a usable cover.
+        state->artwork.push_back(asset);
+        state->artworkBytes += asset->bytes.size();
+        while (state->artwork.size() > kMaxArtworkCount ||
+               state->artworkBytes > kMaxArtworkCacheBytes) {
+            state->artworkBytes -= state->artwork.front()->bytes.size();
+            state->artwork.pop_front();
+        }
+        return url;
+    } catch (...) {
+        return {};
+    }
 }
 
 void DlnaStreamServer::AddSession(const std::shared_ptr<DlnaStreamSession>& session) {
-    if (!state_ || !session) return;
-    std::lock_guard lock(state_->sessionsMutex);
-    state_->sessions[session->Token()] = session;
+    const auto state = state_.load(std::memory_order_acquire);
+    if (!state || !session) return;
+    std::lock_guard lock(state->sessionsMutex);
+    if (!state->stopping.load(std::memory_order_acquire)) {
+        state->sessions[session->Token()] = session;
+    }
 }
 
 void DlnaStreamServer::RemoveSession(const std::wstring& token) {
-    if (!state_) return;
+    const auto state = state_.load(std::memory_order_acquire);
+    if (!state) return;
     std::shared_ptr<DlnaStreamSession> removed;
     {
-        std::lock_guard lock(state_->sessionsMutex);
-        const auto found = state_->sessions.find(token);
-        if (found != state_->sessions.end()) {
+        std::lock_guard lock(state->sessionsMutex);
+        const auto found = state->sessions.find(token);
+        if (found != state->sessions.end()) {
             removed = found->second;
-            state_->sessions.erase(found);
+            state->sessions.erase(found);
         }
     }
     if (removed) removed->Abort();
@@ -708,26 +882,31 @@ void DlnaStreamServer::RemoveSession(const std::wstring& token) {
 
 void DlnaStreamServer::SetAliasSession(const std::wstring& alias,
                                         const std::shared_ptr<DlnaStreamSession>& session) {
-    if (!state_ || alias.empty() || !session) return;
-    std::lock_guard lock(state_->sessionsMutex);
-    state_->aliases[alias] = session;
+    const auto state = state_.load(std::memory_order_acquire);
+    if (!state || alias.empty() || !session) return;
+    std::lock_guard lock(state->sessionsMutex);
+    if (!state->stopping.load(std::memory_order_acquire)) {
+        state->aliases[alias] = session;
+    }
 }
 
 void DlnaStreamServer::RemoveAlias(const std::wstring& alias) {
-    if (!state_) return;
-    std::lock_guard lock(state_->sessionsMutex);
-    state_->aliases.erase(alias);
+    const auto state = state_.load(std::memory_order_acquire);
+    if (!state) return;
+    std::lock_guard lock(state->sessionsMutex);
+    state->aliases.erase(alias);
 }
 
 std::shared_ptr<DlnaStreamSession> DlnaStreamServer::FindSession(
     const std::wstring& token) const {
-    if (!state_) return {};
-    std::lock_guard lock(state_->sessionsMutex);
-    const auto found = state_->sessions.find(token);
-    if (found != state_->sessions.end()) return found->second;
+    const auto state = state_.load(std::memory_order_acquire);
+    if (!state) return {};
+    std::lock_guard lock(state->sessionsMutex);
+    const auto found = state->sessions.find(token);
+    if (found != state->sessions.end()) return found->second;
     // Live mode: the advertised token is an alias, not the session's own GUID.
-    const auto alias = state_->aliases.find(token);
-    return alias == state_->aliases.end() ? nullptr : alias->second;
+    const auto alias = state->aliases.find(token);
+    return alias == state->aliases.end() ? nullptr : alias->second;
 }
 
 void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
@@ -774,10 +953,24 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
         (void)setsockopt(client, IPPROTO_IP, IP_TOS,
                          reinterpret_cast<const char*>(&dscp), sizeof(dscp));
     }
+    DWORD receiveTimeoutMs = 5000;
+    (void)setsockopt(client, SOL_SOCKET, SO_RCVTIMEO,
+                     reinterpret_cast<const char*>(&receiveTimeoutMs),
+                     sizeof(receiveTimeoutMs));
+    const auto emptyResponse = [client](const char* status, bool allow = false) {
+        std::string response = std::string("HTTP/1.1 ") + status +
+            "\r\nContent-Length: 0\r\nConnection: close\r\n";
+        if (allow) response += "Allow: GET, HEAD\r\n";
+        response += "\r\n";
+        (void)SendAll(client, response.data(), response.size());
+        closesocket(client);
+    };
     std::string request;
     char buffer[512]{};
     while (request.size() < kMaxHttpHeaderBytes) {
-        const int received = recv(client, buffer, sizeof(buffer), 0);
+        const int available = static_cast<int>(std::min<std::size_t>(
+            sizeof(buffer), kMaxHttpHeaderBytes - request.size()));
+        const int received = recv(client, buffer, available, 0);
         if (received <= 0) break;
         request.append(buffer, static_cast<std::size_t>(received));
         if (request.find("\r\n\r\n") != std::string::npos) break;
@@ -787,8 +980,8 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
         return;
     }
     const auto lineEnd = request.find("\r\n");
-    if (lineEnd == std::string::npos) {
-        closesocket(client);
+    if (lineEnd == std::string::npos || request.find("\r\n\r\n") == std::string::npos) {
+        emptyResponse("400 Bad Request");
         return;
     }
     const std::string requestLine = request.substr(0, lineEnd);
@@ -819,26 +1012,65 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
         LogDlnaLine(text);
     }
     if (!headRequest && !getRequest) {
-        const char* response = "HTTP/1.1 405 Method Not Allowed\r\nConnection: close\r\n\r\n";
-        (void)SendAll(client, response, std::strlen(response));
-        closesocket(client);
+        emptyResponse("405 Method Not Allowed", true);
         return;
     }
-    const auto pathStart = requestLine.find('/');
+    const auto pathStart = requestLine.find(' ') + 1;
     const auto pathEnd = requestLine.find(' ', pathStart);
-    if (pathStart == std::string::npos || pathEnd == std::string::npos) {
-        closesocket(client);
+    if (pathEnd == std::string::npos || pathEnd == pathStart ||
+        (requestLine.substr(pathEnd + 1) != "HTTP/1.1" &&
+         requestLine.substr(pathEnd + 1) != "HTTP/1.0")) {
+        emptyResponse("400 Bad Request");
         return;
     }
     std::string path = requestLine.substr(pathStart, pathEnd - pathStart);
-    const auto marker = path.find("/ame/");
-    if (marker == std::string::npos) {
-        const char* response = "HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n";
-        (void)SendAll(client, response, std::strlen(response));
+    // Origin-form only. Never interpret an absolute URL, escaped filesystem
+    // path, fragment or control byte. Queries do not participate in lookup.
+    if (path.front() != '/' || std::any_of(path.begin(), path.end(), [](unsigned char c) {
+            return c <= 0x20 || c >= 0x7f || c == '\\' || c == '#';
+        })) {
+        emptyResponse("400 Bad Request");
+        return;
+    }
+    const auto query = path.find('?');
+    if (query != std::string::npos) path.resize(query);
+    if (path.rfind("/artwork/", 0) == 0) {
+        // Exact key match: suffixes, traversal and percent-encoded paths are
+        // not decoded or accepted. In-flight copies outlive FIFO eviction.
+        std::shared_ptr<const Artwork> asset;
+        {
+            std::lock_guard lock(artworkMutex);
+            if (!stopping.load(std::memory_order_acquire)) {
+                for (const auto& candidate : artwork) {
+                    if (candidate->path == path) {
+                        asset = candidate;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!asset) {
+            emptyResponse("404 Not Found");
+            return;
+        }
+        std::wstring headers = L"HTTP/1.1 200 OK\r\n" + CommonHeaders();
+        headers += L"Content-Type: " + asset->mime + L"\r\n";
+        headers += L"Content-Length: " + std::to_wstring(asset->bytes.size()) + L"\r\n";
+        headers += L"X-Content-Type-Options: nosniff\r\n";
+        headers += L"Cache-Control: private, max-age=3600, immutable\r\n";
+        headers += L"Connection: close\r\n\r\n";
+        const auto wireHeaders = Narrow(headers);
+        if (SendAll(client, wireHeaders.data(), wireHeaders.size()) && !headRequest) {
+            (void)SendAll(client, asset->bytes.data(), asset->bytes.size());
+        }
         closesocket(client);
         return;
     }
-    const auto tokenStart = marker + 5;
+    if (path.rfind("/ame/", 0) != 0) {
+        emptyResponse("404 Not Found");
+        return;
+    }
+    const std::size_t tokenStart = 5;
     const auto tokenEnd = path.find_first_of("/.?", tokenStart);
     const std::string tokenBytes = path.substr(tokenStart, tokenEnd - tokenStart);
     const std::wstring token(tokenBytes.begin(), tokenBytes.end());
@@ -1074,7 +1306,7 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
     // body. Measured against a VEGA G2.2: a chunked, length-less WAV is read
     // for a few tens of KB and dropped ("unsupported format"), while the same
     // bytes served with Content-Length are fetched once as a probe and then
-    // re-requested as "Range: bytes=44-" -- the payload after the RIFF header
+    // re-requested at the parsed data offset -- after any RIFF metadata
     // -- and played in real time as it arrives. The total therefore has to be
     // declared up front even though the producer is still generating it.
     // ---------------------------------------------------------------------
@@ -1089,51 +1321,7 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
         std::uint64_t startAbs = 0;
         std::uint64_t endAbs = totalBytes - 1;
         bool hasRange = false;
-        {
-            const auto rangeAt = request.find("Range:");
-            if (rangeAt != std::string::npos) {
-                const auto lineEnd = request.find("\r\n", rangeAt);
-                std::string line = request.substr(
-                    rangeAt + 6,
-                    (lineEnd == std::string::npos ? request.size() : lineEnd) - rangeAt - 6);
-                const auto bytesAt = line.find("bytes=");
-                if (bytesAt != std::string::npos) {
-                    line = line.substr(bytesAt + 6);
-                    const auto dash = line.find('-');
-                    if (dash != std::string::npos) {
-                        const std::string first = line.substr(0, dash);
-                        const std::string second = line.substr(dash + 1);
-                        std::uint64_t parsedStart = 0;
-                        std::uint64_t parsedEnd = totalBytes - 1;
-                        bool ok = true;
-                        if (!first.empty()) {
-                            try {
-                                parsedStart = std::stoull(first);
-                            } catch (...) {
-                                ok = false;
-                            }
-                        } else {
-                            // Suffix range ("bytes=-N"): the renderer wants the
-                            // tail. A live stream cannot serve that.
-                            ok = false;
-                        }
-                        if (ok && !second.empty()) {
-                            try {
-                                parsedEnd = std::stoull(second);
-                            } catch (...) {
-                                ok = false;
-                            }
-                        }
-                        if (ok) {
-                            startAbs = parsedStart;
-                            endAbs = std::min(parsedEnd, totalBytes - 1);
-                            hasRange = true;
-                        }
-                    }
-                }
-            }
-        }
-        if (startAbs >= totalBytes || endAbs < startAbs) {
+        if (!ParseFileRange(request, totalBytes, startAbs, endAbs, hasRange)) {
             const auto response = "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */" +
                 std::to_string(totalBytes) + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             (void)SendAll(client, response.data(), response.size());
@@ -1143,9 +1331,14 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
         // Attach before writing the response: an offset the ring has already
         // reclaimed has to become a 416, and that is only possible while the
         // status line is still ours to choose.
-        if (hasRange) session->MarkRangeRequested();
-        bool reachable = false;
-        auto reader = session->NewReaderAt(startAbs, reachable);
+        const auto prefixBytes = session->HeaderBytes();
+        const bool needsPayload = endAbs >= prefixBytes;
+        std::optional<DlnaStreamSession::Reader> reader;
+        bool reachable = !needsPayload;
+        if (needsPayload) {
+            if (hasRange && !headRequest) session->MarkRangeRequested();
+            reader.emplace(session->NewReaderAt(startAbs, reachable));
+        }
         if (!reachable) {
             const auto response = "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */" +
                 std::to_string(totalBytes) + "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -1194,18 +1387,19 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
             static_cast<std::uint64_t>(session->Format().sampleRate) *
             session->Format().channels * (session->Format().containerBits / 8u);
         std::uint64_t firstChunkAt = 0;
-        if (session->Shape() == DlnaStreamShape::WavFile &&
-            position < DlnaStreamSession::kWavHeaderBytes) {
-            const auto wavHeader = DlnaStreamServer::WavHeader(session->Format(), totalBytes);
+        std::uint64_t prefixSent = 0;
+        if (position < prefixBytes) {
+            const auto& wavHeader = session->WavPrefix();
             const auto take = static_cast<std::size_t>(std::min<std::uint64_t>(
-                DlnaStreamSession::kWavHeaderBytes - position, remaining));
-            if (!SendAll(client, wavHeader.data() + position, take)) {
+                prefixBytes - position, remaining));
+            if (!SendAll(client, wavHeader.data() + static_cast<std::size_t>(position), take)) {
                 closesocket(client);
                 return;
             }
             position += take;
             remaining -= take;
             bytesSent += take;
+            prefixSent = take;
             ++chunksSent;
             firstChunkAt = GetTickCount64();
         }
@@ -1217,7 +1411,7 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
             bool eos = false;
             const auto want = static_cast<std::size_t>(
                 std::min<std::uint64_t>(body.size(), remaining));
-            if (!reader.Read(body.data(), want, written, eos, 500)) {
+            if (!reader->Read(body.data(), want, written, eos, 500)) {
                 if (session->Aborted()) break;
                 if (eos) {
                     // End of track before the declared length. The renderer has
@@ -1251,14 +1445,15 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
                 const auto elapsedMs = GetTickCount64() - streamStartTick;
                 const auto allowedBytes =
                     elapsedMs * pacedBytesPerSecond / 1000u + pacedBytesPerSecond;
-                if (bytesSent > allowedBytes) {
+                const auto payloadSent = bytesSent - prefixSent;
+                if (payloadSent > allowedBytes) {
                     const auto behindMs =
-                        (bytesSent - allowedBytes) * 1000u / pacedBytesPerSecond;
+                        (payloadSent - allowedBytes) * 1000u / pacedBytesPerSecond;
                     Sleep(static_cast<DWORD>(std::min<std::uint64_t>(behindMs, 500u)));
                 }
             }
         }
-        if (remaining == 0 && !session->Aborted()) {
+        if (remaining == 0 && endAbs == totalBytes - 1 && !session->Aborted()) {
             // The renderer now holds the complete declared track. This is the
             // signal the sink's auto-advance waits for before rolling over to
             // the next track's session.

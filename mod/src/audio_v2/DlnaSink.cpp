@@ -1,13 +1,13 @@
-#include <winsock2.h>
+﻿#include <winsock2.h>
 #include <ws2tcpip.h>
 
 #include "DlnaSink.h"
 
 #include "../AudioErrors.h"
 #include "../UpnpXml.h"
+#include "../WavMetadata.h"
 #include "DlnaLog.h"
 #include "DlnaResolve.h"
-#include "LocalPlaybackTuning.h"
 
 #include <windows.h>
 #include <oleauto.h>
@@ -142,14 +142,12 @@ std::wstring RouteAddress(const std::wstring& host) {
 // written, and a live capture has no idea how long the track is. SMTC does,
 // but querying it costs a WinRT round trip that must not happen on the audio
 // path, so am_exclusive_media_control.exe runs one watcher process per
-// Apple Music process and streams "TRACK<TAB>durationMs<TAB>title" lines.
+// Apple Music process and streams bounded, versioned TRACK2 metadata lines.
 // The sink only ever reads a cached snapshot.
 class TrackMonitor final {
 public:
-    struct Info final {
+    struct Info final : metadata::TrackSnapshot {
         bool valid{};
-        std::uint32_t durationMs{};
-        std::wstring title;
         std::uint64_t stampTick{};
     };
 
@@ -162,7 +160,14 @@ public:
 
     // Spawns the helper on first use. Safe to call from every Open.
     void EnsureStarted() noexcept {
-        std::call_once(started_, [this] { Start(); });
+        std::lock_guard startLock(startMutex_);
+        if (running_.load(std::memory_order_acquire) || GetTickCount64() < retryAfter_) return;
+        if (reader_.joinable()) reader_.join();
+        if (process_) { CloseHandle(process_); process_ = nullptr; }
+        if (job_) { CloseHandle(job_); job_ = nullptr; }
+        retryAfter_ = GetTickCount64() + 2000;
+        { std::lock_guard lock(mutex_); info_ = {}; haveLine_ = false; }
+        Start();
     }
 
     // Returns the most recent snapshot, waiting up to waitMs for the first one
@@ -239,59 +244,55 @@ private:
             }
             job_ = job;
         }
+        running_.store(true, std::memory_order_release);
         reader_ = std::thread([this, readEnd] { ReaderMain(readEnd); });
     }
 
     void ReaderMain(HANDLE pipe) noexcept {
         std::string pending;
-        char buffer[512]{};
+        char buffer[8192]{};
+        bool discard = false;
         for (;;) {
             DWORD read = 0;
             if (!ReadFile(pipe, buffer, sizeof(buffer), &read, nullptr) || read == 0) break;
-            pending.append(buffer, read);
-            for (;;) {
-                const auto newline = pending.find('\n');
-                if (newline == std::string::npos) break;
-                ParseLine(pending.substr(0, newline));
-                pending.erase(0, newline + 1);
+            // Never let a corrupt helper line grow the hook process without bound.
+            for (DWORD i = 0; i < read; ++i) {
+                if (buffer[i] == '\n') {
+                    if (!discard) ParseLine(pending);
+                    pending.clear();
+                    discard = false;
+                } else if (!discard) {
+                    if (pending.size() >= metadata::kMaxTrackLineBytes) {
+                        pending.clear();
+                        discard = true;
+                    } else pending.push_back(buffer[i]);
+                }
             }
         }
         CloseHandle(pipe);
+        { std::lock_guard lock(mutex_); info_ = {}; haveLine_ = false; }
+        running_.store(false, std::memory_order_release);
     }
 
     void ParseLine(std::string line) noexcept {
         if (!line.empty() && line.back() == '\r') line.pop_back();
-        const auto first = line.find('\t');
-        if (first == std::string::npos || line.rfind("TRACK\t", 0) != 0) return;
-        const auto second = line.find('\t', first + 1);
-        const std::string durationText = line.substr(
-            first + 1, second == std::string::npos ? std::string::npos : second - first - 1);
-        std::uint32_t durationMs = 0;
-        try {
-            durationMs = static_cast<std::uint32_t>(std::stoul(durationText));
-        } catch (...) {
+        if (line == "PULSE2") {
+            std::lock_guard lock(mutex_);
+            if (haveLine_) info_.stampTick = GetTickCount64();
             return;
         }
-        std::wstring title;
-        if (second != std::string::npos) {
-            const std::string tail = line.substr(second + 1);
-            const int chars = MultiByteToWideChar(CP_UTF8, 0, tail.data(),
-                                                  static_cast<int>(tail.size()), nullptr, 0);
-            if (chars > 0) {
-                title.resize(static_cast<std::size_t>(chars));
-                MultiByteToWideChar(CP_UTF8, 0, tail.data(),
-                                    static_cast<int>(tail.size()), title.data(), chars);
-            }
-        }
+        metadata::TrackSnapshot track;
+        if (!metadata::ParseTrackLine(line, track)) return;
         std::lock_guard lock(mutex_);
-        info_.durationMs = durationMs;
-        info_.title = std::move(title);
+        static_cast<metadata::TrackSnapshot&>(info_) = std::move(track);
         info_.stampTick = GetTickCount64();
-        info_.valid = true;
+        info_.valid = !info_.title.empty();
         haveLine_ = true;
     }
 
-    std::once_flag started_;
+    std::mutex startMutex_;
+    std::atomic<bool> running_{false};
+    std::uint64_t retryAfter_{};
     mutable std::mutex mutex_;
     Info info_{};
     bool haveLine_{};
@@ -454,6 +455,9 @@ bool DlnaSink::SetupStream() noexcept {
         std::uint16_t port = 0;
         if (!server_.Start(advertiseIp_, port, error)) return false;
     }
+    if (artworkUrl_.empty() && !trackMetadata_.artwork.empty()) {
+        artworkUrl_ = server_.AddArtwork(trackMetadata_.artwork, trackMetadata_.artworkMime);
+    }
     if (DlnaStreamShapeUsesFlac(shape_)) {
         // The file shape needs constant-size verbatim frames plus a published
         // total; the live shape encodes real FLAC frames and declares
@@ -535,8 +539,24 @@ bool DlnaSink::SetupStream() noexcept {
     if (!wireMime.empty()) {
         DlnaLog(L"wav mime follows the renderer: " + wireMime);
     }
+    // Opt-in renderer compatibility: SMTC text is frozen into this track's WAV
+    // prefix before publishing its URL. PCM and non-WAV shapes are unchanged.
+    std::vector<BYTE> wavMetadata;
+    if (shape_ == DlnaStreamShape::WavFile &&
+        GetPrivateProfileIntW(L"dlna", L"wav_id3_metadata", 1, IniPath().c_str()) != 0) {
+        wavMetadata = metadata::BuildWavId3Chunk(trackMetadata_.title,
+                                                trackMetadata_.artist,
+                                                trackMetadata_.album);
+    }
     session_ = std::make_shared<DlnaStreamSession>(token, format_, shape_, capacity,
-                                                   contentFeatures_, totalBytes_);
+                                                   contentFeatures_, totalBytes_, std::move(wavMetadata));
+    // The constructor receives the legacy 44 + PCM length, and adds only an
+    // accepted immutable tag. DIDL, HTTP ranges and RIFF must agree on this total.
+    totalBytes_ = session_->TotalBytes();
+    if (shape_ == DlnaStreamShape::WavFile) {
+        DlnaLog(L"wav prefix bytes=" + std::to_wstring(session_->HeaderBytes()) +
+                L" total=" + std::to_wstring(totalBytes_));
+    }
     if (!wireMime.empty()) session_->SetMime(wireMime);
     server_.AddSession(session_);
     if (shape_ == DlnaStreamShape::FlacLive) {
@@ -605,65 +625,80 @@ void DlnaSink::RefreshTrackDurationFromSmtc(const std::wstring& previousTitle,
                                             bool fastTrackChange) noexcept {
     wchar_t value[16]{};
     GetPrivateProfileStringW(L"dlna", L"follow_track_duration", L"1", value,
-                             static_cast<DWORD>(std::size(value)),
-                             IniPath().c_str());
-    if (_wtoi(value) == 0) {
-        // No SMTC following: the cut point falls back to the configured
-        // stream length, which SetupStream reads via trackDurationMsExact_=0.
-        trackDurationMsExact_ = 0;
-        return;
-    }
+                             static_cast<DWORD>(std::size(value)), IniPath().c_str());
+    const bool followDuration = _wtoi(value) != 0;
+    const auto notBefore = GetTickCount64() + 300;
     auto& monitor = TrackMonitor::Instance();
     monitor.EnsureStarted();
-    // Just after a track change the SMTC pipeline can take a second or
-    // two to publish the new metadata; 900 ms made high-resolution
-    // tracks (where the wait matters most) fall back to the 600 s
-    // guess and declare a wildly wrong length.
-    // Live streams end with a clean EOF, so the device's own buffer is the
-    // only cover while the next playlist item is being queued. Keep the
-    // metadata wait short there to avoid a visible gap at every track change.
     auto info = monitor.Snapshot(fastTrackChange ? 300u : 2500u);
-    if (!previousTitle.empty()) {
-        // Auto-advance: the watcher may still be showing the track that just
-        // ended. Give it a few seconds to publish the next title so the new
-        // session declares the new track's length, not the old one's. A
-        // repeated title (same song on repeat) is indistinguishable from a
-        // stale snapshot, so this wait is bounded and harmless either way.
-        const auto deadline = GetTickCount64() + (fastTrackChange ? 800u : 5000u);
-        while (info.valid && info.title == previousTitle &&
-               GetTickCount64() < deadline) {
-            if (producerStop_.load(std::memory_order_acquire)) return;
+    // Open/seek clears the per-sink identity. Do not mistake a cached previous
+    // item for the new one; require a successful helper poll after this boundary.
+    if (previousTitle.empty()) {
+        const auto pollDeadline = GetTickCount64() + 2500;
+        while (info.stampTick < notBefore && GetTickCount64() < pollDeadline) {
+            if (!previousTitle.empty() && producerStop_.load(std::memory_order_acquire)) return;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             info = monitor.Snapshot(0);
         }
     }
-    const bool titleChanged = !previousTitle.empty() ? (info.valid && info.title != previousTitle) : info.valid;
-    const bool fresh = titleChanged && (GetTickCount64() - info.stampTick < 15000);
-    if (fresh && info.durationMs >= 10000 &&
-        info.durationMs <= 4ull * 3600ull * 1000ull) {
-        // Ceiling in seconds for metadata / display
-        streamSeconds_ = (info.durationMs + 999u) / 1000u;
-        trackDurationMsExact_ = info.durationMs;
-        lastTrackTitle_ = info.title;
-        DlnaLog(L"track duration from SMTC ms=" +
-                std::to_wstring(info.durationMs) + L" title=" + info.title);
-    } else {
-        trackDurationMsExact_ = 0;
-        wchar_t fallbackSec[16]{};
-        GetPrivateProfileStringW(L"dlna", L"stream_seconds", L"600", fallbackSec,
-                                 static_cast<DWORD>(std::size(fallbackSec)),
-                                 IniPath().c_str());
-        const auto configuredSec = static_cast<std::uint32_t>(_wtoi(fallbackSec));
-        streamSeconds_ = configuredSec != 0 ? configuredSec : 600u;
-        if (!previousTitle.empty() && info.valid && info.title == previousTitle) {
-            DlnaLog(L"SMTC title unchanged from previous (" + previousTitle +
-                    L"); duration not yet published by player, fallback stream_seconds=" +
-                    std::to_wstring(streamSeconds_));
-        } else {
-            DlnaLog(L"track duration unavailable from SMTC, fallback stream_seconds=" +
-                    std::to_wstring(streamSeconds_));
+    const auto previous = trackMetadata_;
+    const auto deadline = GetTickCount64() + (fastTrackChange ? 800u : 5000u);
+    if (!previousTitle.empty()) {
+        // Compare full identity, not duration/title alone (same-length tracks,
+        // covers of the same song and different albums are all common).
+        while ((!info.valid || metadata::SameTrack(info, previous)) &&
+               GetTickCount64() < deadline) {
+            if (!previousTitle.empty() && producerStop_.load(std::memory_order_acquire)) return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            info = monitor.Snapshot(0);
         }
     }
+    const auto isFresh = [&](const auto& candidate) {
+        return candidate.valid && GetTickCount64() - candidate.stampTick < 15000 &&
+            (previousTitle.empty() ? candidate.stampTick >= notBefore
+                                   : !metadata::SameTrack(candidate, previous));
+    };
+    bool fresh = isFresh(info);
+    // Give SMTC's thumbnail a small bounded window before publishing the item.
+    // Never restart the renderer just to update a late image. A missing cover
+    // is safer than accidentally binding the previous track's artwork.
+    if (fresh && info.artwork.empty()) {
+        const auto artDeadline = GetTickCount64() + 1200u;
+        while (GetTickCount64() < artDeadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            auto next = monitor.Snapshot(0);
+            if (!previousTitle.empty() && producerStop_.load(std::memory_order_acquire)) return;
+            // Recheck the boundary predicate after every poll: a valid but
+            // previous-track snapshot must not replace this candidate.
+            if (!isFresh(next)) {
+                fresh = false;
+                break;
+            }
+            // SMTC can enrich duration/artist/album after the title. Adopt the
+            // latest complete candidate within the same deadline, not fallback.
+            info = std::move(next);
+            if (!info.artwork.empty()) break;
+        }
+    }
+    fresh = fresh && isFresh(info);
+    trackMetadata_ = fresh ? static_cast<const metadata::TrackSnapshot&>(info)
+                           : metadata::TrackSnapshot{};
+    artworkUrl_.clear();
+    lastTrackTitle_ = fresh ? info.title : std::wstring();
+    trackDurationMsExact_ = 0;
+    if (followDuration && fresh && info.durationMs >= 10000 &&
+        info.durationMs <= 4ull * 3600ull * 1000ull) {
+        streamSeconds_ = (info.durationMs + 999u) / 1000u;
+        trackDurationMsExact_ = info.durationMs;
+    } else if (followDuration) {
+        wchar_t fallback[16]{};
+        GetPrivateProfileStringW(L"dlna", L"stream_seconds", L"600", fallback,
+                                 static_cast<DWORD>(std::size(fallback)), IniPath().c_str());
+        streamSeconds_ = static_cast<std::uint32_t>(std::clamp(_wtoi(fallback), 30, 7200));
+    }
+    DlnaLog(L"SMTC metadata bound valid=" + std::to_wstring(fresh ? 1 : 0) +
+            L" artworkBytes=" + std::to_wstring(trackMetadata_.artwork.size()) +
+            L" durationMs=" + std::to_wstring(trackDurationMsExact_));
 }
 
 bool DlnaSink::AdvanceToNextTrack() noexcept {
@@ -736,14 +771,7 @@ bool DlnaSink::AppendNextTrackToDevice() noexcept {
         // advances to it when the current connection cleanly EOFs, and the
         // alias resolves to the new track's session on the re-GET. File mode
         // queues the new session's own URL.
-        const bool broadcast = shape_ == DlnaStreamShape::FlacLive;
-        const auto duration = DlnaControlClient::TimeText(streamSeconds_) + L".000";
-        const std::uint64_t didlSize =
-            DlnaStreamShapeIsFile(shape_) ? totalBytes_ : 0;
-        const auto didl = upnp::BuildDidlLite(
-            L"ame-" + GuidToken(), L"Apple Music", streamUrl_, protocolInfo_,
-            broadcast ? std::wstring() : duration, broadcast, didlSize,
-            format_.sampleRate, format_.containerBits, format_.channels);
+        const auto didl = BuildStreamDidl();
         std::wstring error;
         std::uint32_t newId = 0;
         if (control_.OpenHomeInsert(target_, lastOpenHomeId_, streamUrl_, didl,
@@ -795,14 +823,7 @@ bool DlnaSink::AppendNextTrackToDevice() noexcept {
     // queue the new URL ahead of time so the renderer seamlessly rolls over
     // without interrupting the current track's playback tail.
     if (target_.avTransport && target_.nextUri && !target_.avTransportControl.empty()) {
-        const bool broadcast = shape_ == DlnaStreamShape::FlacLive;
-        const auto duration = DlnaControlClient::TimeText(streamSeconds_) + L".000";
-        const std::uint64_t didlSize =
-            DlnaStreamShapeIsFile(shape_) ? totalBytes_ : 0;
-        const auto didl = upnp::BuildDidlLite(
-            L"ame-" + GuidToken(), L"Apple Music", streamUrl_, protocolInfo_,
-            broadcast ? std::wstring() : duration, broadcast, didlSize,
-            format_.sampleRate, format_.containerBits, format_.channels);
+        const auto didl = BuildStreamDidl();
         std::wstring nextError;
         if (control_.SetNextAvTransportUri(target_, streamUrl_, didl, nextError)) {
             DlnaLog(L"auto-advance: queued SetNextAVTransportURI url=" + streamUrl_);
@@ -989,6 +1010,21 @@ HRESULT DlnaSink::Open(const AudioSinkOpenParams& params) noexcept {
     return S_OK;
 }
 
+std::wstring DlnaSink::BuildStreamDidl() const {
+    upnp::ItemMetadata fields;
+    fields.artist = trackMetadata_.artist;
+    fields.album = trackMetadata_.album;
+    fields.trackNumber = trackMetadata_.trackNumber;
+    fields.albumArtUri = artworkUrl_;
+    const bool broadcast = shape_ == DlnaStreamShape::FlacLive;
+    return upnp::BuildDidlLite(L"ame-" + GuidToken(),
+        trackMetadata_.title.empty() ? L"Apple Music" : trackMetadata_.title,
+        streamUrl_, protocolInfo_,
+        broadcast ? std::wstring() : DlnaControlClient::TimeText(streamSeconds_) + L".000",
+        broadcast, DlnaStreamShapeIsFile(shape_) ? totalBytes_ : 0,
+        format_.sampleRate, format_.containerBits, format_.channels, fields);
+}
+
 bool DlnaSink::SendStreamToDevice() noexcept {
     std::wstring error;
     // File shapes are served as a musicTrack with duration and size: the shape
@@ -996,14 +1032,7 @@ bool DlnaSink::SendStreamToDevice() noexcept {
     // AURALiC-class devices accept from a live source. The close-delimited
     // live shape is an unbounded broadcast: audioBroadcast carries no duration
     // and no size, and the connection close is the end-of-item signal.
-    const bool broadcast = shape_ == DlnaStreamShape::FlacLive;
-    const auto duration = DlnaControlClient::TimeText(streamSeconds_) + L".000";
-    const std::uint64_t didlSize =
-        DlnaStreamShapeIsFile(shape_) ? totalBytes_ : 0;
-    const auto didl = upnp::BuildDidlLite(
-        L"ame-" + GuidToken(), L"Apple Music", streamUrl_, protocolInfo_,
-        broadcast ? std::wstring() : duration, broadcast, didlSize,
-        format_.sampleRate, format_.containerBits, format_.channels);
+    const auto didl = BuildStreamDidl();
     if (target_.openHome && !target_.openHomePlaylist.empty()) {
         // Verified against foo_upnp (BubbleUPnPServer 0.9-update51) on the LAN:
         // OpenHome Playlist has no SetStreams action. The sequence that actually
@@ -1063,7 +1092,8 @@ bool DlnaSink::SendStreamToDevice() noexcept {
         // will take the full-send fallback for this device.
         lastOpenHomeId_ = 0;
         std::wstring writeError;
-        if (!control_.OpenHomeWrite(target_, 0, streamUrl_, L"Apple Music", writeError)) {
+        if (!control_.OpenHomeWrite(target_, 0, streamUrl_,
+                trackMetadata_.title.empty() ? L"Apple Music" : trackMetadata_.title, writeError)) {
             controlFailures_.fetch_add(1, std::memory_order_relaxed);
             DlnaLog(L"openhome legacy Write failed device=" + target_.friendlyName +
                     L" reason=" + writeError);
@@ -1204,8 +1234,6 @@ void DlnaSink::ProducerMain() noexcept {
     // responsive without competing with MMCSS audio threads.
     const int previousPriority = GetThreadPriority(GetCurrentThread());
     (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
-    // v0.3.5-tuneall: same thread policy as the RAAT path. Real-time safe.
-    LocalPlaybackTuningRuntime::Instance().ApplyToCurrentThread();
     // The sample buffer is sized in int32 slots: one slot per channel per
     // frame. Hard-coding 2 here silently corrupts mono sources (Fill writes
     // half the buffer, PackChunk then reads the uninitialised tail as noise)
@@ -1637,6 +1665,8 @@ void DlnaSink::Close() noexcept {
     pendingPlayDeadlineTick_ = 0;
     trackDurationMsExact_ = 0;
     lastTrackTitle_.clear();
+    trackMetadata_ = {};
+    artworkUrl_.clear();
     if (shape_ != DlnaStreamShape::FlacLive) liveAlias_.clear();
     source_ = nullptr;
     state_.store(AudioSinkState::Closed, std::memory_order_release);

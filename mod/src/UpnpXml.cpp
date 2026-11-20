@@ -137,7 +137,19 @@ std::wstring FindText(const ComPtr<IXMLDOMDocument2>& document, const wchar_t* l
 std::wstring EscapeXml(const std::wstring& text) {
     std::wstring escaped;
     escaped.reserve(text.size());
-    for (const wchar_t ch : text) {
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const wchar_t ch = text[i];
+        // XML 1.0 forbids most controls and unpaired UTF-16 surrogates. Keep
+        // valid supplementary characters (emoji), but never emit malformed XML.
+        if (ch >= 0xD800 && ch <= 0xDBFF) {
+            if (i + 1 < text.size() && text[i + 1] >= 0xDC00 && text[i + 1] <= 0xDFFF) {
+                escaped.push_back(ch);
+                escaped.push_back(text[++i]);
+            }
+            continue;
+        }
+        if ((ch < 0x20 && ch != L'\t' && ch != L'\n' && ch != L'\r') ||
+            (ch >= 0xDC00 && ch <= 0xDFFF) || ch == 0xFFFE || ch == 0xFFFF) continue;
         switch (ch) {
         case L'&': escaped += L"&amp;"; break;
         case L'<': escaped += L"&lt;"; break;
@@ -291,7 +303,8 @@ std::wstring BuildDidlLite(const std::wstring& id,
                            std::uint64_t sizeBytes,
                            std::uint32_t sampleRate,
                            std::uint32_t bitsPerSample,
-                           std::uint32_t channels) {
+                           std::uint32_t channels,
+                           const ItemMetadata& metadata) {
     std::wstring xml;
     xml.reserve(512);
     xml += L"<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\" ";
@@ -308,6 +321,23 @@ std::wstring BuildDidlLite(const std::wstring& id,
     xml += broadcast
         ? L"</dc:title><upnp:class>object.item.audioItem.audioBroadcast</upnp:class>"
         : L"</dc:title><upnp:class>object.item.audioItem.musicTrack</upnp:class>";
+    if (!metadata.artist.empty()) {
+        xml += L"<dc:creator>" + EscapeXml(metadata.artist) + L"</dc:creator>";
+        // Some renderer UIs select performers by role rather than the bare artist tag.
+        // The UPnP artist role is optional; explicit Performer also remains valid for
+        // generic parsers that ignore attributes. dc:creator is kept as a fallback.
+        xml += L"<upnp:artist role=\"Performer\">" + EscapeXml(metadata.artist) + L"</upnp:artist>";
+    }
+    if (!metadata.album.empty()) {
+        xml += L"<upnp:album>" + EscapeXml(metadata.album) + L"</upnp:album>";
+    }
+    if (metadata.trackNumber != 0) {
+        xml += L"<upnp:originalTrackNumber>" + std::to_wstring(metadata.trackNumber) +
+               L"</upnp:originalTrackNumber>";
+    }
+    if (!metadata.albumArtUri.empty()) {
+        xml += L"<upnp:albumArtURI>" + EscapeXml(metadata.albumArtUri) + L"</upnp:albumArtURI>";
+    }
     xml += L"<res protocolInfo=\"";
     xml += EscapeXml(protocolInfo);
     xml += L"\"";

@@ -6,6 +6,7 @@
 #include "FlacEncoder.h"
 #include "IntegerPcmSource.h"
 #include "PcmTypes.h"
+#include "../TrackMetadata.h"
 
 #include <windows.h>
 
@@ -69,6 +70,7 @@ private:
     bool PackChunk(const std::int32_t* samples, std::uint32_t frames,
                    bool endOfStream, std::vector<BYTE>& output) noexcept;
     bool SendStreamToDevice() noexcept;
+    std::wstring BuildStreamDidl() const;
     // Emits the encoder's final partial block. A FLAC stream that ends without
     // this loses up to one block (4096 frames) of audio, and a decoder that
     // checks frame continuity may reject the tail outright.
@@ -147,6 +149,9 @@ private:
     // Last title the SMTC watcher reported, used to wait for fresh metadata
     // when rolling over to the next track.
     std::wstring lastTrackTitle_;
+    // Bound once per stream, never read from a mutable now-playing cover URL.
+    metadata::TrackSnapshot trackMetadata_;
+    std::wstring artworkUrl_;
     // OpenHome playlist id of the most recently inserted track; auto-advance
     // queues the next track right after it. 0 = unknown (legacy Write path).
     std::uint32_t lastOpenHomeId_{0};
