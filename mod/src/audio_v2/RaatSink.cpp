@@ -272,7 +272,8 @@ void RaatSink::Stop() noexcept {
     if (control_.IsOpen()) {
         std::lock_guard lock(controlMutex_);
         for (const char* request : {"{\"request\":\"stop\"}",
-                                    "{\"request\":\"end_stream\"}"}) {
+                                    "{\"request\":\"end_stream\"}",
+                                    "{\"request\":\"teardown\"}"}) {
             std::string response;
             bool final = false;
             std::wstring error;
@@ -549,10 +550,10 @@ bool RaatSink::OpenControl(std::wstring& error) noexcept {
 }
 
 int RaatSink::GetPreferredVariant(const std::wstring& endpoint) noexcept {
-    if (endpoint.empty()) return 0;
+    if (endpoint.empty()) return 1;
     std::lock_guard lock(s_variantMutex);
     const auto it = s_preferredVariants.find(endpoint);
-    return it != s_preferredVariants.end() ? it->second : 0;
+    return it != s_preferredVariants.end() ? it->second : 1;
 }
 
 void RaatSink::SetPreferredVariant(const std::wstring& endpoint, int variant) noexcept {
@@ -574,11 +575,31 @@ bool RaatSink::LoadScripts(std::wstring& error) noexcept {
         // load_script with Success but refuse to install the scripts; echo
         // (and later setup) then return {"status":"NotImplemented"}. Mixing
         // variants across scripts would leave a half-installed dispatcher.
+        const bool isVega = (target_.raatVersion == L"1.1.41" ||
+                             target_.friendlyName.find(L"VEGA") != std::wstring::npos ||
+                             target_.friendlyName.find(L"AURALiC") != std::wstring::npos);
+
+        // On VEGA G2.2 (RAAT 1.1.41), variant 0 is 100% incompatible and hangs the
+        // control connection. Only test variants [1, 2] on VEGA G2.2.
+        std::vector<int> candidateList;
+        if (isVega) {
+            candidateList = {1, 2};
+        } else {
+            candidateList = {1, 2, 0};
+        }
+
         const int preferred = GetPreferredVariant(target_.address);
         std::vector<int> variants;
-        variants.push_back(preferred);
-        for (int v = 0; v < 3; ++v) {
-            if (v != preferred) variants.push_back(v);
+        if (std::find(candidateList.begin(), candidateList.end(), preferred) != candidateList.end()) {
+            variants.push_back(preferred);
+        }
+        for (int v : candidateList) {
+            if (v != preferred && std::find(variants.begin(), variants.end(), v) == variants.end()) {
+                variants.push_back(v);
+            }
+        }
+        if (variants.empty()) {
+            variants = {1, 2};
         }
         for (int variant : variants) {
             bool allLoaded = true;
@@ -736,9 +757,12 @@ bool RaatSink::LoadOneScript(const ScriptRecord& record, int variant,
 
     std::string json = "{\"request\":\"load_script\",\"name\":\"" +
         JsonEscape(name) + "\"";
+    if (!module.empty()) {
+        json += ",\"module\":\"" + JsonEscape(module) + "\"";
+    }
+    json += ",\"script\":\"" + JsonEscape(script) + "\"";
+
     if (variant == 0) {
-        if (!module.empty()) json += ",\"module\":\"" + JsonEscape(module) + "\"";
-        json += ",\"script\":\"" + JsonEscape(script) + "\"";
         if (!signature.empty()) {
             json += ",\"signature\":\"" + signature + "\"";
         } else {
@@ -750,9 +774,10 @@ bool RaatSink::LoadOneScript(const ScriptRecord& record, int variant,
             json += ",\"signature\":\"0\"";
         }
     } else if (variant == 1) {
-        json += ",\"script\":\"" + JsonEscape(script) + "\",\"signature\":\"0\"";
+        // Variant 1: reference sender stub signature "0" with proper module declarations.
+        json += ",\"signature\":\"0\"";
     } else {
-        json += ",\"script\":\"" + JsonEscape(script) + "\"";
+        // Variant 2: no signature field, proper module declarations.
     }
     json += "}";
 

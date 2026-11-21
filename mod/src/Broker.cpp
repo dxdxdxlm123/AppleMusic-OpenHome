@@ -413,6 +413,44 @@ Message OutputTargetMessage() {
     return message;
 }
 
+// Adjusts periodic DLNA SSDP discovery poll intervals and pauses discovery during RAAT playback.
+// When active output is RAAT (output=r_device):
+//   - Active playback session: pause SSDP and device XML fetching completely to prevent control
+//     plane load and network contention on endpoints (e.g. VEGA G2.2).
+//   - Idle session: back off poll interval to 300s.
+// When active output is WASAPI, DLNA, or ASIO:
+//   - Preserve regular 30s discovery behavior.
+void UpdateDlnaDiscoveryPolicy() {
+    if (!g_discovery) return;
+    std::uint8_t outputKind = 0;
+    RuntimeState state = RuntimeState::Off;
+    {
+        std::lock_guard lock(g_mutex);
+        outputKind = g_outputKind;
+        state = g_status.state;
+    }
+    static std::uint8_t s_previousOutputKind = 255;
+    const bool switchedToDlna = (s_previousOutputKind == 3u && outputKind == 1u);
+    s_previousOutputKind = outputKind;
+
+    const bool isRaat = (outputKind == 3u);
+    const bool isRaatActive = isRaat && (state == RuntimeState::Active ||
+                                        state == RuntimeState::Initializing ||
+                                        state == RuntimeState::AlignRetry);
+    if (isRaatActive) {
+        g_discovery->SetPaused(true);
+    } else if (isRaat) {
+        g_discovery->SetPaused(false);
+        g_discovery->SetScanInterval(std::chrono::seconds(300));
+    } else {
+        g_discovery->SetPaused(false);
+        g_discovery->SetScanInterval(std::chrono::seconds(30));
+        if (switchedToDlna) {
+            g_discovery->Refresh();
+        }
+    }
+}
+
 // The output target used to be read from the ini exactly once at broker start,
 // so editing am-exclusive.ini (or the device coming back under a new address)
 // left the hook pointing at a stale, often unreachable, renderer: DLNA open
@@ -507,6 +545,7 @@ void IniWatchThread() {
         Log(L"ini target reloaded output=" + std::to_wstring(g_outputKind) +
             L" device=" + (g_outputKind == 3u ? g_roonName : g_dlnaName) +
             L" location=" + g_dlnaLocation);
+        UpdateDlnaDiscoveryPolicy();
         Broadcast(OutputTargetMessage(), nullptr);
     }
 }
@@ -1190,6 +1229,7 @@ void RemoveClient(HANDLE pipe) {
     }
     if (publishStatus) Broadcast(status, nullptr);
     if (showError) ShowErrorDialogAsync(status.error, status.hresult, status.generation);
+    UpdateDlnaDiscoveryPolicy();
 }
 
 std::vector<std::pair<HANDLE, DWORD>> SnapshotTargets(HANDLE source) {
@@ -1567,6 +1607,7 @@ void HandleMessage(const Message& incoming, HANDLE source) {
     Broadcast(status, source);
     if (relayTarget) BroadcastToRole(targetMessage, Role::Agent);
     if (showError) ShowErrorDialogAsync(status.error, status.hresult, status.generation);
+    UpdateDlnaDiscoveryPolicy();
 }
 
 // Caller holds g_mutex. A connection is an authority boundary even when its
@@ -1907,14 +1948,17 @@ int wmain() {
             Log(text);
         }, discoveryError)) {
         Log(L"DLNA discovery unavailable: " + discoveryError);
-    } else if (!g_manualUrls.empty()) {
-        std::wstringstream stream(g_manualUrls);
-        std::wstring url;
-        while (std::getline(stream, url, L';')) {
-            if (url.empty()) continue;
-            std::wstring error;
-            if (!g_discovery->AddManualDevice(url, error)) {
-                Log(L"manual device startup failed url=" + url + L" reason=" + error);
+    } else {
+        UpdateDlnaDiscoveryPolicy();
+        if (!g_manualUrls.empty()) {
+            std::wstringstream stream(g_manualUrls);
+            std::wstring url;
+            while (std::getline(stream, url, L';')) {
+                if (url.empty()) continue;
+                std::wstring error;
+                if (!g_discovery->AddManualDevice(url, error)) {
+                    Log(L"manual device startup failed url=" + url + L" reason=" + error);
+                }
             }
         }
     }

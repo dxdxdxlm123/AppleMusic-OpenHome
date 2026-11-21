@@ -289,6 +289,7 @@ std::wstring TcpConnection::LocalAddress() const noexcept {
 
 void TcpConnection::Close() noexcept {
     if (socket_ != INVALID_SOCKET) {
+        shutdown(socket_, SD_BOTH);
         closesocket(socket_);
         socket_ = INVALID_SOCKET;
     }

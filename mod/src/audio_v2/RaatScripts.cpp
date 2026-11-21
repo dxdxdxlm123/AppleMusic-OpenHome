@@ -17,7 +17,9 @@ constexpr ScriptRecord kOfficial[] = {
     {R"(raat.dat:protocol.lua)", "protocol",
      "bdc729ea2ce13cc7574b66ad396e2b7fef98a3887ad3184804467abcc003f943268aebf438a1709646cf39cd8186ba03514572986fbd4444b931c15e486f9f0e",
      3003, true},
-    {R"(raat.dat:roon_tcp.lua)", "roon_tcp",
+    // The main script must NOT declare a module: the renderer executes it
+    // (it ends with go()/return roon) instead of caching it as a library.
+    {R"(raat.dat:roon_tcp.lua)", "",
      "56cf6c4d5311160d3eb0bb2efccf9e4d58bc69edb6a1bf213aa3d784c9a99ddaeeb39a90dcd926bf294ad58a291e14b1fe40afe58118d089e6754874ef4a0f0b",
      3004, true},
 };

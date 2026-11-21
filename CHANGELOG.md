@@ -19,6 +19,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Upgraded UPnP DIDL-Lite metadata formatting with XML 1.0 surrogate protection and Performer role (`UpnpXml.h/cpp`).
 
 ### Fixed
+- **RAAT Lua Script Injection & VEGA G2.2 Compatibility Fixes**:
+  - Removed `module="roon_tcp"` attribute from `roon_tcp.lua` entry script (`RaatScripts.cpp`), allowing the entry script to execute `go()` and install the RAAT Lua dispatcher immediately instead of being preloaded as a passive library.
+  - Ensured `,"module":"<name>"` is unconditionally included in `load_script` requests across all variants (`RaatSink.cpp`), resolving the ping-pong alternating `ScriptError` on `protocol.lua` caused by missing module registrations (`base.lua`, `dkjson.lua`) in Lua's `package.preload`.
+  - Excluded the hanging `variant 0` from candidate list on VEGA G2.2 (`candidateList = {1, 2}`), eliminating the 3–4s startup delay, timeout errors, and hardware freeze risks. Default preferred variant set to `1`.
+  - Added `{"request":"teardown"}` and TCP `shutdown(SD_BOTH)` on session close to guarantee clean renderer-side token and socket release.
+- **DLNA Discovery Backoff & Pause During RAAT Playback**:
+  - Automatically paused periodic SSDP discovery scans and device XML fetches in Broker whenever RAAT (`r_device`) playback is active, eliminating repetitive 30s background HTTP GET/SSDP traffic to endpoints (e.g. VEGA G2.2 at 192.168.108.4).
+  - Backed off idle RAAT discovery interval to 300s (5 minutes) and cached device descriptions/non-renderer endpoints to drastically reduce network stack and control plane overhead.
 - **Immediate manual track switching (list click / double-click / row Play button)**:
   - Widened `directSelectionArmDeadlineTick_` from `750 ms` to `2500 ms` and refreshed it on the confirming `skip` event so high-latency lossless/Hi-Res track switches never expire before Apple Music calls `IAudioClient::Stop` (fixing the 8–10 s stale drain and 20 s successor stall).
   - Detected single-clicks on row `ButtonBase` controls (e.g., hover Play button inside a `ListViewItem`) in `UiAdapter.cpp` and added `DirectSelectionActiveForStop()` in `AudioCoreRuntime.cpp` so single-click manual switches retire immediately without waiting 500 ms for producer EOF or draining the old buffer.
