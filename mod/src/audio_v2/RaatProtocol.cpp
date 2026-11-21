@@ -289,7 +289,6 @@ std::wstring TcpConnection::LocalAddress() const noexcept {
 
 void TcpConnection::Close() noexcept {
     if (socket_ != INVALID_SOCKET) {
-        shutdown(socket_, SD_BOTH);
         closesocket(socket_);
         socket_ = INVALID_SOCKET;
     }
@@ -347,9 +346,6 @@ bool TcpConnection::Connect(const std::wstring& address, std::uint16_t port,
     BOOL noDelay = TRUE;
     (void)::setsockopt(socket_, IPPROTO_TCP, TCP_NODELAY,
                        reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
-    int dscp = 0xB8; // DSCP EF (46) << 2
-    (void)::setsockopt(socket_, IPPROTO_IP, IP_TOS,
-                       reinterpret_cast<const char*>(&dscp), sizeof(dscp));
     return true;
 }
 
@@ -385,7 +381,10 @@ bool TcpConnection::ReadSome(void* data, std::size_t capacity,
     if (!WaitReadable(socket_, timeoutMs)) return false;
     const int chunk = recv(socket_, static_cast<char*>(data),
                            static_cast<int>(capacity), 0);
-    if (chunk <= 0) return false;
+    if (chunk <= 0) {
+        if (chunk == 0) Close();
+        return false;
+    }
     received = static_cast<std::size_t>(chunk);
     return true;
 }
@@ -480,6 +479,7 @@ bool ControlChannel::SendProbe(const std::string& json,
 void ControlChannel::Close() noexcept {
     connection_.Close();
     pending_.clear();
+    stash_.clear();
 }
 
 namespace {
@@ -531,6 +531,17 @@ bool ControlChannel::SendFrame(std::uint32_t rid, const std::string& json,
 bool ControlChannel::ReadFrame(std::uint32_t expectedRid, std::uint32_t timeoutMs,
                                std::string& response, bool& final,
                                std::wstring& error) noexcept {
+    if (expectedRid != 0) {
+        auto stashIt = stash_.find(expectedRid);
+        if (stashIt != stash_.end() && !stashIt->second.empty()) {
+            response = std::move(stashIt->second.front().first);
+            final = stashIt->second.front().second;
+            stashIt->second.erase(stashIt->second.begin());
+            if (stashIt->second.empty()) stash_.erase(stashIt);
+            return true;
+        }
+    }
+
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(timeoutMs);
     for (;;) {
@@ -558,10 +569,14 @@ bool ControlChannel::ReadFrame(std::uint32_t expectedRid, std::uint32_t timeoutM
             }
             const std::uint32_t rid = ReadBe32(pending_.data() + 8);
             const bool isFinal = pending_[12] != 0;
-            response.assign(reinterpret_cast<const char*>(pending_.data()) + 13,
-                            total - 13);
+            std::string body(reinterpret_cast<const char*>(pending_.data()) + 13,
+                             total - 13);
             pending_.erase(pending_.begin(), pending_.begin() + total);
-            if (rid != expectedRid) continue;
+            if (expectedRid != 0 && rid != expectedRid) {
+                stash_[rid].emplace_back(std::move(body), isFinal);
+                continue;
+            }
+            response = std::move(body);
             final = isFinal;
             return true;
         }

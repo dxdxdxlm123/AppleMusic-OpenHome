@@ -73,12 +73,16 @@ private:
     bool LoadOneScript(const raat::ScriptRecord& record, int variant,
                        std::wstring& error) noexcept;
     bool SendInfo(std::wstring& error) noexcept;
+    bool SendClientType(std::wstring& error) noexcept;
+    bool SendSubscriptions(std::wstring& error) noexcept;
+    bool SendRequestSource() noexcept;
     bool SendSetup(std::wstring& error) noexcept;
     bool OpenAudio(std::wstring& error) noexcept;
     bool SendStream(std::wstring& error) noexcept;
     bool Prefill() noexcept;
+    bool WaitForReady(std::uint32_t timeoutMs, std::wstring& error) noexcept;
     bool SendStart(bool resume) noexcept;
-    bool SendSync() noexcept;
+    void QueryDeviceClock() noexcept;
     void KeepaliveMain() noexcept;
     void StopKeepalive() noexcept;
     void PumpMain() noexcept;
@@ -117,6 +121,13 @@ private:
     std::uint16_t clockPort_{};
     std::uint16_t audioPort_{};
     std::uint16_t deviceClockPort_{};   // renderer's own clock port (setup reply)
+    std::uint32_t streamRid_{0};
+    std::atomic<std::uint32_t> clockRid_{0};
+    std::atomic<std::uint32_t> lastClockQueryRid_{0};
+    std::atomic<std::uint64_t> lastClockQueryTimeNs_{0};
+    std::atomic<std::uint32_t> clockRepliesIn_{0};
+    std::atomic<std::int64_t> deviceClockOffsetNs_{0};
+    std::atomic<std::uint32_t> deviceClockRttUs_{0};
     std::thread clockThread_;
     std::atomic<bool> clockStop_{false};
     // Clock-exchange counters. `sync` only returns Success after the renderer
@@ -152,6 +163,7 @@ private:
     std::uint64_t sampleIndex_{0};
     std::uint64_t lastSendTick_{0};
     std::vector<std::int32_t> block_;
+    std::vector<std::uint8_t> pcm_;
     std::vector<std::uint8_t> frame_;
 
     static inline std::mutex s_variantMutex;

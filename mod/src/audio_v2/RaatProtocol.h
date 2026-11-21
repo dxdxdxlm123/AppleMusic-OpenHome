@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace ammod::raat {
@@ -139,6 +140,7 @@ private:
 
     TcpConnection connection_;
     std::vector<std::uint8_t> pending_;
+    std::unordered_map<std::uint32_t, std::vector<std::pair<std::string, bool>>> stash_;
     std::uint32_t nextRid_{1};
     std::uint32_t lastRid_{0};
     // Remembered so Request() can reconnect once when the device drops the

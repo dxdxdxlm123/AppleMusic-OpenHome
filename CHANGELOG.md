@@ -6,6 +6,17 @@ upstream [AntiOblivionis/AMExclusive](https://github.com/AntiOblivionis/AMExclus
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.12] - 2026-11-21
+
+### Fixed & Improved
+- **RAAT 1:1 Protocol Alignment with Official Roon & Elimination of VG2 Freezes**:
+  - **Eliminated Fatal Clock Sync Crash**: Completely removed the client-side `{"request":"sync"}` request that was forcing VEGA G2 into Slave mode and causing the endpoint RAAT daemon to crash and reboot. Captured `deviceClockPort` from `setup` reply, establishing VEGA G2's Femto crystal as Clock Master and implementing Core-side UDP `RAATCLKQ`/`RAATCLKR` telemetry.
+  - **Official Signed Lua Corpus Injection**: Switched exclusively to injecting Roon's 4 official signed Lua scripts (`raat.dat:base.lua`, `dkjson.lua`, `protocol.lua`, `roon_tcp.lua`) with `keypair:"Roon"` and 128-hex signatures. Blocked clean-room unsigned script fallback on modern Linux RT firmwares to prevent state machine corruption.
+  - **Full Control Plane Handshake**: Aligned control flow with official Roon: `info` -> `set_client_type: "Roon"` -> `subscribe_transport` -> `subscribe_controls` -> `request_source` (mounting display session and relays) -> `setup`.
+  - **Stream Buffer Threshold & Pacing**: Aligned `stream` request with official Roon (`buffer_size: 5.0, ready_threshold: 0.45, first_seq: -1, nak_port: -1`). Pre-buffered 2.3 seconds of PCM audio and strictly synchronized on the renderer's `{"status":"Ready"}` event before starting playback, completely eliminating ALSA DMA buffer underruns and playback stalls.
+  - **Safe Teardown & Drain Order**: Reordered `Stop()` and `Close()` to send `stop`/`end_stream` over control TCP and allow ALSA DMA to drain before terminating audio TCP, preventing ALSA `hw:0,0` kernel driver hangs on Linux PREEMPT_RT devices.
+  - **Asynchronous RID Stash**: Added an out-of-order response cache (`stash_`) to `ControlChannel` to prevent dropping command responses during concurrent notifications.
+
 ## [0.3.10] - 2026-11-20
 
 ### Added

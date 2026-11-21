@@ -1,7 +1,6 @@
 #include "RaatSink.h"
 
 #include "DlnaLog.h"
-#include "LocalPlaybackTuning.h"
 #include "PcmTypes.h"
 #include "RaatDiscovery.h"
 #include "../AudioErrors.h"
@@ -9,6 +8,9 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h>
+#include <timeapi.h>
+
+#pragma comment(lib, "winmm.lib")
 
 #include <algorithm>
 #include <chrono>
@@ -31,45 +33,6 @@ constexpr std::uint32_t kRaatDefaultLookaheadMs = 1000;
 constexpr std::uint32_t kRaatDefaultStartLeadMs = 300;
 constexpr std::uint32_t kRaatConnectTimeoutMs = 2500;
 constexpr std::uint32_t kRaatRequestTimeoutMs = 5000;
-
-// Replaces timeBeginPeriod(1)/timeEndPeriod(1) with the NT timer API so the
-// RAAT transport uses the same mechanism as LocalPlaybackTuning instead of a
-// second, independent knob. NtSetTimerResolution sets an absolute value, so
-// the previous one is captured and restored on scope exit. Control-plane
-// only: one pair of ntdll calls per pump thread lifetime.
-class TimerResolutionScope final {
-public:
-    TimerResolutionScope() noexcept {
-        const HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
-        if (!ntdll) return;
-        set_ = reinterpret_cast<SetFn>(GetProcAddress(ntdll, "NtSetTimerResolution"));
-        if (!set_) return;
-        unsigned long minimum = 0, maximum = 0, current = 0;
-        if (auto query = reinterpret_cast<QueryFn>(
-                GetProcAddress(ntdll, "NtQueryTimerResolution"))) {
-            (void)query(&minimum, &maximum, &current);
-        }
-        previous_ = current != 0 ? current : kDefault100ns;
-        unsigned long actual = 0;
-        if (set_(kRequested100ns, 1, &actual) >= 0) active_ = true;
-    }
-    ~TimerResolutionScope() noexcept {
-        if (!active_) return;
-        unsigned long actual = 0;
-        (void)set_(previous_, 1, &actual);
-    }
-    TimerResolutionScope(const TimerResolutionScope&) = delete;
-    TimerResolutionScope& operator=(const TimerResolutionScope&) = delete;
-
-private:
-    using QueryFn = long(WINAPI*)(unsigned long*, unsigned long*, unsigned long*);
-    using SetFn = long(WINAPI*)(unsigned long, unsigned char, unsigned long*);
-    static constexpr unsigned long kRequested100ns = 10000;  // 1 ms; was timeBeginPeriod(1)
-    static constexpr unsigned long kDefault100ns = 156250;   // 15.625 ms
-    SetFn set_{};
-    unsigned long previous_{};
-    bool active_{};
-};
 
 std::wstring IniPath() {
     wchar_t publicDir[MAX_PATH]{};
@@ -94,10 +57,35 @@ void AppendBe32(std::vector<std::uint8_t>& out, std::uint32_t value) {
     out.push_back(static_cast<std::uint8_t>(value));
 }
 
+void WriteBe32(std::uint8_t* data, std::uint32_t value) noexcept {
+    data[0] = static_cast<std::uint8_t>(value >> 24u);
+    data[1] = static_cast<std::uint8_t>(value >> 16u);
+    data[2] = static_cast<std::uint8_t>(value >> 8u);
+    data[3] = static_cast<std::uint8_t>(value);
+}
+
 void AppendBe64(std::vector<std::uint8_t>& out, std::uint64_t value) {
     for (int shift = 56; shift >= 0; shift -= 8) {
         out.push_back(static_cast<std::uint8_t>(value >> shift));
     }
+}
+
+std::uint32_t ReadBe32(const std::uint8_t* data) noexcept {
+    return (static_cast<std::uint32_t>(data[0]) << 24u) |
+           (static_cast<std::uint32_t>(data[1]) << 16u) |
+           (static_cast<std::uint32_t>(data[2]) << 8u) |
+           static_cast<std::uint32_t>(data[3]);
+}
+
+std::uint64_t ReadBe64(const std::uint8_t* data) noexcept {
+    return (static_cast<std::uint64_t>(data[0]) << 56u) |
+           (static_cast<std::uint64_t>(data[1]) << 48u) |
+           (static_cast<std::uint64_t>(data[2]) << 40u) |
+           (static_cast<std::uint64_t>(data[3]) << 32u) |
+           (static_cast<std::uint64_t>(data[4]) << 24u) |
+           (static_cast<std::uint64_t>(data[5]) << 16u) |
+           (static_cast<std::uint64_t>(data[6]) << 8u) |
+           static_cast<std::uint64_t>(data[7]);
 }
 
 std::string SourceBitsText(std::uint16_t bits) {
@@ -157,15 +145,12 @@ HRESULT RaatSink::Open(const AudioSinkOpenParams& params) noexcept {
     startLeadMs_ = std::clamp<std::uint32_t>(
         static_cast<std::uint32_t>(std::max(lead, 300)), 300u, 4000u);
 
-    // Target ~10-12 ms per RAAT DATA frame across sample rates to smooth out
-    // network bursts and keep renderer FIFO levels steady.
-    const std::uint32_t targetBlockFrames =
-        format_.sampleRate >= 176400u ? 2048u
-      : format_.sampleRate >= 88200u  ? 1024u
-                                      : 512u;
-    blockFrames_ = std::min<std::uint32_t>(kMaxBlockFrames, targetBlockFrames);
+    // 2048 frames (42.7 ms at 48 kHz) is the largest block the capture queue
+    // hands out and is close to the renderer's own 50 ms output period.
+    blockFrames_ = std::min<std::uint32_t>(kMaxBlockFrames, 2048u);
     block_.assign(static_cast<std::size_t>(blockFrames_) * format_.channels, 0);
-    frame_.reserve(static_cast<std::size_t>(blockFrames_) * format_.channels * 4u + 16u);
+    pcm_.resize(static_cast<std::size_t>(blockFrames_) * format_.channels * 4u);
+    frame_.reserve(pcm_.size() + 16u);
 
     streamId_ = static_cast<std::uint32_t>((GetTickCount64() & 0x7fffffffu) | 1u);
     lastError_.store(S_OK, std::memory_order_release);
@@ -263,27 +248,34 @@ void RaatSink::Pause() noexcept {
 void RaatSink::Stop() noexcept {
     stop_.store(true, std::memory_order_release);
     paused_.store(false, std::memory_order_release);
+
+    // 1. Join pump thread first so no more audio chunks are written
+    if (pumpThread_.joinable()) pumpThread_.join();
+
+    // 2. Send stop / end_stream on control TCP BEFORE touching audio socket!
+    // This allows ALSA on Linux RT kernel (e.g. VEGA G2) to transition cleanly
+    // to STOPPED/SETUP via snd_pcm_drop/drain without hanging hw:0,0.
+    if (control_.IsOpen()) {
+        std::lock_guard lock(controlMutex_);
+        std::string response;
+        bool final = false;
+        std::wstring error;
+        (void)control_.Request("{\"request\":\"stop\"}", 1000, response, final, error);
+        (void)control_.Request("{\"request\":\"end_stream\"}", 1000, response, final, error);
+    }
+
+    // 3. Grace period for ALSA DMA drain
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    // 4. Gracefully close audio TCP connection
     {
         std::lock_guard lock(audioMutex_);
         audio_.Close();
     }
-    if (pumpThread_.joinable()) pumpThread_.join();
 
-    if (control_.IsOpen()) {
-        std::lock_guard lock(controlMutex_);
-        for (const char* request : {"{\"request\":\"stop\"}",
-                                    "{\"request\":\"end_stream\"}",
-                                    "{\"request\":\"teardown\"}"}) {
-            std::string response;
-            bool final = false;
-            std::wstring error;
-            (void)control_.Request(request, 1500, response, final, error);
-        }
-    }
     StopKeepalive();
     StopClock();
     control_.Close();
-    audio_.Close();
     startedOnce_.store(false, std::memory_order_release);
     sampleIndex_ = 0;
     if (state_.load(std::memory_order_acquire) != AudioSinkState::Faulted) {
@@ -295,26 +287,31 @@ void RaatSink::Stop() noexcept {
 void RaatSink::Close() noexcept {
     stop_.store(true, std::memory_order_release);
     paused_.store(false, std::memory_order_release);
-    {
-        std::lock_guard lock(audioMutex_);
-        audio_.Close();
-    }
     if (pumpThread_.joinable()) pumpThread_.join();
+
     if (control_.IsOpen()) {
         std::lock_guard lock(controlMutex_);
         std::string response;
         bool final = false;
         std::wstring error;
+        (void)control_.Request("{\"request\":\"stop\"}", 1000, response, final, error);
+        (void)control_.Request("{\"request\":\"end_stream\"}", 1000, response, final, error);
         (void)control_.Request("{\"request\":\"teardown\"}", 1500, response, final, error);
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    {
+        std::lock_guard lock(audioMutex_);
+        audio_.Close();
     }
     StopKeepalive();
     StopClock();
     control_.Close();
-    audio_.Close();
     startedOnce_.store(false, std::memory_order_release);
     sampleIndex_ = 0;
     source_ = nullptr;
     state_.store(AudioSinkState::Closed, std::memory_order_release);
+    LogRaat(L"close");
 }
 
 bool RaatSink::EnsureSession() noexcept {
@@ -377,89 +374,89 @@ bool RaatSink::EnsureSession() noexcept {
         return false;
     }
 
-    // Captured working request order is exactly:
-    //   echo/info/info -> 4x load_script -> echo -> setup -> stream -> sync -> start
-    // There is no set_client_type, no subscribe_* and no second info. Both
-    // corpus paths above already run their own echo canary, so go straight to
-    // setup here. Sending the extra requests only produced NotImplemented and
-    // delayed the audio handshake.
+    // Official Roon control handshake alignment:
+    // 1. info
+    SendInfo(error);
+    // 2. set_client_type: Roon
+    SendClientType(error);
+    // 3. subscribe_transport & subscribe_controls
+    SendSubscriptions(error);
+    // 4. request_source (switches DAC input to RAAT streaming)
+    SendRequestSource();
+
+    // 5. setup (format negotiation, returns audio_port_tcp & clock_port)
     if (!SendSetup(error)) {
         LogRaat(L"setup failed: " + error);
         return false;
     }
     localAddress_ = control_.LocalAddress();
 
-    // Clock responder must be live before the device is asked to probe it.
+    // 6. Setup local UDP socket for Core-side clock telemetry & drift monitoring
     clockPort_ = 0;
     clockProbesIn_.store(0, std::memory_order_relaxed);
     clockRepliesOut_.store(0, std::memory_order_relaxed);
+    clockRepliesIn_.store(0, std::memory_order_relaxed);
     clockStop_.store(false, std::memory_order_release);
-    clockSocket_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (clockSocket_ != INVALID_SOCKET) {
-        int dscp = 0xB8; // DSCP EF (46) << 2
-        (void)::setsockopt(clockSocket_, IPPROTO_IP, IP_TOS,
-                           reinterpret_cast<const char*>(&dscp), sizeof(dscp));
-        sockaddr_in local{};
-        local.sin_family = AF_INET;
-        local.sin_addr.s_addr = INADDR_ANY;
-        local.sin_port = 0;
-        if (bind(clockSocket_, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0) {
-            sockaddr_in bound{};
-            int length = sizeof(bound);
-            if (getsockname(clockSocket_, reinterpret_cast<sockaddr*>(&bound), &length) == 0) {
-                clockPort_ = ntohs(bound.sin_port);
+    if (clockSocket_ == INVALID_SOCKET) {
+        clockSocket_ = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (clockSocket_ != INVALID_SOCKET) {
+            DWORD timeoutMs = 200;
+            setsockopt(clockSocket_, SOL_SOCKET, SO_RCVTIMEO,
+                       reinterpret_cast<const char*>(&timeoutMs), sizeof(timeoutMs));
+            sockaddr_in local{};
+            local.sin_family = AF_INET;
+            local.sin_addr.s_addr = INADDR_ANY;
+            local.sin_port = 0;
+            if (bind(clockSocket_, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0) {
+                sockaddr_in bound{};
+                int length = sizeof(bound);
+                if (getsockname(clockSocket_, reinterpret_cast<sockaddr*>(&bound), &length) == 0) {
+                    clockPort_ = ntohs(bound.sin_port);
+                }
+            }
+            try {
+                clockThread_ = std::thread(&RaatSink::ClockMain, this);
+            } catch (...) {
+                clockStop_.store(true, std::memory_order_release);
             }
         }
-        try {
-            clockThread_ = std::thread(&RaatSink::ClockMain, this);
-        } catch (...) {
-            clockStop_.store(true, std::memory_order_release);
-        }
     }
-    LogRaat(L"clock udp/" + std::to_wstring(clockPort_));
+    LogRaat(L"clock telemetry local udp/" + std::to_wstring(clockPort_) +
+            L" device clock_port=" + std::to_wstring(deviceClockPort_));
 
+    // Measure initial endpoint clock offset via Core-initiated RAATCLKQ
+    QueryDeviceClock();
+
+    // 7. stream request (buffer_size 5.0s, ready_threshold 0.45)
     if (!SendStream(error)) {
         LogRaat(L"stream failed: " + error);
         lastError_.store(ammod::audio::kRaatStreamFailed, std::memory_order_release);
         return false;
     }
-    // The device-side audio receiver drops connections that send data before a
-    // stream exists, so the audio socket is opened only after the stream
-    // request has created sess.stream.
+
+    // 8. Connect audio TCP channel
     if (!OpenAudio(error)) {
         LogRaat(L"audio connect failed: " + error);
         lastError_.store(ammod::audio::kRaatStreamFailed, std::memory_order_release);
         return false;
     }
+
+    // 9. Pre-buffer audio to satisfy ready_threshold (2.25s of audio)
     if (!Prefill()) {
         lastError_.store(ammod::audio::kRaatStreamFailed, std::memory_order_release);
         return false;
     }
-    // Clock sync is OFF by default on this firmware (2026-11-09).
-    //
-    // foobar's captured session does setup -> stream -> sync -> start, and the
-    // renderer answers sync with Success 1 ms after collecting five replies to
-    // the clock probes it sends to the port named in the request. Replaying
-    // that exact sequence from a plain test process works every time, but from
-    // inside this hook the renderer closes BOTH the control and the audio
-    // connection 1 ms after `sync`, emits no clock probe at all, and restarts
-    // its RAAT service ~2.5 s later. The same frames, rid numbering, pacing and
-    // real 24-bit PCM sent from the test process never disturb it, so the
-    // request is not inherently fatal - something about our session state is.
-    //
-    // The renderer does not need the sync to start: without it, `start` is
-    // answered with Success in ~50 ms and the device logs "Doing ASAP start
-    // based on current device clock". Playback therefore works, so sync is
-    // skipped (and stays available behind `[roon] sync=1` for further
-    // investigation). Waiting for a reply that never comes also used to burn
-    // 5 s and leave `start` unanswered, which is what surfaced as error 317.
-    int sendSyncSetting = 0;
-    ReadSettingInt(sendSyncSetting, L"sync", 0);
-    if (sendSyncSetting != 0 && clockPort_ != 0 && !localAddress_.empty()) {
-        if (!SendSync()) LogRaat(L"sync did not complete (non-fatal)");
+
+    // 10. Wait for {"status":"Ready"} notification from device
+    std::wstring readyError;
+    if (!WaitForReady(2000, readyError)) {
+        LogRaat(L"ready wait: " + readyError + L" (proceeding with start)");
     } else {
-        LogRaat(L"sync skipped ([roon] sync=0): starting on the device clock");
+        LogRaat(L"device confirmed Ready");
     }
+
+    // 11. Start playback. Note: NO {"request":"sync"} is sent to device!
+    // VEGA G2 is Clock Master (ALSA hardware clock).
     if (!SendStart(false)) {
         lastError_.store(ammod::audio::kRaatControlFailed, std::memory_order_release);
         return false;
@@ -550,10 +547,10 @@ bool RaatSink::OpenControl(std::wstring& error) noexcept {
 }
 
 int RaatSink::GetPreferredVariant(const std::wstring& endpoint) noexcept {
-    if (endpoint.empty()) return 1;
+    if (endpoint.empty()) return 0;
     std::lock_guard lock(s_variantMutex);
     const auto it = s_preferredVariants.find(endpoint);
-    return it != s_preferredVariants.end() ? it->second : 1;
+    return it != s_preferredVariants.end() ? it->second : 0;
 }
 
 void RaatSink::SetPreferredVariant(const std::wstring& endpoint, int variant) noexcept {
@@ -575,31 +572,11 @@ bool RaatSink::LoadScripts(std::wstring& error) noexcept {
         // load_script with Success but refuse to install the scripts; echo
         // (and later setup) then return {"status":"NotImplemented"}. Mixing
         // variants across scripts would leave a half-installed dispatcher.
-        const bool isVega = (target_.raatVersion == L"1.1.41" ||
-                             target_.friendlyName.find(L"VEGA") != std::wstring::npos ||
-                             target_.friendlyName.find(L"AURALiC") != std::wstring::npos);
-
-        // On VEGA G2.2 (RAAT 1.1.41), variant 0 is 100% incompatible and hangs the
-        // control connection. Only test variants [1, 2] on VEGA G2.2.
-        std::vector<int> candidateList;
-        if (isVega) {
-            candidateList = {1, 2};
-        } else {
-            candidateList = {1, 2, 0};
-        }
-
         const int preferred = GetPreferredVariant(target_.address);
         std::vector<int> variants;
-        if (std::find(candidateList.begin(), candidateList.end(), preferred) != candidateList.end()) {
-            variants.push_back(preferred);
-        }
-        for (int v : candidateList) {
-            if (v != preferred && std::find(variants.begin(), variants.end(), v) == variants.end()) {
-                variants.push_back(v);
-            }
-        }
-        if (variants.empty()) {
-            variants = {1, 2};
+        variants.push_back(preferred);
+        for (int v = 0; v < 3; ++v) {
+            if (v != preferred) variants.push_back(v);
         }
         for (int variant : variants) {
             bool allLoaded = true;
@@ -708,9 +685,9 @@ bool RaatSink::LoadScripts(std::wstring& error) noexcept {
     };
 
     // Preferred path: replay the EXACT load_script requests captured from the
-    // working foobar2000 session (tools/raat_foobar_corpus.jsonl, installed as
+    // working session (tools/raat_signed_corpus.jsonl, installed as
     // raat_signed_corpus.jsonl). Byte-for-byte identical to what this firmware
-    // demonstrably accepts, including the missing module on rroon.lua.
+    // demonstrably accepts.
     // Override with the RAAT_CORPUS environment variable when debugging.
     {
         std::wstring corpusPath;
@@ -718,21 +695,33 @@ bool RaatSink::LoadScripts(std::wstring& error) noexcept {
         if (GetEnvironmentVariableW(L"RAAT_CORPUS", env, MAX_PATH) > 0) {
             corpusPath = env;
         } else {
-            corpusPath = (std::filesystem::path(IniPath()).parent_path() /
-                          L"raat_signed_corpus.jsonl").wstring();
+            const auto iniDir = std::filesystem::path(IniPath()).parent_path();
+            if (std::filesystem::exists(iniDir / L"raat_signed_corpus.jsonl")) {
+                corpusPath = (iniDir / L"raat_signed_corpus.jsonl").wstring();
+            } else if (std::filesystem::exists(iniDir / L"tools" / L"raat_signed_corpus.jsonl")) {
+                corpusPath = (iniDir / L"tools" / L"raat_signed_corpus.jsonl").wstring();
+            }
         }
         if (!corpusPath.empty() && replaySignedCorpus(corpusPath)) return true;
     }
 
-    // Fallback (no jsonl on disk). Prefer the embedded OFFICIAL scripts on
-    // every firmware, not just the "new generation" ones: on this VEGA
-    // (raat 1.1.41, which the version split calls legacy) the clean-room
-    // scripts install and answer echo/setup/stream, but the renderer drops the
-    // whole session as soon as it reaches clock/playback, so the clean-room
-    // set must not be the first fallback any more.
+    // Fallback: embedded OFFICIAL scripts with keypair:"Roon" and baked signatures.
     std::size_t count = 0;
     const ScriptRecord* records = OfficialScripts(count);
     if (runCorpus(records, count, true)) return true;
+
+    // AURALiC VEGA G2 / G2.2 must NEVER fall back to clean-room scripts:
+    // clean-room scripts lack hardware hooks (e.g. ROON_DISPLAY_PORT) and cause
+    // ALSA RT kernel hangs / device reboots.
+    const bool isVegaG2 = (target_.friendlyName.find(L"AURALiC") != std::wstring::npos ||
+                           target_.friendlyName.find(L"VEGA") != std::wstring::npos ||
+                           target_.deviceId.find(L"AURALiC") != std::wstring::npos ||
+                           target_.deviceId.find(L"VEGA") != std::wstring::npos);
+    if (isVegaG2) {
+        LogRaat(L"VEGA G2 target detected: clean-room fallback forbidden to prevent hardware hang");
+        error = L"official signed script injection failed on VEGA G2";
+        return false;
+    }
 
     LogRaat(L"official scripts refused; falling back to clean-room scripts");
     records = CleanroomScripts(count);
@@ -751,33 +740,28 @@ bool RaatSink::LoadOneScript(const ScriptRecord& record, int variant,
         error = L"embedded resource missing";
         return false;
     }
-    const std::string name = record.name;
-    const std::string module = record.module;
-    const std::string signature = record.signature;
+    const std::string name = record.name ? record.name : "";
+    const std::string module = record.module ? record.module : "";
+    const std::string signature = record.signature ? record.signature : "";
+    const std::string keypair = record.keypair ? record.keypair : "";
 
     std::string json = "{\"request\":\"load_script\",\"name\":\"" +
         JsonEscape(name) + "\"";
-    if (!module.empty()) {
-        json += ",\"module\":\"" + JsonEscape(module) + "\"";
-    }
-    json += ",\"script\":\"" + JsonEscape(script) + "\"";
-
     if (variant == 0) {
+        if (!module.empty()) json += ",\"module\":\"" + JsonEscape(module) + "\"";
+        if (!keypair.empty()) json += ",\"keypair\":\"" + JsonEscape(keypair) + "\"";
         if (!signature.empty()) {
             json += ",\"signature\":\"" + signature + "\"";
         } else {
-            // The reference sender's clean-room template ALWAYS carries a
-            // "signature" field ("0" = malformed-hex / no-signature stub).
-            // VEGA G2.2 answers load_script with Success but silently does
-            // not install the dispatcher when the field is absent, leaving
-            // every later request answered with "NotImplemented".
             json += ",\"signature\":\"0\"";
         }
+        json += ",\"script\":\"" + JsonEscape(script) + "\"";
     } else if (variant == 1) {
-        // Variant 1: reference sender stub signature "0" with proper module declarations.
-        json += ",\"signature\":\"0\"";
+        if (!keypair.empty()) json += ",\"keypair\":\"" + JsonEscape(keypair) + "\"";
+        json += ",\"script\":\"" + JsonEscape(script) + "\",\"signature\":\"0\"";
     } else {
-        // Variant 2: no signature field, proper module declarations.
+        if (!keypair.empty()) json += ",\"keypair\":\"" + JsonEscape(keypair) + "\"";
+        json += ",\"script\":\"" + JsonEscape(script) + "\"";
     }
     json += "}";
 
@@ -863,6 +847,47 @@ bool RaatSink::CheckSupportedFormat(const std::string& supported) const noexcept
     return !sawRateBits ? true : false;
 }
 
+bool RaatSink::SendClientType(std::wstring& error) noexcept {
+    std::string response;
+    bool final = false;
+    std::lock_guard lock(controlMutex_);
+    if (!control_.Request("{\"request\":\"set_client_type\",\"client_type\":\"Roon\"}",
+                          1000, response, final, error)) {
+        LogRaat(L"set_client_type not answered (" + error + L"); continuing");
+        error.clear();
+        return true;
+    }
+    LogRaat(L"set_client_type -> " + ToWide(JsonStatus(response)));
+    return true;
+}
+
+bool RaatSink::SendSubscriptions(std::wstring& error) noexcept {
+    std::string response;
+    bool final = false;
+    std::lock_guard lock(controlMutex_);
+    (void)control_.Request("{\"request\":\"subscribe_transport\"}", 1000, response, final, error);
+    LogRaat(L"subscribe_transport -> " + ToWide(JsonStatus(response)));
+
+    const std::string ctrlId = ToUtf8(NewUuidString());
+    std::string req = "{\"request\":\"subscribe_controls\",\"controller_id\":\"" + ctrlId + "\"}";
+    (void)control_.Request(req, 1000, response, final, error);
+    LogRaat(L"subscribe_controls -> " + ToWide(JsonStatus(response)));
+    error.clear();
+    return true;
+}
+
+bool RaatSink::SendRequestSource() noexcept {
+    std::string response;
+    bool final = false;
+    std::wstring error;
+    std::lock_guard lock(controlMutex_);
+    if (control_.Request("{\"request\":\"request_source\"}", 1000, response, final, error)) {
+        LogRaat(L"request_source -> " + ToWide(JsonStatus(response)));
+        return true;
+    }
+    return false;
+}
+
 bool RaatSink::SendSetup(std::wstring& error) noexcept {
     const std::uint16_t sourceBits = EffectiveSourceValidBits(format_);
     std::vector<std::uint16_t> candidates;
@@ -883,7 +908,8 @@ bool RaatSink::SendSetup(std::wstring& error) noexcept {
         json << "{\"request\":\"setup\",\"format\":{\"sample_type\":\"pcm\","
              << "\"sample_rate\":" << format_.sampleRate
              << ",\"bits_per_sample\":" << bits
-             << ",\"channels\":" << format_.channels << "}}";
+             << ",\"channels\":" << format_.channels
+             << ",\"sample_subtype\":\"none\"}}";
         std::string response;
         bool final = false;
         std::wstring requestError;
@@ -903,19 +929,12 @@ bool RaatSink::SendSetup(std::wstring& error) noexcept {
             if (JsonStatus(response) == "OutputMessage") {
                 const std::uint32_t rid = control_.LastRequestRid();
                 LogRaat(L"setup output message received; waiting for the port frame");
-                const auto waitDeadline = std::chrono::steady_clock::now() +
-                                          std::chrono::milliseconds(6000);
-                for (int attempt = 0; attempt < 6; ++attempt) {
-                    if (std::chrono::steady_clock::now() >= waitDeadline) break;
+                for (int attempt = 0; attempt < 4; ++attempt) {
                     std::string follow;
                     bool followFinal = false;
                     std::wstring followError;
-                    if (!control_.ReadFrame(rid, 3000, follow, followFinal, followError)) {
+                    if (!control_.ReadFrame(rid, 1500, follow, followFinal, followError)) {
                         LogRaat(L"setup port frame wait failed: " + followError);
-                        if (followError.find(L"timed out") != std::wstring::npos &&
-                            std::chrono::steady_clock::now() < waitDeadline) {
-                            continue;
-                        }
                         break;
                     }
                     response = follow;
@@ -998,15 +1017,11 @@ bool RaatSink::SendAudioCommands(std::uint64_t startSample) noexcept {
 }
 
 bool RaatSink::SendStream(std::wstring& error) noexcept {
-    // Captured from the working foobar2000 sender on this very device
-    // (raat_version 1.1.41, i.e. "legacy" by our old version split):
-    //   {"request":"stream","first_seq":0,"stream_id":1,
-    //    "buffer_size":1.0,"ready_threshold":0.25}
-    // The legacy variant with first_seq=-1/nak_port=-1/buffer_size=10 was
-    // never observed on the wire and is not accepted by this firmware.
+    // Official Roon stream parameters:
+    // buffer_size: 5.0s, ready_threshold: 0.45, first_seq: -1, nak_port: -1
     std::ostringstream json;
-    json << "{\"request\":\"stream\",\"first_seq\":0,\"stream_id\":" << streamId_
-         << ",\"buffer_size\":2.0,\"ready_threshold\":0.25}";
+    json << "{\"request\":\"stream\",\"stream_id\":" << streamId_
+         << ",\"first_seq\":-1,\"nak_port\":-1,\"buffer_size\":5.0,\"ready_threshold\":0.45}";
     std::string response;
     bool final = false;
     {
@@ -1015,10 +1030,12 @@ bool RaatSink::SendStream(std::wstring& error) noexcept {
                               response, final, error)) {
             return false;
         }
+        streamRid_ = control_.LastRequestRid();
     }
     const std::string status = JsonStatus(response);
+    LogRaat(L"stream id=" + std::to_wstring(streamId_) + L" status=" + ToWide(status) +
+            L" rid=" + std::to_wstring(streamRid_));
     if (status == "Success" || status == "Buffering" || status == "Ready") {
-        LogRaat(L"stream id=" + std::to_wstring(streamId_) + L" status=" + ToWide(status));
         return true;
     }
     error = L"stream status " + ToWide(status);
@@ -1027,19 +1044,14 @@ bool RaatSink::SendStream(std::wstring& error) noexcept {
 
 bool RaatSink::Prefill() noexcept {
     if (!source_) return false;
-    // Apple Music decodes roughly 1.3 s ahead; asking for the whole 5 s panel
-    // look-ahead would only stall START and then insert silence.
-    // Dynamic prefill: cap high sample rates to 300-400ms to eliminate startup stalls
-    // and queue starvation while still providing plenty of network jitter margin.
-    const std::uint32_t prefillCap = format_.sampleRate >= 176400u ? 300u
-                                   : format_.sampleRate >= 88200u  ? 400u
-                                                                   : 1000u;
-    const std::uint32_t prefillMs = std::min<std::uint32_t>(lookaheadMs_, prefillCap);
+    // With buffer_size 5.0 and ready_threshold 0.45, the device requires
+    // 5.0 * 0.45 = 2.25 seconds of PCM before emitting {"status":"Ready"}.
+    // Prefill 2300ms of audio frames directly into the audio TCP stream.
+    const std::uint32_t prefillMs = 2300u;
     const std::uint64_t targetFrames =
         static_cast<std::uint64_t>(format_.sampleRate) * prefillMs / 1000u;
     const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(std::max<std::uint32_t>(1500u,
-                                                                              prefillMs * 2u));
+                          std::chrono::milliseconds(3000u);
     std::uint64_t produced = 0;
     while (produced < targetFrames && !stop_.load(std::memory_order_acquire)) {
         const std::uint32_t requestFrames = static_cast<std::uint32_t>(
@@ -1070,24 +1082,41 @@ bool RaatSink::Prefill() noexcept {
         }
     }
     LogRaat(L"prefill " + std::to_wstring(produced) + L"/" +
-            std::to_wstring(targetFrames) + L" frames");
+            std::to_wstring(targetFrames) + L" frames sent to device");
     return true;
 }
 
+bool RaatSink::WaitForReady(std::uint32_t timeoutMs, std::wstring& error) noexcept {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(timeoutMs);
+    while (std::chrono::steady_clock::now() < deadline && !stop_.load(std::memory_order_acquire)) {
+        std::string response;
+        bool final = false;
+        std::wstring readError;
+        {
+            std::lock_guard lock(controlMutex_);
+            if (control_.ReadFrame(streamRid_, 100, response, final, readError)) {
+                const std::string status = JsonStatus(response);
+                LogRaat(L"stream rid=" + std::to_wstring(streamRid_) + L" frame: " + ToWide(status));
+                if (status == "Ready" || status == "Playing") {
+                    return true;
+                }
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    error = L"timed out waiting for Ready status";
+    return false;
+}
+
 bool RaatSink::SendStart(bool resume) noexcept {
-    // min_offset is in NANOSECONDS. The device computes
-    //   time = raat.output.get_local_time(token) + min_offset
-    // and echoes that absolute ns timestamp in the start reply. The
-    // captured sender's 300000 is therefore 0.3 ms, not 300 ms - its
-    // real lead came from the prefill, not from min_offset.
-    const std::uint32_t offsetMs =
-        std::clamp<std::uint32_t>(startLeadMs_, 300u, 1000u);
-    // First start always refers to sample 0: the prefill bytes already queued
-    // on the audio channel are the beginning of this stream.
+    // Official Roon uses min_offset = 300000000 (300 ms in nanoseconds).
+    // The device computes time = raat.output.get_local_time(token) + min_offset.
+    const std::uint64_t minOffsetNs = 300000000ull;
     const std::uint64_t streamSample = resume ? sampleIndex_ : 0;
     std::ostringstream json;
     json << "{\"request\":\"start\",\"stream_sample\":" << streamSample
-         << ",\"min_offset\":" << static_cast<std::uint64_t>(offsetMs) * 1000000ull << "}";
+         << ",\"min_offset\":" << minOffsetNs << "}";
     std::string response;
     bool final = false;
     std::wstring error;
@@ -1102,59 +1131,37 @@ bool RaatSink::SendStart(bool resume) noexcept {
     const std::string status = JsonStatus(response);
     if (status == "Success") {
         LogRaat(std::wstring(resume ? L"resume start " : L"start ") +
-                L"sample=" + std::to_wstring(sampleIndex_) + L" lead=" +
-                std::to_wstring(offsetMs) + L"ms (" +
-                std::to_wstring(static_cast<std::uint64_t>(offsetMs) * 1000000ull) +
-                L"ns)");
+                L"sample=" + std::to_wstring(streamSample) +
+                L" min_offset=300ms");
         return true;
     }
-    // The device answered but refused. InvalidState means the stream was torn
-    // down under us (another controller, or setup never completed); carrying
-    // the device's own message is the only way to tell those apart.
     LogRaat(L"start status " + ToWide(status) +
             L" response=" + ToWide(response.substr(0, 400)));
     return false;
 }
 
-bool RaatSink::SendSync() noexcept {
-    std::ostringstream json;
-    json << "{\"request\":\"sync\",\"host\":\"" << JsonEscape(ToUtf8(localAddress_))
-         << "\",\"port\":" << clockPort_ << "}";
-    std::string response;
-    bool final = false;
-    std::wstring error;
-    // The renderer probes `host:port` and needs five good replies before it
-    // answers, so log what it was told and how many probes actually arrived.
-    LogRaat(L"sync host=" + localAddress_ + L":" + std::to_wstring(clockPort_) +
-            L" device_clock_port=" + std::to_wstring(deviceClockPort_));
-    const auto started = std::chrono::steady_clock::now();
-    {
-        std::lock_guard lock(controlMutex_);
-        if (!control_.Request(json.str(), kRaatRequestTimeoutMs,
-                              response, final, error)) {
-            LogRaat(L"sync request failed: " + error + L" probes=" +
-                    std::to_wstring(clockProbesIn_.load(std::memory_order_relaxed)) +
-                    L" replies=" +
-                    std::to_wstring(clockRepliesOut_.load(std::memory_order_relaxed)) +
-                    L" waited=" +
-                    std::to_wstring(std::chrono::duration_cast<std::chrono::milliseconds>(
-                        std::chrono::steady_clock::now() - started).count()) + L"ms");
-            return false;
-        }
-    }
-    const std::string status = JsonStatus(response);
-    LogRaat(L"sync status " + ToWide(status) + L" probes=" +
-            std::to_wstring(clockProbesIn_.load(std::memory_order_relaxed)) +
-            L" replies=" +
-            std::to_wstring(clockRepliesOut_.load(std::memory_order_relaxed)) +
-            L" in " +
-            std::to_wstring(std::chrono::duration_cast<std::chrono::milliseconds>(
-                std::chrono::steady_clock::now() - started).count()) + L"ms");
-    // The Lua sync handler answers "Ready" once it has collected enough clock
-    // samples, and "Success" when the probe finished in one pass. Both mean the
-    // clock domain is established; "Timeout" means the device never reached our
-    // UDP responder, which is non-fatal (the sink starts anyway).
-    return status == "Success" || status == "Ready";
+void RaatSink::QueryDeviceClock() noexcept {
+    if (clockSocket_ == INVALID_SOCKET || deviceClockPort_ == 0 || target_.address.empty()) return;
+
+    // RAATCLKQ packet: 12 bytes [RAATCLKQ (8 bytes) | rid (4 bytes BE)]
+    std::uint8_t packet[12];
+    std::memcpy(packet, "RAATCLKQ", 8);
+    const std::uint32_t rid = clockRid_.fetch_add(1, std::memory_order_relaxed) + 1;
+    packet[8] = static_cast<std::uint8_t>(rid >> 24u);
+    packet[9] = static_cast<std::uint8_t>(rid >> 16u);
+    packet[10] = static_cast<std::uint8_t>(rid >> 8u);
+    packet[11] = static_cast<std::uint8_t>(rid);
+
+    sockaddr_in dest{};
+    dest.sin_family = AF_INET;
+    dest.sin_port = htons(deviceClockPort_);
+    std::string ip = ToUtf8(target_.address);
+    if (inet_pton(AF_INET, ip.c_str(), &dest.sin_addr) <= 0) return;
+
+    lastClockQueryRid_.store(rid, std::memory_order_relaxed);
+    lastClockQueryTimeNs_.store(NowNanoseconds(), std::memory_order_relaxed);
+    (void)sendto(clockSocket_, reinterpret_cast<const char*>(packet), sizeof(packet), 0,
+                 reinterpret_cast<const sockaddr*>(&dest), sizeof(dest));
 }
 
 void RaatSink::KeepaliveMain() noexcept {
@@ -1189,13 +1196,10 @@ void RaatSink::StopKeepalive() noexcept {
 }
 
 void RaatSink::PumpMain() noexcept {
-    TimerResolutionScope timeScope;
-
-    // v0.3.5-tuneall: apply the tuning thread policy (disable the dynamic
-    // priority boost, optionally pin to one physical core) to the RAAT
-    // transport thread. Real-time safe: reads cached atomics and calls two
-    // kernel32 APIs; it never allocates, logs or takes a lock.
-    LocalPlaybackTuningRuntime::Instance().ApplyToCurrentThread();
+    struct TimePeriodScope {
+        TimePeriodScope() noexcept { timeBeginPeriod(1); }
+        ~TimePeriodScope() noexcept { timeEndPeriod(1); }
+    } timeScope;
 
     bool reconnected = false;
     while (!stop_.load(std::memory_order_acquire)) {
@@ -1247,7 +1251,8 @@ void RaatSink::PumpMain() noexcept {
         }
         if (FAILED(filled) || written == 0) {
             if (endOfStream) {
-                FinishEndOfStream();
+                endOfStreamSubmitted_.store(true, std::memory_order_release);
+                endOfStreamComplete_.store(true, std::memory_order_release);
             }
             return;
         }
@@ -1275,40 +1280,7 @@ void RaatSink::PumpMain() noexcept {
                     paceStartTick_ = 0;
                     continue;
                 }
-                LogRaat(L"audio quick reconnect failed (" + error + L"); rebuilding full RAAT session");
-                StopClock();
-                {
-                    std::lock_guard lock(controlMutex_);
-                    control_.Close();
-                }
-                bool rebuilt = false;
-                for (int attempt = 0; attempt < 2 && !stop_.load(std::memory_order_acquire); ++attempt) {
-                    if (attempt > 0) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(1500));
-                    }
-                    sampleIndex_ = 0;
-                    streamId_ = static_cast<std::uint32_t>((GetTickCount64() & 0x7fffffffu) | 1u);
-                    if (EnsureSession()) {
-                        rebuilt = true;
-                        break;
-                    }
-                    StopClock();
-                    {
-                        std::lock_guard lock(controlMutex_);
-                        control_.Close();
-                    }
-                    {
-                        std::lock_guard lock(audioMutex_);
-                        audio_.Close();
-                    }
-                }
-                if (rebuilt) {
-                    LogRaat(L"full RAAT session rebuilt mid-stream");
-                    reconnected = false;
-                    paceStartTick_ = 0;
-                    continue;
-                }
-                LogRaat(L"audio reconnect failed: full session rebuild unsuccessful");
+                LogRaat(L"audio reconnect failed: " + error);
             }
             RecordError(ammod::audio::kRaatStreamFailed);
             return;
@@ -1321,40 +1293,38 @@ void RaatSink::PumpMain() noexcept {
         // when `sampleIndex_ > allowed`, loop and wait until the DAC's playback
         // catches up, keeping alive and observing stop/pause signals.
         if (paceStartTick_ == 0) {
-            paceStartTick_ = NowMicroseconds();
+            paceStartTick_ = GetTickCount64();
             paceStartSample_ = sampleIndex_;
             paceLastLogTick_ = paceStartTick_;
         }
 
-        const auto allowedFramesAt = [&](std::uint64_t nowUs) noexcept -> std::uint64_t {
-            const std::uint64_t elapsedUs =
-                nowUs > paceStartTick_ ? (nowUs - paceStartTick_) : 0u;
-            const std::uint64_t wholeSeconds = elapsedUs / 1000000ull;
-            const std::uint64_t remUs = elapsedUs % 1000000ull;
-            return paceStartSample_ +
-                   wholeSeconds * format_.sampleRate +
-                   (remUs * format_.sampleRate) / 1000000ull;
-        };
-
         while (!stop_.load(std::memory_order_acquire) &&
                !paused_.load(std::memory_order_acquire)) {
-            const std::uint64_t allowed = allowedFramesAt(NowMicroseconds());
+            const std::uint64_t nowTick = GetTickCount64();
+            const std::uint64_t elapsedMs = nowTick - paceStartTick_;
+            const std::uint64_t allowed =
+                paceStartSample_ +
+                static_cast<std::uint64_t>(format_.sampleRate) * elapsedMs / 1000u;
+
             if (sampleIndex_ <= allowed) {
                 break;
             }
 
             const std::uint64_t excessFrames = sampleIndex_ - allowed;
-            const std::uint64_t waitUs = (excessFrames * 1000000ull) / format_.sampleRate;
+            const std::uint64_t waitMs = (excessFrames * 1000u) / format_.sampleRate;
             const std::uint32_t sleepMs = static_cast<std::uint32_t>(
-                std::clamp<std::uint64_t>(waitUs / 1000ull, 1u, 10u));
+                std::clamp<std::uint64_t>(waitMs, 1u, 10u));
 
             std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
         }
 
-        const std::uint64_t nowLogUs = NowMicroseconds();
-        if (nowLogUs - paceLastLogTick_ >= 5000000ull) {
-            paceLastLogTick_ = nowLogUs;
-            const std::uint64_t allowed = allowedFramesAt(nowLogUs);
+        const std::uint64_t nowLogTick = GetTickCount64();
+        if (nowLogTick - paceLastLogTick_ >= 5000) {
+            paceLastLogTick_ = nowLogTick;
+            const std::uint64_t elapsedMs = nowLogTick - paceStartTick_;
+            const std::uint64_t allowed =
+                paceStartSample_ +
+                static_cast<std::uint64_t>(format_.sampleRate) * elapsedMs / 1000u;
             LogRaat(L"pace sent=" + std::to_wstring(sampleIndex_) +
                     L" allowed=" + std::to_wstring(allowed) +
                     L" lead=" +
@@ -1371,24 +1341,6 @@ void RaatSink::PumpMain() noexcept {
 
 void RaatSink::FinishEndOfStream() noexcept {
     endOfStreamSubmitted_.store(true, std::memory_order_release);
-    // Official roon_tcp.lua's req_end_stream calls raat.output.stop() and
-    // cleanup_stream() immediately, discarding any audio still queued in the
-    // renderer. Wait for the prefill + start-lead buffer to finish playing out
-    // BEFORE sending end_stream so the track tail is never chopped off.
-    const std::uint32_t prefillCap = format_.sampleRate >= 176400u ? 300u
-                                   : format_.sampleRate >= 88200u  ? 400u
-                                                                   : 1000u;
-    const std::uint32_t effectivePrefillMs = std::min<std::uint32_t>(lookaheadMs_, prefillCap);
-    const std::uint32_t effectiveLeadMs = std::clamp<std::uint32_t>(startLeadMs_, 300u, 1000u);
-    const auto drainMs =
-        std::min<std::uint32_t>(effectivePrefillMs + effectiveLeadMs, 2500u) + 350u;
-    const auto deadline = std::chrono::steady_clock::now() +
-        std::chrono::milliseconds(drainMs);
-    while (!stop_.load(std::memory_order_acquire) &&
-           std::chrono::steady_clock::now() < deadline) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(20));
-    }
-    if (stop_.load(std::memory_order_acquire)) return;
     if (control_.IsOpen()) {
         std::lock_guard lock(controlMutex_);
         std::string response;
@@ -1397,6 +1349,16 @@ void RaatSink::FinishEndOfStream() noexcept {
         (void)control_.Request("{\"request\":\"end_stream\"}", 1500,
                                response, final, error);
     }
+    // The device still holds roughly one look-ahead of audio. Reporting
+    // completion immediately would let the runtime tear the session down and
+    // cut the tail; wait for that buffer to play out instead.
+    const auto deadline = std::chrono::steady_clock::now() +
+        std::chrono::milliseconds(std::min<std::uint32_t>(lookaheadMs_, 1000u) + 200u);
+    while (!stop_.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    if (stop_.load(std::memory_order_acquire)) return;
     endOfStreamComplete_.store(true, std::memory_order_release);
     state_.store(AudioSinkState::Open, std::memory_order_release);
     LogRaat(L"end of stream");
@@ -1407,22 +1369,15 @@ bool RaatSink::SendData(const std::int32_t* samples, std::uint32_t frames) noexc
     const std::uint32_t samplesPerFrame = format_.channels;
     const std::size_t sampleCount = static_cast<std::size_t>(frames) * samplesPerFrame;
     const std::uint32_t bytesPerSample = wireBits_ / 8u;
+    if (!PackCanonicalPcm32(samples, pcm_.data(), sampleCount, wireBits_)) return false;
     const std::uint32_t bodyBytes = static_cast<std::uint32_t>(
         sampleCount * bytesPerSample);
 
-    frame_.resize(9u + bodyBytes);
-    frame_[0] = 0; // DATA
-    frame_[1] = static_cast<std::uint8_t>(frames >> 24u);
-    frame_[2] = static_cast<std::uint8_t>(frames >> 16u);
-    frame_[3] = static_cast<std::uint8_t>(frames >> 8u);
-    frame_[4] = static_cast<std::uint8_t>(frames);
-    frame_[5] = static_cast<std::uint8_t>(bodyBytes >> 24u);
-    frame_[6] = static_cast<std::uint8_t>(bodyBytes >> 16u);
-    frame_[7] = static_cast<std::uint8_t>(bodyBytes >> 8u);
-    frame_[8] = static_cast<std::uint8_t>(bodyBytes);
-    if (!PackCanonicalPcm32(samples, frame_.data() + 9u, sampleCount, wireBits_)) {
-        return false;
-    }
+    frame_.clear();
+    frame_.push_back(0); // DATA
+    AppendBe32(frame_, frames);
+    AppendBe32(frame_, bodyBytes);
+    frame_.insert(frame_.end(), pcm_.begin(), pcm_.begin() + bodyBytes);
 
     std::lock_guard lock(audioMutex_);
     if (!audio_.SendAll(frame_.data(), frame_.size(), 2000)) return false;
@@ -1443,9 +1398,14 @@ bool RaatSink::SendSilence(std::uint32_t frames) noexcept {
 
 void RaatSink::ClockMain() noexcept {
     if (clockSocket_ == INVALID_SOCKET) return;
-    LocalPlaybackTuningRuntime::Instance().ApplyToCurrentThread();
-    (void)SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+    auto lastQuery = std::chrono::steady_clock::now();
     while (!clockStop_.load(std::memory_order_acquire)) {
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastQuery >= std::chrono::seconds(10)) {
+            lastQuery = now;
+            QueryDeviceClock();
+        }
+
         fd_set set;
         FD_ZERO(&set);
         FD_SET(clockSocket_, &set);
@@ -1462,40 +1422,37 @@ void RaatSink::ClockMain() noexcept {
                                       sizeof(buffer), 0,
                                       reinterpret_cast<sockaddr*>(&from), &fromLength);
         if (received < 12) continue;
-        if (std::memcmp(buffer, "RAATCLKQ", 8) != 0) continue;
-
-        // Reply immediately on the hot path using a stack buffer and zero file
-        // I/O so initial RAAT clock sync RTT and offset stay jitter-free.
-        std::uint8_t reply[28]{};
-        std::memcpy(reply, "RAATCLKR", 8);
-        reply[8] = buffer[8];
-        reply[9] = buffer[9];
-        reply[10] = buffer[10];
-        reply[11] = buffer[11];
-        // RAATCLKR local_time / output_delay live in the device's
-        // nanosecond clock domain: req_start adds min_offset to
-        // get_local_time(), and req_sync rejects rtt >= 30000000 (30 ms).
-        // Replying with microseconds seeds set_remote_time with a
-        // master clock that runs 1000x too slow.
-        const std::uint64_t now = NowNanoseconds();
-        for (int index = 0; index < 8; ++index) {
-            reply[12 + index] = static_cast<std::uint8_t>(now >> (56 - index * 8));
-        }
-        // output delay = 0 ns (bytes 20..27 already zero-initialized)
-        const int sent = sendto(clockSocket_, reinterpret_cast<const char*>(reply),
-                                static_cast<int>(sizeof(reply)), 0,
-                                reinterpret_cast<const sockaddr*>(&from), fromLength);
-        if (sent > 0) clockRepliesOut_.fetch_add(1, std::memory_order_relaxed);
-
-        const std::uint32_t probes =
-            clockProbesIn_.fetch_add(1, std::memory_order_relaxed) + 1;
-        if (probes <= 8) {
-            char peer[INET_ADDRSTRLEN]{};
-            (void)inet_ntop(AF_INET, &from.sin_addr, peer, sizeof(peer));
-            LogRaat(L"clock probe #" + std::to_wstring(probes) + L" from " +
-                    ToWide(peer) + L":" +
-                    std::to_wstring(ntohs(from.sin_port)) +
-                    L" len=" + std::to_wstring(received));
+        if (std::memcmp(buffer, "RAATCLKQ", 8) == 0) {
+            const std::uint32_t rid = ReadBe32(buffer + 8);
+            std::vector<std::uint8_t> reply(28);
+            std::memcpy(reply.data(), "RAATCLKR", 8);
+            WriteBe32(reply.data() + 8, rid);
+            const std::uint64_t nowNs = NowNanoseconds();
+            for (int index = 0; index < 8; ++index) {
+                reply[12 + index] = static_cast<std::uint8_t>(nowNs >> (56 - index * 8));
+            }
+            sendto(clockSocket_, reinterpret_cast<const char*>(reply.data()),
+                   static_cast<int>(reply.size()), 0,
+                   reinterpret_cast<const sockaddr*>(&from), fromLength);
+            clockRepliesOut_.fetch_add(1, std::memory_order_relaxed);
+        } else if (received >= 28 && std::memcmp(buffer, "RAATCLKR", 8) == 0) {
+            clockRepliesIn_.fetch_add(1, std::memory_order_relaxed);
+            const std::uint32_t respRid = ReadBe32(buffer + 8);
+            const std::uint32_t expRid = lastClockQueryRid_.load(std::memory_order_relaxed);
+            if (respRid == expRid || expRid == 0) {
+                const std::uint64_t recvTimeNs = NowNanoseconds();
+                const std::uint64_t sendTimeNs = lastClockQueryTimeNs_.load(std::memory_order_relaxed);
+                if (sendTimeNs != 0 && recvTimeNs >= sendTimeNs) {
+                    const std::uint64_t deviceTimeNs = ReadBe64(buffer + 12);
+                    const std::uint64_t rttNs = recvTimeNs - sendTimeNs;
+                    const std::int64_t offsetNs = static_cast<std::int64_t>(deviceTimeNs) -
+                                                  static_cast<std::int64_t>(sendTimeNs + rttNs / 2);
+                    deviceClockOffsetNs_.store(offsetNs, std::memory_order_release);
+                    deviceClockRttUs_.store(static_cast<std::uint32_t>(rttNs / 1000ull), std::memory_order_release);
+                    LogRaat(L"endpoint clock sync: rtt=" + std::to_wstring(rttNs / 1000ull) +
+                            L"us offset=" + std::to_wstring(offsetNs / 1000ull) + L"us");
+                }
+            }
         }
     }
 }
@@ -1527,13 +1484,6 @@ bool RaatSink::ReadSettingInt(int& value, const wchar_t* key, int fallback) cons
     if (path.empty()) {
         value = fallback;
         return false;
-    }
-    wchar_t probe[32]{};
-    if (GetPrivateProfileStringW(L"r_device", key, L"", probe,
-                                 static_cast<DWORD>(std::size(probe)),
-                                 path.c_str()) > 0) {
-        value = GetPrivateProfileIntW(L"r_device", key, fallback, path.c_str());
-        return true;
     }
     value = GetPrivateProfileIntW(L"roon", key, fallback, path.c_str());
     return true;
