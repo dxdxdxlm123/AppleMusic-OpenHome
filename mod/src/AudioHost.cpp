@@ -135,6 +135,7 @@ void CloseSink(HostState& state) noexcept {
         doomed->Stop();
         doomed->Close();
     }
+    SetThreadExecutionState(ES_CONTINUOUS);
     if (state.header) state.header->hostState = 0;
 }
 
@@ -143,19 +144,35 @@ void CloseSink(HostState& state) noexcept {
 // completion stamp off the audio threads entirely.
 DWORD WINAPI EosMonitorThunk(void* context) noexcept {
     auto* state = static_cast<HostState*>(context);
+    std::uint64_t lastPowerTick = 0;
     while (g_eosMonitorRunning.load(std::memory_order_acquire)) {
         bool complete = false;
         bool faulted = false;
+        bool running = false;
         HRESULT lastError = S_OK;
         EnterCriticalSection(&g_sinkLock);
         if (state->sink) {
             complete = state->sink->EndOfStreamComplete();
-            if (state->sink->State() == ammod::audio_v2::AudioSinkState::Faulted) {
+            const auto sinkState = state->sink->State();
+            if (sinkState == ammod::audio_v2::AudioSinkState::Faulted) {
                 faulted = true;
                 lastError = state->sink->Stats().lastError;
+            } else if (sinkState == ammod::audio_v2::AudioSinkState::Running) {
+                running = true;
             }
         }
         LeaveCriticalSection(&g_sinkLock);
+
+        const auto now = GetTickCount64();
+        if (running) {
+            if (now - lastPowerTick >= 3000) {
+                lastPowerTick = now;
+                SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
+            }
+        } else if (lastPowerTick != 0) {
+            lastPowerTick = 0;
+            SetThreadExecutionState(ES_CONTINUOUS);
+        }
         if (state->header) {
             const auto generation =
                 state->header->generation.load(std::memory_order_acquire);
@@ -349,13 +366,18 @@ void ServeClient(HostState& state) noexcept {
         case HostMessageType::Start:
             reply.result = state.sink ? state.sink->Start(state.source) : E_UNEXPECTED;
             reply.type = static_cast<std::uint32_t>(HostMessageType::StartResult);
+            if (reply.result == S_OK) {
+                SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
+            }
             Log(reply.result == S_OK ? L"start ok" : L"start failed");
             break;
         case HostMessageType::Pause:
             if (state.sink) state.sink->Pause();
+            SetThreadExecutionState(ES_CONTINUOUS);
             break;
         case HostMessageType::Stop:
             if (state.sink) state.sink->Stop();
+            SetThreadExecutionState(ES_CONTINUOUS);
             break;
         case HostMessageType::Close:
             CloseSink(state);

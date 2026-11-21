@@ -226,6 +226,7 @@ HRESULT RaatSink::Start(IIntegerPcmSource& source) noexcept {
     }
     startedOnce_.store(true, std::memory_order_release);
     state_.store(AudioSinkState::Running, std::memory_order_release);
+    SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
     LogRaat(L"session live " + target_.address + L":" +
             std::to_wstring(target_.controlPort));
     return S_OK;
@@ -234,6 +235,7 @@ HRESULT RaatSink::Start(IIntegerPcmSource& source) noexcept {
 void RaatSink::Pause() noexcept {
     if (state_.load(std::memory_order_acquire) != AudioSinkState::Running) return;
     paused_.store(true, std::memory_order_release);
+    SetThreadExecutionState(ES_CONTINUOUS);
     if (control_.IsOpen()) {
         std::lock_guard lock(controlMutex_);
         std::string response;
@@ -248,6 +250,7 @@ void RaatSink::Pause() noexcept {
 void RaatSink::Stop() noexcept {
     stop_.store(true, std::memory_order_release);
     paused_.store(false, std::memory_order_release);
+    SetThreadExecutionState(ES_CONTINUOUS);
 
     // 1. Join pump thread first so no more audio chunks are written
     if (pumpThread_.joinable()) pumpThread_.join();
@@ -310,6 +313,7 @@ void RaatSink::Close() noexcept {
     startedOnce_.store(false, std::memory_order_release);
     sampleIndex_ = 0;
     source_ = nullptr;
+    SetThreadExecutionState(ES_CONTINUOUS);
     state_.store(AudioSinkState::Closed, std::memory_order_release);
     LogRaat(L"close");
 }
@@ -1201,6 +1205,15 @@ void RaatSink::PumpMain() noexcept {
         ~TimePeriodScope() noexcept { timeEndPeriod(1); }
     } timeScope;
 
+    struct PowerScope {
+        PowerScope() noexcept {
+            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
+        }
+        ~PowerScope() noexcept {
+            SetThreadExecutionState(ES_CONTINUOUS);
+        }
+    } powerScope;
+
     bool reconnected = false;
     while (!stop_.load(std::memory_order_acquire)) {
         if (paused_.load(std::memory_order_acquire)) {
@@ -1321,6 +1334,7 @@ void RaatSink::PumpMain() noexcept {
         const std::uint64_t nowLogTick = GetTickCount64();
         if (nowLogTick - paceLastLogTick_ >= 5000) {
             paceLastLogTick_ = nowLogTick;
+            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
             const std::uint64_t elapsedMs = nowLogTick - paceStartTick_;
             const std::uint64_t allowed =
                 paceStartSample_ +
@@ -1472,6 +1486,7 @@ void RaatSink::RecordError(HRESULT error) noexcept {
     if (state_.load(std::memory_order_acquire) == AudioSinkState::Running) {
         state_.store(AudioSinkState::Faulted, std::memory_order_release);
     }
+    SetThreadExecutionState(ES_CONTINUOUS);
     std::wstringstream stream;
     stream << L"error hr=0x" << std::hex << std::uppercase
            << std::setw(8) << std::setfill(L'0')

@@ -15,6 +15,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - **Full Control Plane Handshake**: Aligned control flow with official Roon: `info` -> `set_client_type: "Roon"` -> `subscribe_transport` -> `subscribe_controls` -> `request_source` (mounting display session and relays) -> `setup`.
   - **Stream Buffer Threshold & Pacing**: Aligned `stream` request with official Roon (`buffer_size: 5.0, ready_threshold: 0.45, first_seq: -1, nak_port: -1`). Pre-buffered 2.3 seconds of PCM audio and strictly synchronized on the renderer's `{"status":"Ready"}` event before starting playback, completely eliminating ALSA DMA buffer underruns and playback stalls.
   - **Safe Teardown & Drain Order**: Reordered `Stop()` and `Close()` to send `stop`/`end_stream` over control TCP and allow ALSA DMA to drain before terminating audio TCP, preventing ALSA `hw:0,0` kernel driver hangs on Linux PREEMPT_RT devices.
+  - **Modern Standby & Sleep Prevention (Power Management Assertion)**: Integrated `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)` across `RaatSink`, `DlnaSink`, `AudioHost`, and `HookDll`. Prevents Windows Modern Standby and idle timeouts from suspending network sockets or throttling audio transmission during playback, keeping long listening sessions completely uninterrupted.
   - **Asynchronous RID Stash**: Added an out-of-order response cache (`stash_`) to `ControlChannel` to prevent dropping command responses during concurrent notifications.
 
 ## [0.3.10] - 2026-11-20
