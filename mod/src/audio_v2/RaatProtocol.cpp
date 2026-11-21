@@ -295,7 +295,8 @@ void TcpConnection::Close() noexcept {
 }
 
 bool TcpConnection::Connect(const std::wstring& address, std::uint16_t port,
-                            std::uint32_t timeoutMs, std::wstring& error) noexcept {
+                            std::uint32_t timeoutMs, std::wstring& error,
+                            const std::wstring& bindAddress) noexcept {
     Close();
     if (!EnsureWinsock()) {
         error = L"WSAStartup failed";
@@ -313,6 +314,15 @@ bool TcpConnection::Connect(const std::wstring& address, std::uint16_t port,
     if (socket_ == INVALID_SOCKET) {
         error = L"socket failed " + std::to_wstring(WSAGetLastError());
         return false;
+    }
+    if (!bindAddress.empty()) {
+        const std::string bindText = ToUtf8(bindAddress);
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_port = 0;
+        if (inet_pton(AF_INET, bindText.c_str(), &local.sin_addr) == 1) {
+            (void)::bind(socket_, reinterpret_cast<const sockaddr*>(&local), sizeof(local));
+        }
     }
     u_long nonBlocking = 1;
     (void)ioctlsocket(socket_, FIONBIO, &nonBlocking);
@@ -390,10 +400,11 @@ bool TcpConnection::ReadSome(void* data, std::size_t capacity,
 }
 
 bool ControlChannel::Connect(const std::wstring& address, std::uint16_t port,
-                             std::uint32_t timeoutMs, std::wstring& error) noexcept {
+                             std::uint32_t timeoutMs, std::wstring& error,
+                             const std::wstring& bindAddress) noexcept {
     pending_.clear();
     nextRid_ = 1;
-    if (!connection_.Connect(address, port, timeoutMs, error)) {
+    if (!connection_.Connect(address, port, timeoutMs, error, bindAddress)) {
         address_.clear();
         port_ = 0;
         return false;

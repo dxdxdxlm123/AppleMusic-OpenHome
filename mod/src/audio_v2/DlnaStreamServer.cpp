@@ -4,6 +4,7 @@
 #include "DlnaStreamServer.h"
 
 #include "DlnaLog.h"
+#include "HighResolutionPacer.h"
 #include "MemoryLock.h"
 #include "../WavMetadata.h"
 
@@ -27,7 +28,7 @@ namespace ammod::audio_v2 {
 namespace {
 
 constexpr std::uint32_t kMaxHttpHeaderBytes = 4096;
-constexpr std::uint32_t kSendChunkBytes = 65536;
+constexpr std::uint32_t kSendChunkBytes = 16384; // 16 KB (smoothed down from 64 KB for micro-burst pacing)
 constexpr std::uint32_t kMaxSessionBytes = 32u * 1024u * 1024u;
 constexpr std::size_t kMaxArtworkBytes = 2u * 1024u * 1024u;
 constexpr std::size_t kMaxArtworkCount = 8;
@@ -1222,6 +1223,7 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
         const std::uint64_t pacedBytesPerSecond =
             static_cast<std::uint64_t>(session->Format().sampleRate) *
             session->Format().channels * (session->Format().containerBits / 8u);
+        HighResolutionPacer pacer;
         std::uint64_t firstChunkAt = 0;
         std::vector<BYTE> body(kSendChunkBytes);
         bool endedByStream = false;
@@ -1278,9 +1280,12 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
                 const auto allowedBytes =
                     elapsedMs * pacedBytesPerSecond / 1000u + pacedBytesPerSecond;
                 if (bytesSent > allowedBytes) {
-                    const auto behindMs =
-                        (bytesSent - allowedBytes) * 1000u / pacedBytesPerSecond;
-                    Sleep(static_cast<DWORD>(std::min<std::uint64_t>(behindMs, 500u)));
+                    const auto behindUs =
+                        (bytesSent - allowedBytes) * 1000000ull / pacedBytesPerSecond;
+                    const auto waitUs = std::min<std::uint64_t>(behindUs, 50000ull);
+                    pacer.SleepUs(waitUs, stopping);
+                } else {
+                    pacer.SleepUs(50, stopping);
                 }
             }
         }
@@ -1386,6 +1391,7 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
         const std::uint64_t pacedBytesPerSecond =
             static_cast<std::uint64_t>(session->Format().sampleRate) *
             session->Format().channels * (session->Format().containerBits / 8u);
+        HighResolutionPacer pacer;
         std::uint64_t firstChunkAt = 0;
         std::uint64_t prefixSent = 0;
         if (position < prefixBytes) {
@@ -1447,9 +1453,12 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
                     elapsedMs * pacedBytesPerSecond / 1000u + pacedBytesPerSecond;
                 const auto payloadSent = bytesSent - prefixSent;
                 if (payloadSent > allowedBytes) {
-                    const auto behindMs =
-                        (payloadSent - allowedBytes) * 1000u / pacedBytesPerSecond;
-                    Sleep(static_cast<DWORD>(std::min<std::uint64_t>(behindMs, 500u)));
+                    const auto behindUs =
+                        (payloadSent - allowedBytes) * 1000000ull / pacedBytesPerSecond;
+                    const auto waitUs = std::min<std::uint64_t>(behindUs, 50000ull);
+                    pacer.SleepUs(waitUs, stopping);
+                } else {
+                    pacer.SleepUs(50, stopping);
                 }
             }
         }

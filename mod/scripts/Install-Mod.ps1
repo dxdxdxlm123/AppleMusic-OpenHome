@@ -227,7 +227,7 @@ foreach ($existingIni in @(
                 $preservedPeriod100ns = $candidatePeriod
             }
         }
-        if ($line -match '^\s*output\s*=\s*(wasapi|dlna)\s*$') {
+        if ($line -match '^\s*output\s*=\s*(wasapi|dlna|r_device)\s*$') {
             $preservedOutput = $Matches[1].ToLowerInvariant()
         }
         if ($line -match '^\s*(device_udn|device_name|location|buffer_ms|format_pref|max_bits|manual_urls)\s*=\s*(.*?)\s*$') {
@@ -306,6 +306,30 @@ if ($null -ne $previousIni) {
         $localSection = [regex]::Match($template, '(?s)\[local\].*?(?=\[dlna\])')
         if ($localSection.Success) {
             $existing = $existing.TrimEnd() + "`r`n`r`n" + $localSection.Value.TrimEnd() + "`r`n"
+            $rewritten = $true
+        }
+    }
+    if ($existing -notmatch '(?m)^\s*\[r_device\]') {
+        $rSection = [regex]::Match($template, '(?s)\[r_device\].*')
+        if ($rSection.Success) {
+            $existing = $existing.TrimEnd() + "`r`n`r`n" + $rSection.Value.TrimEnd() + "`r`n"
+            $rewritten = $true
+        }
+    } else {
+        if ($existing -notmatch '(?m)^\s*bind_interface\s*=') {
+            $existing = [regex]::Replace($existing, '(?m)(^\[r_device\][^\[]*)', "`$1bind_interface=`r`n")
+            $rewritten = $true
+        }
+        if ($existing -notmatch '(?m)^\s*burst_pacing_us\s*=') {
+            $existing = [regex]::Replace($existing, '(?m)(^\[r_device\][^\[]*)', "`$1burst_pacing_us=50`r`n")
+            $rewritten = $true
+        }
+        if ($existing -notmatch '(?m)^\s*high_precision_pacing\s*=') {
+            $existing = [regex]::Replace($existing, '(?m)(^\[r_device\][^\[]*)', "`$1high_precision_pacing=1`r`n")
+            $rewritten = $true
+        }
+        if ($existing -notmatch '(?m)^\s*warmup_silence_packets\s*=') {
+            $existing = [regex]::Replace($existing, '(?m)(^\[r_device\][^\[]*)', "`$1warmup_silence_packets=8`r`n")
             $rewritten = $true
         }
     }

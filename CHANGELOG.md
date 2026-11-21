@@ -6,6 +6,21 @@ upstream [AntiOblivionis/AMExclusive](https://github.com/AntiOblivionis/AMExclus
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.11] - 2026-11-21
+
+### Added & Optimized
+- **High-Resolution Pacing & Jitter Elimination (高精度定时器控时)**:
+  - Replaced coarse-grained `std::this_thread::sleep_for(1–10ms)` and `Sleep(up to 500ms)` with a dedicated `HighResolutionPacer` across both RAAT (`RaatSink.cpp`) and DLNA / OpenHome streaming (`DlnaStreamServer.cpp`).
+  - Utilizes Windows high-resolution waitable timers (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`) with `steady_clock`/QPC microsecond fine-grained alignment, reducing packet-dispatch jitter from milliseconds to tens of microseconds without spinning CPU during long pauses.
+- **Micro-Burst Pacing & Small Chunk Distribution (微突发平滑限速)**:
+  - **RAAT**: Added 50 µs microsecond inter-packet pacing (`burst_pacing_us=50`) during `Prefill()` pre-roll and underrun catch-up phases, preventing micro-burst network spikes from overloading receiver NIC interrupts and FIFO buffers.
+  - **DLNA / OpenHome**: Decreased single `SendAll` chunk size from 64 KB to 16 KB (`kSendChunkBytes = 16384`) and added 50 µs inter-chunk smoothing in both live and file stream loops, eliminating the bursty "dump a large block then sleep 400ms" pulse rhythm.
+- **Variable Sample-Rate Silence Warm-up for RAAT (变采样率极短静音预热)**:
+  - Added 8-packet (~20–40ms) zero-level silence warm-up (`warmup_silence_packets=8`) upon cold start or physical sample rate changes (e.g. 44.1 kHz -> 192 kHz) to pre-warm the renderer's FIFO and absorb DAC PLL lock / relay switching transients.
+  - **Strictly preserves 100% Gapless playback**: consecutive tracks sharing the same sample rate never insert silence padding. DLNA/OpenHome remains untouched to protect exact frame counts.
+- **Explicit Network Adapter Binding for RAAT (显式绑定物理网卡)**:
+  - Added `bind_interface` setting to `[r_device]` in `am-exclusive.ini`, explicitly binding RAAT control TCP, audio TCP, and clock UDP sockets to a specified local physical network adapter IP to eliminate multi-NIC routing ambiguity.
+
 ## [0.3.10] - 2026-11-20
 
 ### Added

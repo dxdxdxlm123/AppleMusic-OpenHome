@@ -1,6 +1,7 @@
 #pragma once
 
 #include "AudioSink.h"
+#include "HighResolutionPacer.h"
 #include "RaatProtocol.h"
 #include "RaatScripts.h"
 #include "RaatTypes.h"
@@ -153,6 +154,12 @@ private:
     std::uint64_t lastSendTick_{0};
     std::vector<std::int32_t> block_;
     std::vector<std::uint8_t> frame_;
+    HighResolutionPacer pacer_;
+    std::wstring bindInterface_;
+    std::uint32_t lastSampleRate_{0};
+    std::uint32_t burstPacingUs_{50};
+    bool highPrecisionPacing_{true};
+    std::uint32_t warmupPackets_{8};
 
     static inline std::mutex s_variantMutex;
     static inline std::unordered_map<std::wstring, int> s_preferredVariants;

@@ -157,6 +157,24 @@ HRESULT RaatSink::Open(const AudioSinkOpenParams& params) noexcept {
     startLeadMs_ = std::clamp<std::uint32_t>(
         static_cast<std::uint32_t>(std::max(lead, 300)), 300u, 4000u);
 
+    wchar_t bindAddress[64]{};
+    GetPrivateProfileStringW(L"r_device", L"bind_interface", L"", bindAddress,
+                             static_cast<DWORD>(std::size(bindAddress)),
+                             IniPath().c_str());
+    bindInterface_ = bindAddress;
+
+    int burstPacing = 50;
+    ReadSettingInt(burstPacing, L"burst_pacing_us", 50);
+    burstPacingUs_ = static_cast<std::uint32_t>(std::clamp(burstPacing, 0, 1000));
+
+    int highPrecision = 1;
+    ReadSettingInt(highPrecision, L"high_precision_pacing", 1);
+    highPrecisionPacing_ = (highPrecision != 0);
+
+    int warmupPackets = 8;
+    ReadSettingInt(warmupPackets, L"warmup_silence_packets", 8);
+    warmupPackets_ = static_cast<std::uint32_t>(std::clamp(warmupPackets, 0, 64));
+
     // Target ~10-12 ms per RAAT DATA frame across sample rates to smooth out
     // network bursts and keep renderer FIFO levels steady.
     const std::uint32_t targetBlockFrames =
@@ -176,7 +194,11 @@ HRESULT RaatSink::Open(const AudioSinkOpenParams& params) noexcept {
             std::to_wstring(format_.sampleRate) + L" bits=" +
             std::to_wstring(wireBits_) + L" ch=" + std::to_wstring(format_.channels) +
             L" lookahead=" + std::to_wstring(lookaheadMs_) + L"ms lead=" +
-            std::to_wstring(startLeadMs_) + L"ms");
+            std::to_wstring(startLeadMs_) + L"ms" +
+            (bindInterface_.empty() ? L"" : L" bind=" + bindInterface_) +
+            L" burstPacing=" + std::to_wstring(burstPacingUs_) + L"us" +
+            L" highPrecTimer=" + std::to_wstring(highPrecisionPacing_ ? 1 : 0) +
+            L" warmupPackets=" + std::to_wstring(warmupPackets_));
     return S_OK;
 }
 
@@ -386,7 +408,7 @@ bool RaatSink::EnsureSession() noexcept {
         LogRaat(L"setup failed: " + error);
         return false;
     }
-    localAddress_ = control_.LocalAddress();
+    localAddress_ = !bindInterface_.empty() ? bindInterface_ : control_.LocalAddress();
 
     // Clock responder must be live before the device is asked to probe it.
     clockPort_ = 0;
@@ -400,7 +422,14 @@ bool RaatSink::EnsureSession() noexcept {
                            reinterpret_cast<const char*>(&dscp), sizeof(dscp));
         sockaddr_in local{};
         local.sin_family = AF_INET;
-        local.sin_addr.s_addr = INADDR_ANY;
+        if (!bindInterface_.empty()) {
+            const std::string bindText = ToUtf8(bindInterface_);
+            if (inet_pton(AF_INET, bindText.c_str(), &local.sin_addr) != 1) {
+                local.sin_addr.s_addr = INADDR_ANY;
+            }
+        } else {
+            local.sin_addr.s_addr = INADDR_ANY;
+        }
         local.sin_port = 0;
         if (bind(clockSocket_, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0) {
             sockaddr_in bound{};
@@ -473,7 +502,7 @@ bool RaatSink::OpenControl(std::wstring& error) noexcept {
     const auto tryConnect = [&](std::uint16_t port, std::wstring& failure) -> bool {
         if (port == 0) return false;
         const auto started = std::chrono::steady_clock::now();
-        if (!control_.Connect(target_.address, port, kRaatConnectTimeoutMs, failure)) {
+        if (!control_.Connect(target_.address, port, kRaatConnectTimeoutMs, failure, bindInterface_)) {
             // Name the port: a stale cached port is the most common cause and
             // the log is the only place it can be seen.
             LogRaat(L"control connect " + target_.address + L":" +
@@ -938,7 +967,7 @@ bool RaatSink::OpenAudio(std::wstring& error) noexcept {
         error = L"audio port not announced";
         return false;
     }
-    if (!audio_.Connect(target_.address, audioPort_, kRaatConnectTimeoutMs, error)) {
+    if (!audio_.Connect(target_.address, audioPort_, kRaatConnectTimeoutMs, error, bindInterface_)) {
         return false;
     }
     return SendAudioCommands(sampleIndex_);
@@ -1002,6 +1031,23 @@ bool RaatSink::SendStream(std::wstring& error) noexcept {
 
 bool RaatSink::Prefill() noexcept {
     if (!source_) return false;
+
+    // Warm-up silence on cold start or sample rate change (USS 8-packet warm-up)
+    // Only applied when starting fresh or when sample rate differs from previous track;
+    // sequential playback of same-rate tracks omits this to guarantee 100% gapless transition.
+    const bool sampleRateChanged = (lastSampleRate_ == 0 || lastSampleRate_ != format_.sampleRate);
+    lastSampleRate_ = format_.sampleRate;
+    if (sampleRateChanged && warmupPackets_ > 0) {
+        const std::uint32_t sliceFrames = std::min<std::uint32_t>(blockFrames_, format_.sampleRate / 100u);
+        for (std::uint32_t i = 0; i < warmupPackets_ && !stop_.load(std::memory_order_acquire); ++i) {
+            if (!SendSilence(sliceFrames)) return false;
+            if (burstPacingUs_ > 0) pacer_.SleepUs(burstPacingUs_, stop_);
+        }
+        LogRaat(L"warmup silence sent packets=" + std::to_wstring(warmupPackets_) +
+                L" frames=" + std::to_wstring(warmupPackets_ * sliceFrames) +
+                L" rate=" + std::to_wstring(format_.sampleRate));
+    }
+
     // Apple Music decodes roughly 1.3 s ahead; asking for the whole 5 s panel
     // look-ahead would only stall START and then insert silence.
     // Dynamic prefill: cap high sample rates to 300-400ms to eliminate startup stalls
@@ -1039,6 +1085,7 @@ bool RaatSink::Prefill() noexcept {
         if (!SendData(block_.data(), written)) return false;
         produced += written;
         sampleIndex_ += written;
+        if (burstPacingUs_ > 0) pacer_.SleepUs(burstPacingUs_, stop_);
         if (endOfStream) {
             endOfStreamSubmitted_.store(true, std::memory_order_release);
             break;
@@ -1311,6 +1358,7 @@ void RaatSink::PumpMain() noexcept {
                    (remUs * format_.sampleRate) / 1000000ull;
         };
 
+        bool pacedWaitHappened = false;
         while (!stop_.load(std::memory_order_acquire) &&
                !paused_.load(std::memory_order_acquire)) {
             const std::uint64_t allowed = allowedFramesAt(NowMicroseconds());
@@ -1318,12 +1366,21 @@ void RaatSink::PumpMain() noexcept {
                 break;
             }
 
+            pacedWaitHappened = true;
             const std::uint64_t excessFrames = sampleIndex_ - allowed;
             const std::uint64_t waitUs = (excessFrames * 1000000ull) / format_.sampleRate;
-            const std::uint32_t sleepMs = static_cast<std::uint32_t>(
-                std::clamp<std::uint64_t>(waitUs / 1000ull, 1u, 10u));
+            if (highPrecisionPacing_) {
+                const std::uint64_t sleepUs = std::clamp<std::uint64_t>(waitUs, 50u, 10000u);
+                pacer_.SleepUs(sleepUs, stop_);
+            } else {
+                const std::uint32_t sleepMs = static_cast<std::uint32_t>(
+                    std::clamp<std::uint64_t>(waitUs / 1000ull, 1u, 10u));
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+            }
+        }
 
-            std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+        if (!pacedWaitHappened && burstPacingUs_ > 0) {
+            pacer_.SleepUs(burstPacingUs_, stop_);
         }
 
         const std::uint64_t nowLogUs = NowMicroseconds();

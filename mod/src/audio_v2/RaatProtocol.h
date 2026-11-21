@@ -39,7 +39,8 @@ public:
     TcpConnection& operator=(const TcpConnection&) = delete;
 
     bool Connect(const std::wstring& address, std::uint16_t port,
-                 std::uint32_t timeoutMs, std::wstring& error) noexcept;
+                 std::uint32_t timeoutMs, std::wstring& error,
+                 const std::wstring& bindAddress = {}) noexcept;
     void Close() noexcept;
     bool IsOpen() const noexcept { return socket_ != INVALID_SOCKET; }
 
@@ -100,7 +101,8 @@ bool IsInternalRequest(const std::string& json) noexcept;
 class ControlChannel final {
 public:
     bool Connect(const std::wstring& address, std::uint16_t port,
-                 std::uint32_t timeoutMs, std::wstring& error) noexcept;
+                 std::uint32_t timeoutMs, std::wstring& error,
+                 const std::wstring& bindAddress = {}) noexcept;
     void Close() noexcept;
     bool IsOpen() const noexcept { return connection_.IsOpen(); }
     std::wstring LocalAddress() const noexcept { return connection_.LocalAddress(); }
