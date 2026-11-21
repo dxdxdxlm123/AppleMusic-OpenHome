@@ -158,7 +158,7 @@ private:
     std::wstring bindInterface_;
     std::uint32_t lastSampleRate_{0};
     std::uint32_t burstPacingUs_{50};
-    bool highPrecisionPacing_{true};
+    int highPrecisionPacing_{1};
     std::uint32_t warmupPackets_{8};
 
     static inline std::mutex s_variantMutex;

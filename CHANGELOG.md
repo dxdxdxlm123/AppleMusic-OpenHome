@@ -11,7 +11,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Added & Optimized
 - **High-Resolution Pacing & Jitter Elimination (高精度定时器控时)**:
   - Replaced coarse-grained `std::this_thread::sleep_for(1–10ms)` and `Sleep(up to 500ms)` with a dedicated `HighResolutionPacer` across both RAAT (`RaatSink.cpp`) and DLNA / OpenHome streaming (`DlnaStreamServer.cpp`).
-  - Utilizes Windows high-resolution waitable timers (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`) with `steady_clock`/QPC microsecond fine-grained alignment, reducing packet-dispatch jitter from milliseconds to tens of microseconds without spinning CPU during long pauses.
+  - Implemented 3-tier pacing toggle (`high_precision_pacing` in `am-exclusive.ini`):
+    - `0`: Coarse sleep via `sleep_for` (softest).
+    - `1`: Pure high-resolution waitable timer (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`) with zero CPU spin (high clarity, clean soundstage without high-frequency spin hash, default recommended).
+    - `2`: Hybrid high-resolution waitable timer + QPC tail spin alignment (sharpest).
+  - All burst smoothing (`burst_pacing_us`) and DLNA streaming loops strictly utilize pure high-resolution sleep, eliminating CPU spin overhead.
 - **Micro-Burst Pacing & Small Chunk Distribution (微突发平滑限速)**:
   - **RAAT**: Added 50 µs microsecond inter-packet pacing (`burst_pacing_us=50`) during `Prefill()` pre-roll and underrun catch-up phases, preventing micro-burst network spikes from overloading receiver NIC interrupts and FIFO buffers.
   - **DLNA / OpenHome**: Decreased single `SendAll` chunk size from 64 KB to 16 KB (`kSendChunkBytes = 16384`) and added 50 µs inter-chunk smoothing in both live and file stream loops, eliminating the bursty "dump a large block then sleep 400ms" pulse rhythm.

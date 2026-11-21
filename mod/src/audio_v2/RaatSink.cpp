@@ -169,7 +169,7 @@ HRESULT RaatSink::Open(const AudioSinkOpenParams& params) noexcept {
 
     int highPrecision = 1;
     ReadSettingInt(highPrecision, L"high_precision_pacing", 1);
-    highPrecisionPacing_ = (highPrecision != 0);
+    highPrecisionPacing_ = std::clamp(highPrecision, 0, 2);
 
     int warmupPackets = 8;
     ReadSettingInt(warmupPackets, L"warmup_silence_packets", 8);
@@ -197,7 +197,7 @@ HRESULT RaatSink::Open(const AudioSinkOpenParams& params) noexcept {
             std::to_wstring(startLeadMs_) + L"ms" +
             (bindInterface_.empty() ? L"" : L" bind=" + bindInterface_) +
             L" burstPacing=" + std::to_wstring(burstPacingUs_) + L"us" +
-            L" highPrecTimer=" + std::to_wstring(highPrecisionPacing_ ? 1 : 0) +
+            L" highPrecTimer=" + std::to_wstring(highPrecisionPacing_) +
             L" warmupPackets=" + std::to_wstring(warmupPackets_));
     return S_OK;
 }
@@ -1041,7 +1041,7 @@ bool RaatSink::Prefill() noexcept {
         const std::uint32_t sliceFrames = std::min<std::uint32_t>(blockFrames_, format_.sampleRate / 100u);
         for (std::uint32_t i = 0; i < warmupPackets_ && !stop_.load(std::memory_order_acquire); ++i) {
             if (!SendSilence(sliceFrames)) return false;
-            if (burstPacingUs_ > 0) pacer_.SleepUs(burstPacingUs_, stop_);
+            if (burstPacingUs_ > 0) pacer_.SleepUsPure(burstPacingUs_, stop_);
         }
         LogRaat(L"warmup silence sent packets=" + std::to_wstring(warmupPackets_) +
                 L" frames=" + std::to_wstring(warmupPackets_ * sliceFrames) +
@@ -1085,7 +1085,7 @@ bool RaatSink::Prefill() noexcept {
         if (!SendData(block_.data(), written)) return false;
         produced += written;
         sampleIndex_ += written;
-        if (burstPacingUs_ > 0) pacer_.SleepUs(burstPacingUs_, stop_);
+        if (burstPacingUs_ > 0) pacer_.SleepUsPure(burstPacingUs_, stop_);
         if (endOfStream) {
             endOfStreamSubmitted_.store(true, std::memory_order_release);
             break;
@@ -1369,18 +1369,12 @@ void RaatSink::PumpMain() noexcept {
             pacedWaitHappened = true;
             const std::uint64_t excessFrames = sampleIndex_ - allowed;
             const std::uint64_t waitUs = (excessFrames * 1000000ull) / format_.sampleRate;
-            if (highPrecisionPacing_) {
-                const std::uint64_t sleepUs = std::clamp<std::uint64_t>(waitUs, 50u, 10000u);
-                pacer_.SleepUs(sleepUs, stop_);
-            } else {
-                const std::uint32_t sleepMs = static_cast<std::uint32_t>(
-                    std::clamp<std::uint64_t>(waitUs / 1000ull, 1u, 10u));
-                std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
-            }
+            const std::uint64_t sleepUs = std::clamp<std::uint64_t>(waitUs, 50u, 10000u);
+            pacer_.SleepUs(sleepUs, stop_, highPrecisionPacing_);
         }
 
         if (!pacedWaitHappened && burstPacingUs_ > 0) {
-            pacer_.SleepUs(burstPacingUs_, stop_);
+            pacer_.SleepUsPure(burstPacingUs_, stop_);
         }
 
         const std::uint64_t nowLogUs = NowMicroseconds();

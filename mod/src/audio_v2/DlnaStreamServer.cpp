@@ -1283,9 +1283,9 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
                     const auto behindUs =
                         (bytesSent - allowedBytes) * 1000000ull / pacedBytesPerSecond;
                     const auto waitUs = std::min<std::uint64_t>(behindUs, 50000ull);
-                    pacer.SleepUs(waitUs, stopping);
+                    pacer.SleepUsPure(waitUs, stopping);
                 } else {
-                    pacer.SleepUs(50, stopping);
+                    pacer.SleepUsPure(50, stopping);
                 }
             }
         }
@@ -1456,9 +1456,9 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
                     const auto behindUs =
                         (payloadSent - allowedBytes) * 1000000ull / pacedBytesPerSecond;
                     const auto waitUs = std::min<std::uint64_t>(behindUs, 50000ull);
-                    pacer.SleepUs(waitUs, stopping);
+                    pacer.SleepUsPure(waitUs, stopping);
                 } else {
-                    pacer.SleepUs(50, stopping);
+                    pacer.SleepUsPure(50, stopping);
                 }
             }
         }

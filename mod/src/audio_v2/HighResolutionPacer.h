@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <chrono>
 #include <algorithm>
+#include <thread>
 
 namespace ammod::audio_v2 {
 
@@ -13,9 +14,10 @@ namespace ammod::audio_v2 {
 #endif
 
 // High-resolution pacing helper for RAAT and DLNA streaming.
-// Combines Windows 10/11 high-resolution waitable timer (for CPU-friendly bulk waits)
-// with sub-millisecond QPC/steady_clock microsecond alignment to reduce pacing jitter
-// from ~1.5ms down to ~20-50us without spinning CPU during long pauses.
+// Supports 3 pacing modes (high_precision_pacing = 0 / 1 / 2):
+//   0 = Coarse sleep (std::this_thread::sleep_for / Sleep, softest)
+//   1 = Pure high-resolution waitable timer, zero-spin (high clarity, zero CPU spin / hash, default recommended)
+//   2 = High-resolution waitable timer + QPC sub-millisecond tail spin alignment (sharpest)
 class HighResolutionPacer final {
 public:
     HighResolutionPacer() noexcept {
@@ -43,24 +45,70 @@ public:
                 Clock::now().time_since_epoch()).count());
     }
 
-    // Sleep for waitUs microseconds.
-    void SleepUs(std::uint64_t waitUs) noexcept {
+    // Mode 1: Pure waitable timer sleep without any QPC tail spin.
+    // Directly sleeps waitUs using CREATE_WAITABLE_TIMER_HIGH_RESOLUTION.
+    void SleepUsPure(std::uint64_t waitUs, const std::atomic<bool>* stopSignal = nullptr) noexcept {
         if (waitUs == 0) return;
-        const auto start = NowUs();
+        if (stopSignal && stopSignal->load(std::memory_order_acquire)) return;
 
-        // For sleeps >= 1000us (~1ms), surrender CPU via kernel waitable timer,
-        // waking up ~250us early for fine-grained sub-millisecond alignment.
-        if (timer_ && waitUs >= 1000u) {
-            const std::uint64_t timerUs = waitUs - 250u;
-            LARGE_INTEGER due;
-            due.QuadPart = -static_cast<LONGLONG>(timerUs * 10ull); // 100ns units, negative = relative
+        if (timer_) {
+            LARGE_INTEGER due{};
+            // Negative value represents relative time in 100ns units (1 us = 10 * 100ns)
+            due.QuadPart = -static_cast<LONGLONG>(waitUs * 10ull);
             if (::SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE)) {
-                ::WaitForSingleObject(timer_, static_cast<DWORD>((timerUs / 1000u) + 5u));
+                const DWORD timeoutMs = static_cast<DWORD>((waitUs + 999ull) / 1000ull + 50u);
+                ::WaitForSingleObject(timer_, timeoutMs);
+                return;
             }
         }
 
-        // Sub-millisecond fine precision alignment
+        // Fallback to coarse sleep
+        const auto ms = std::max<std::uint64_t>(1u, waitUs / 1000u);
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    }
+
+    void SleepUsPure(std::uint64_t waitUs, const std::atomic<bool>& stopSignal) noexcept {
+        SleepUsPure(waitUs, &stopSignal);
+    }
+
+    void SleepUsPure(std::uint64_t waitUs) noexcept {
+        SleepUsPure(waitUs, nullptr);
+    }
+
+    // Mode 0: Coarse sleep fallback.
+    void SleepUsCoarse(std::uint64_t waitUs, const std::atomic<bool>* stopSignal = nullptr) noexcept {
+        if (waitUs == 0) return;
+        if (stopSignal && stopSignal->load(std::memory_order_acquire)) return;
+        const auto ms = std::max<std::uint64_t>(1u, waitUs / 1000u);
+        std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+    }
+
+    void SleepUsCoarse(std::uint64_t waitUs, const std::atomic<bool>& stopSignal) noexcept {
+        SleepUsCoarse(waitUs, &stopSignal);
+    }
+
+    void SleepUsCoarse(std::uint64_t waitUs) noexcept {
+        SleepUsCoarse(waitUs, nullptr);
+    }
+
+    // Mode 2: Hybrid waitable timer + tail spin alignment.
+    void SleepUsSpin(std::uint64_t waitUs, const std::atomic<bool>* stopSignal = nullptr) noexcept {
+        if (waitUs == 0) return;
+        if (stopSignal && stopSignal->load(std::memory_order_acquire)) return;
+        const auto start = NowUs();
+
+        if (timer_ && waitUs >= 1000u) {
+            const std::uint64_t timerUs = waitUs - 250u;
+            LARGE_INTEGER due;
+            due.QuadPart = -static_cast<LONGLONG>(timerUs * 10ull);
+            if (::SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE)) {
+                ::WaitForSingleObject(timer_, static_cast<DWORD>((timerUs / 1000u) + 5u));
+            }
+            if (stopSignal && stopSignal->load(std::memory_order_acquire)) return;
+        }
+
         while (true) {
+            if (stopSignal && stopSignal->load(std::memory_order_acquire)) break;
             const auto now = NowUs();
             if (now >= start + waitUs) break;
             const auto rem = (start + waitUs) - now;
@@ -72,31 +120,27 @@ public:
         }
     }
 
-    // Sleep for waitUs microseconds, checking stopSignal every iteration.
-    void SleepUs(std::uint64_t waitUs, const std::atomic<bool>& stopSignal) noexcept {
-        if (waitUs == 0 || stopSignal.load(std::memory_order_acquire)) return;
-        const auto start = NowUs();
+    void SleepUsSpin(std::uint64_t waitUs, const std::atomic<bool>& stopSignal) noexcept {
+        SleepUsSpin(waitUs, &stopSignal);
+    }
 
-        if (timer_ && waitUs >= 1000u) {
-            const std::uint64_t timerUs = waitUs - 250u;
-            LARGE_INTEGER due;
-            due.QuadPart = -static_cast<LONGLONG>(timerUs * 10ull);
-            if (::SetWaitableTimer(timer_, &due, 0, nullptr, nullptr, FALSE)) {
-                ::WaitForSingleObject(timer_, static_cast<DWORD>((timerUs / 1000u) + 5u));
-            }
-            if (stopSignal.load(std::memory_order_acquire)) return;
-        }
+    void SleepUsSpin(std::uint64_t waitUs) noexcept {
+        SleepUsSpin(waitUs, nullptr);
+    }
 
-        while (!stopSignal.load(std::memory_order_acquire)) {
-            const auto now = NowUs();
-            if (now >= start + waitUs) break;
-            const auto rem = (start + waitUs) - now;
-            if (rem > 50u) {
-                ::SwitchToThread();
-            } else {
-                YieldProcessor();
-            }
+    // Universal dispatcher according to mode (0 = coarse, 1 = pure waitable zero-spin, 2 = spin-aligned)
+    void SleepUs(std::uint64_t waitUs, int mode = 1, const std::atomic<bool>* stopSignal = nullptr) noexcept {
+        if (mode == 0) {
+            SleepUsCoarse(waitUs, stopSignal);
+        } else if (mode == 2) {
+            SleepUsSpin(waitUs, stopSignal);
+        } else {
+            SleepUsPure(waitUs, stopSignal);
         }
+    }
+
+    void SleepUs(std::uint64_t waitUs, const std::atomic<bool>& stopSignal, int mode = 1) noexcept {
+        SleepUs(waitUs, mode, &stopSignal);
     }
 
 private:
