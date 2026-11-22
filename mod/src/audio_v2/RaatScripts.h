@@ -12,7 +12,7 @@ struct ScriptRecord final {
     const char* name;
     const char* module;
     const char* signature; // empty for clean-room scripts
-    const char* keypair;   // "Roon" for official, empty for clean-room
+    const char* keypair;   // "Roon" for official signed scripts, empty for clean-room
     int resourceId;
     bool official;
 };

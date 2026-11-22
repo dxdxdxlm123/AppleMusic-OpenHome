@@ -86,6 +86,7 @@ std::mutex g_mutex;
 std::mutex g_logMutex;
 std::atomic<bool> g_shutdown{};
 std::atomic<std::uint64_t> g_lastErrorDialogSignature{};
+std::atomic<bool> g_errorDialogOpen{false};
 std::vector<Client> g_clients;
 HANDLE g_authoritativeAgentPipe{INVALID_HANDLE_VALUE};
 // 0 = WASAPI endpoint, 1 = DLNA/OpenHome renderer, 2 = ASIO driver.
@@ -118,6 +119,26 @@ std::wstring g_discoveredLocation;
 std::wstring g_manualUrls;
 std::unique_ptr<ammod::dlna::DlnaDiscovery> g_discovery;
 std::unique_ptr<ammod::raat::RaatDiscovery> g_raatDiscovery;
+
+void UpdateDlnaDiscoveryPolicy(std::uint8_t outputKind, RuntimeState state) noexcept {
+    if (!g_discovery) return;
+    if (outputKind == 3u) {
+        const bool raatBusy =
+            state == RuntimeState::Active ||
+            state == RuntimeState::Initializing ||
+            state == RuntimeState::AlignRetry ||
+            state == RuntimeState::Requested ||
+            state == RuntimeState::Probing;
+        g_discovery->SetIntervalSeconds(300u);
+        g_discovery->SetPaused(raatBusy);
+    } else if (outputKind == 1u) {
+        g_discovery->SetIntervalSeconds(30u);
+        g_discovery->SetPaused(false);
+    } else {
+        g_discovery->SetIntervalSeconds(300u);
+        g_discovery->SetPaused(false);
+    }
+}
 std::mutex g_deviceQueueMutex;
 std::condition_variable g_deviceQueueCv;
 std::deque<ammod::dlna::DiscoveredDevice> g_deviceQueue;
@@ -304,6 +325,9 @@ void EnqueueDevice(const ammod::dlna::DiscoveredDevice& device) {
     g_deviceQueueCv.notify_one();
 }
 
+Message OutputTargetMessage();
+void BroadcastToRole(const Message& message, Role role);
+
 void BroadcastRaatDevice(const ammod::raat::RaatDevice& device) {
     Message message{};
     message.type = device.online ? MessageType::DeviceFound : MessageType::DeviceLost;
@@ -334,6 +358,51 @@ void BroadcastRaatDevice(const ammod::raat::RaatDevice& device) {
     for (HANDLE pipe : targets) {
         (void)WriteMessage(pipe, message);
         CloseHandle(pipe);
+    }
+
+    // If the currently selected RAAT device came back online with a new port or IP
+    // (e.g., after a streamer reboot), persist the updated endpoint immediately
+    // and push it to the active Agent/AudioHost so playback recovers automatically.
+    if (device.online && device.controlPort != 0) {
+        bool refreshed = false;
+        std::uint16_t oldPort = 0;
+        std::wstring savedId, savedName, savedAddr, savedVer;
+        std::uint16_t savedPort = 0;
+        std::uint32_t savedBuf = 0;
+        Message updatedTarget{};
+        {
+            std::lock_guard lock(g_mutex);
+            const bool matchesSelected =
+                g_outputKind == 3u &&
+                ((!g_roonDeviceId.empty() && g_roonDeviceId == device.deviceId) ||
+                 (g_roonDeviceId.empty() && !g_roonAddress.empty() &&
+                  g_roonAddress == device.address));
+            if (matchesSelected &&
+                (device.controlPort != g_roonPort ||
+                 (!device.address.empty() && device.address != g_roonAddress))) {
+                oldPort = g_roonPort;
+                g_roonPort = device.controlPort;
+                if (!device.address.empty()) g_roonAddress = device.address;
+                if (!device.raatVersion.empty()) g_roonVersion = device.raatVersion;
+                if (!device.friendlyName.empty() && g_roonName.empty()) {
+                    g_roonName = device.friendlyName;
+                }
+                savedId = g_roonDeviceId.empty() ? device.deviceId : g_roonDeviceId;
+                savedName = g_roonName;
+                savedAddr = g_roonAddress;
+                savedPort = g_roonPort;
+                savedVer = g_roonVersion;
+                savedBuf = g_roonBufferMs;
+                updatedTarget = OutputTargetMessage();
+                refreshed = true;
+            }
+        }
+        if (refreshed) {
+            WriteRoonTarget(savedId, savedName, savedAddr, savedPort, savedVer, savedBuf);
+            Log(L"raat target auto-refreshed id=" + savedId + L" addr=" + savedAddr +
+                L" port=" + std::to_wstring(oldPort) + L" -> " + std::to_wstring(savedPort));
+            BroadcastToRole(updatedTarget, Role::Agent);
+        }
     }
 }
 
@@ -413,44 +482,6 @@ Message OutputTargetMessage() {
     return message;
 }
 
-// Adjusts periodic DLNA SSDP discovery poll intervals and pauses discovery during RAAT playback.
-// When active output is RAAT (output=r_device):
-//   - Active playback session: pause SSDP and device XML fetching completely to prevent control
-//     plane load and network contention on endpoints (e.g. VEGA G2.2).
-//   - Idle session: back off poll interval to 300s.
-// When active output is WASAPI, DLNA, or ASIO:
-//   - Preserve regular 30s discovery behavior.
-void UpdateDlnaDiscoveryPolicy() {
-    if (!g_discovery) return;
-    std::uint8_t outputKind = 0;
-    RuntimeState state = RuntimeState::Off;
-    {
-        std::lock_guard lock(g_mutex);
-        outputKind = g_outputKind;
-        state = g_status.state;
-    }
-    static std::uint8_t s_previousOutputKind = 255;
-    const bool switchedToDlna = (s_previousOutputKind == 3u && outputKind == 1u);
-    s_previousOutputKind = outputKind;
-
-    const bool isRaat = (outputKind == 3u);
-    const bool isRaatActive = isRaat && (state == RuntimeState::Active ||
-                                        state == RuntimeState::Initializing ||
-                                        state == RuntimeState::AlignRetry);
-    if (isRaatActive) {
-        g_discovery->SetPaused(true);
-    } else if (isRaat) {
-        g_discovery->SetPaused(false);
-        g_discovery->SetScanInterval(std::chrono::seconds(300));
-    } else {
-        g_discovery->SetPaused(false);
-        g_discovery->SetScanInterval(std::chrono::seconds(30));
-        if (switchedToDlna) {
-            g_discovery->Refresh();
-        }
-    }
-}
-
 // The output target used to be read from the ini exactly once at broker start,
 // so editing am-exclusive.ini (or the device coming back under a new address)
 // left the hook pointing at a stale, often unreachable, renderer: DLNA open
@@ -482,7 +513,8 @@ void IniWatchThread() {
                                             CurrentLocalDeviceId(), CurrentLocalDeviceName());
                     Log(L"renderer location refreshed device=" + g_dlnaName +
                         L" stale=" + stale + L" current=" + g_dlnaLocation);
-                    Broadcast(OutputTargetMessage(), nullptr);
+                    UpdateDlnaDiscoveryPolicy(g_outputKind, g_status.state);
+        Broadcast(OutputTargetMessage(), nullptr);
                 }
             }
         }
@@ -545,7 +577,6 @@ void IniWatchThread() {
         Log(L"ini target reloaded output=" + std::to_wstring(g_outputKind) +
             L" device=" + (g_outputKind == 3u ? g_roonName : g_dlnaName) +
             L" location=" + g_dlnaLocation);
-        UpdateDlnaDiscoveryPolicy();
         Broadcast(OutputTargetMessage(), nullptr);
     }
 }
@@ -773,6 +804,15 @@ void ShowErrorDialogAsync(ErrorCategory error, HRESULT result,
         dialog.nDefaultButton = IDOK;
         dialog.pfCallback = ErrorDialogCallback;
         dialog.lpCallbackData = reinterpret_cast<LONG_PTR>(dialog.hwndParent);
+        if (g_errorDialogOpen.exchange(true, std::memory_order_acq_rel)) {
+            Log(L"error dialog suppressed because another dialog is already open error=" +
+                std::to_wstring(static_cast<unsigned>(error)));
+            if (previousDpi) SetThreadDpiAwarenessContext(previousDpi);
+            return;
+        }
+        struct DialogOpenGuard {
+            ~DialogOpenGuard() { g_errorDialogOpen.store(false, std::memory_order_release); }
+        } dialogGuard;
         Log(L"error dialog show error=" +
             std::to_wstring(static_cast<unsigned>(error)) +
             L" parent=" + std::to_wstring(reinterpret_cast<std::uintptr_t>(dialog.hwndParent)));
@@ -1229,7 +1269,6 @@ void RemoveClient(HANDLE pipe) {
     }
     if (publishStatus) Broadcast(status, nullptr);
     if (showError) ShowErrorDialogAsync(status.error, status.hresult, status.generation);
-    UpdateDlnaDiscoveryPolicy();
 }
 
 std::vector<std::pair<HANDLE, DWORD>> SnapshotTargets(HANDLE source) {
@@ -1520,6 +1559,8 @@ void HandleMessage(const Message& incoming, HANDLE source) {
             g_status.hresult = S_OK;
             g_status.state = g_status.enabledIntent
                 ? RuntimeState::WaitingForStream : RuntimeState::Off;
+            UpdateDlnaDiscoveryPolicy(g_outputKind, g_status.state);
+            if (g_outputKind == 1u && g_discovery) g_discovery->Refresh();
             g_status.senderPid = GetCurrentProcessId();
             GetSystemTimeAsFileTime(&g_status.timestampUtc);
             status = g_status;
@@ -1607,7 +1648,6 @@ void HandleMessage(const Message& incoming, HANDLE source) {
     Broadcast(status, source);
     if (relayTarget) BroadcastToRole(targetMessage, Role::Agent);
     if (showError) ShowErrorDialogAsync(status.error, status.hresult, status.generation);
-    UpdateDlnaDiscoveryPolicy();
 }
 
 // Caller holds g_mutex. A connection is an authority boundary even when its
@@ -1948,17 +1988,14 @@ int wmain() {
             Log(text);
         }, discoveryError)) {
         Log(L"DLNA discovery unavailable: " + discoveryError);
-    } else {
-        UpdateDlnaDiscoveryPolicy();
-        if (!g_manualUrls.empty()) {
-            std::wstringstream stream(g_manualUrls);
-            std::wstring url;
-            while (std::getline(stream, url, L';')) {
-                if (url.empty()) continue;
-                std::wstring error;
-                if (!g_discovery->AddManualDevice(url, error)) {
-                    Log(L"manual device startup failed url=" + url + L" reason=" + error);
-                }
+    } else if (!g_manualUrls.empty()) {
+        std::wstringstream stream(g_manualUrls);
+        std::wstring url;
+        while (std::getline(stream, url, L';')) {
+            if (url.empty()) continue;
+            std::wstring error;
+            if (!g_discovery->AddManualDevice(url, error)) {
+                Log(L"manual device startup failed url=" + url + L" reason=" + error);
             }
         }
     }

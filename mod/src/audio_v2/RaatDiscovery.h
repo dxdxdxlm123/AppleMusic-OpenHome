@@ -28,6 +28,7 @@ namespace ammod::raat {
 // The panel's "SOOD port" setting is applied by the broker before discovery
 // starts; RaatSink::QueryOnce uses the same value.
 void SetSoodPort(std::uint16_t port) noexcept;
+void SetBindInterface(const std::wstring& ipv4) noexcept;
 
 class RaatDiscovery final {
 public:

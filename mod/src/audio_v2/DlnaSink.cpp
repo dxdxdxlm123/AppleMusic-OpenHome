@@ -315,7 +315,6 @@ DlnaSink::~DlnaSink() {
 void DlnaSink::RecordError(HRESULT error) noexcept {
     lastError_.store(FAILED(error) ? error : E_FAIL, std::memory_order_release);
     state_.store(AudioSinkState::Faulted, std::memory_order_release);
-    SetThreadExecutionState(ES_CONTINUOUS);
 }
 
 std::wstring DlnaSink::AdvertiseAddress(const std::wstring& deviceHost) const noexcept {
@@ -1169,7 +1168,6 @@ HRESULT DlnaSink::Start(IIntegerPcmSource& source) noexcept {
             return ammod::audio::kDlnaControlFailed;
         }
         state_.store(AudioSinkState::Running, std::memory_order_release);
-        SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
         return S_OK;
     }
 
@@ -1225,20 +1223,10 @@ HRESULT DlnaSink::Start(IIntegerPcmSource& source) noexcept {
     startedOnce_.store(true, std::memory_order_release);
     endOfStreamSubmitted_.store(false, std::memory_order_release);
     state_.store(AudioSinkState::Running, std::memory_order_release);
-    SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
     return S_OK;
 }
 
 void DlnaSink::ProducerMain() noexcept {
-    struct PowerScope {
-        PowerScope() noexcept {
-            SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
-        }
-        ~PowerScope() noexcept {
-            SetThreadExecutionState(ES_CONTINUOUS);
-        }
-    } powerScope;
-
     // This thread drains the SPSC queue that the real-time P0 callback writes
     // into. At normal priority a CPU-hungry neighbour can starve it long
     // enough for the queue to back up, at which point P0 pushes fail and audio
@@ -1569,7 +1557,6 @@ bool DlnaSink::JoinProducer(std::uint32_t gracefulMs) noexcept {
 void DlnaSink::Pause() noexcept {
     if (state_.load(std::memory_order_acquire) != AudioSinkState::Running) return;
     producerPaused_.store(true, std::memory_order_release);
-    SetThreadExecutionState(ES_CONTINUOUS);
     std::wstring error;
     if (!target_.avTransportControl.empty()) {
         if (!control_.Pause(target_, error)) {
@@ -1584,7 +1571,6 @@ void DlnaSink::Pause() noexcept {
 
 void DlnaSink::Stop() noexcept {
     producerPaused_.store(false, std::memory_order_release);
-    SetThreadExecutionState(ES_CONTINUOUS);
     // A natural end may still be inside its hold. Cancelling that hold on a
     // runtime retirement is what cut the tail of every track: the retirement
     // fires as soon as Apple tears the graph down, which is exactly when the
@@ -1661,7 +1647,6 @@ void DlnaSink::Stop() noexcept {
 
 void DlnaSink::Close() noexcept {
     Stop();
-    SetThreadExecutionState(ES_CONTINUOUS);
     // Prune retired sessions whose grace period has expired.
     const auto now = GetTickCount64();
     for (auto it = retiredSessions_.begin(); it != retiredSessions_.end();) {

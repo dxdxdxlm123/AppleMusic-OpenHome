@@ -220,47 +220,25 @@ void DlnaDiscovery::Stop() noexcept {
 }
 
 void DlnaDiscovery::Refresh() noexcept {
-    {
-        std::lock_guard lock(mutex_);
-        nonRendererCache_.clear();
-    }
     refresh_.store(true, std::memory_order_release);
     wake_.notify_all();
-}
-
-void DlnaDiscovery::SetScanInterval(std::chrono::seconds interval) noexcept {
-    const std::uint32_t seconds = static_cast<std::uint32_t>(
-        std::max<std::int64_t>(5, interval.count()));
-    const std::uint32_t prev = scanIntervalSec_.exchange(seconds, std::memory_order_acq_rel);
-    if (prev != seconds) {
-        LogLine(L"ssdp discovery scan interval changed: " + std::to_wstring(prev) +
-                L"s -> " + std::to_wstring(seconds) + L"s");
-        wake_.notify_all();
-    }
-}
-
-std::chrono::seconds DlnaDiscovery::ScanInterval() const noexcept {
-    return std::chrono::seconds(scanIntervalSec_.load(std::memory_order_acquire));
 }
 
 void DlnaDiscovery::SetPaused(bool paused) noexcept {
     const bool prev = paused_.exchange(paused, std::memory_order_acq_rel);
     if (prev != paused) {
-        if (!paused) {
-            std::lock_guard lock(mutex_);
-            const auto now = GetTickCount64();
-            for (auto& entry : lastSeenTick_) {
-                entry.second = now;
-            }
-        }
-        LogLine(paused ? L"ssdp discovery paused (RAAT playback active)"
+        LogLine(paused ? L"ssdp discovery paused (RAAT active)"
                        : L"ssdp discovery resumed");
         wake_.notify_all();
     }
 }
 
-bool DlnaDiscovery::IsPaused() const noexcept {
-    return paused_.load(std::memory_order_acquire);
+void DlnaDiscovery::SetIntervalSeconds(std::uint32_t seconds) noexcept {
+    const std::uint32_t clamped = seconds < 10u ? 10u : (seconds > 3600u ? 3600u : seconds);
+    const std::uint32_t prev = intervalSeconds_.exchange(clamped, std::memory_order_acq_rel);
+    if (prev != clamped) {
+        wake_.notify_all();
+    }
 }
 
 std::vector<DiscoveredDevice> DlnaDiscovery::Snapshot() const {
@@ -273,49 +251,30 @@ std::vector<DiscoveredDevice> DlnaDiscovery::Snapshot() const {
 
 void DlnaDiscovery::ThreadMain() noexcept {
     LogLine(L"ssdp discovery thread started");
-    bool initialScan = true;
     for (;;) {
-        const bool paused = paused_.load(std::memory_order_acquire);
-        const bool manualRefresh = refresh_.exchange(false, std::memory_order_acq_rel);
-
-        if (manualRefresh || (initialScan && !paused)) {
-            initialScan = false;
-            ScanOnce();
-        }
-
-        std::unique_lock lock(mutex_);
-        if (stop_.load(std::memory_order_acquire)) break;
-
-        if (paused_.load(std::memory_order_acquire)) {
+        {
+            std::unique_lock lock(mutex_);
             wake_.wait(lock, [&] {
                 return stop_.load(std::memory_order_acquire) ||
-                       !paused_.load(std::memory_order_acquire) ||
-                       refresh_.load(std::memory_order_acquire);
-            });
-        } else {
-            const auto intervalSec = scanIntervalSec_.load(std::memory_order_acquire);
-            const bool woken = wake_.wait_for(lock, std::chrono::seconds(intervalSec), [&] {
-                return stop_.load(std::memory_order_acquire) ||
-                       refresh_.load(std::memory_order_acquire) ||
-                       paused_.load(std::memory_order_acquire);
+                       !paused_.load(std::memory_order_acquire);
             });
             if (stop_.load(std::memory_order_acquire)) break;
-            if (paused_.load(std::memory_order_acquire)) continue;
-
-            if (!woken || refresh_.load(std::memory_order_acquire)) {
-                refresh_.store(false, std::memory_order_release);
-                lock.unlock();
-                ScanOnce();
-            }
         }
+        ScanOnce();
+        const std::uint32_t waitSec = intervalSeconds_.load(std::memory_order_acquire);
+        std::unique_lock lock(mutex_);
+        wake_.wait_for(lock, std::chrono::seconds(waitSec), [&] {
+            return stop_.load(std::memory_order_acquire) ||
+                   refresh_.load(std::memory_order_acquire) ||
+                   paused_.load(std::memory_order_acquire);
+        });
+        const bool stopping = stop_.load(std::memory_order_acquire);
+        refresh_.store(false, std::memory_order_release);
+        if (stopping) break;
     }
 }
 
 void DlnaDiscovery::ScanOnce() noexcept {
-    if (stop_.load(std::memory_order_acquire) ||
-        paused_.load(std::memory_order_acquire)) {
-        return;
-    }
     const auto addresses = LocalAddresses();
     if (addresses.empty()) {
         LogLine(L"no usable IPv4 adapter");
@@ -339,10 +298,6 @@ void DlnaDiscovery::ScanOnce() noexcept {
     unsigned rendererCount = 0;
 
     for (const auto& localAddress : addresses) {
-        if (stop_.load(std::memory_order_acquire) ||
-            paused_.load(std::memory_order_acquire)) {
-            break;
-        }
         const SOCKET socket = ::socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
         if (socket == INVALID_SOCKET) {
             LogLine(L"ssdp socket failed iface=" + localAddress);
@@ -398,8 +353,6 @@ void DlnaDiscovery::ScanOnce() noexcept {
 
         const auto deadline = GetTickCount64() + 4500;
         while (GetTickCount64() < deadline) {
-            if (stop_.load(std::memory_order_acquire) ||
-                paused_.load(std::memory_order_acquire)) break;
             fd_set readSet;
             FD_ZERO(&readSet);
             FD_SET(socket, &readSet);
@@ -436,46 +389,14 @@ void DlnaDiscovery::ScanOnce() noexcept {
             const std::wstring udn = usn == headers.end()
                 ? std::wstring{} : UdnFromUsn(usn->second);
             if (!seenLocations.insert(location->second).second) continue;
-
-            const auto now = GetTickCount64();
-            // Check non-renderer cache to avoid re-fetching descriptions from
-            // gateways or media servers (e.g. LightningServer) every cycle.
-            {
-                std::lock_guard lock(mutex_);
-                auto nonRenderer = nonRendererCache_.find(location->second);
-                if (nonRenderer != nonRendererCache_.end() &&
-                    now - nonRenderer->second < 600000u) {
-                    continue;
-                }
-            }
-
-            // Check if device description is already known with matching UDN and location.
-            // If already known and unchanged, reuse cached description without issuing HTTP GET.
             DiscoveredDevice device;
             device.location = location->second;
             device.udn = udn;
-            bool descriptionLoaded = false;
-            {
-                std::lock_guard lock(mutex_);
-                if (!device.udn.empty()) {
-                    auto it = devices_.find(device.udn);
-                    if (it != devices_.end() && it->second.location == device.location &&
-                        !it->second.friendlyName.empty()) {
-                        device = it->second;
-                        descriptionLoaded = true;
-                    }
-                }
-            }
-
-            if (!descriptionLoaded) {
-                if (!FetchDescription(device.location, device)) continue;
-                if (!device.openHome && !device.avTransport) {
-                    LogLine(L"description dropped: no AVTransport/Playlist device=" +
-                            device.friendlyName + L" udn=" + device.udn);
-                    std::lock_guard lock(mutex_);
-                    nonRendererCache_[device.location] = now;
-                    continue;
-                }
+            if (!FetchDescription(device.location, device)) continue;
+            if (!device.openHome && !device.avTransport) {
+                LogLine(L"description dropped: no AVTransport/Playlist device=" +
+                        device.friendlyName + L" udn=" + device.udn);
+                continue;
             }
             if (!device.udn.empty() && !seenUdns.insert(device.udn).second) continue;
             ++rendererCount;
@@ -518,8 +439,6 @@ void DlnaDiscovery::ScanOnce() noexcept {
             }
         }
         for (const auto& candidate : offline) {
-            if (stop_.load(std::memory_order_acquire) ||
-                paused_.load(std::memory_order_acquire)) break;
             DiscoveredDevice probed;
             probed.location = candidate.location;
             probed.udn = candidate.udn;
@@ -554,13 +473,11 @@ void DlnaDiscovery::ScanOnce() noexcept {
             L" renderers=" + std::to_wstring(rendererCount));
 
     const auto now = GetTickCount64();
-    const auto intervalSec = scanIntervalSec_.load(std::memory_order_relaxed);
-    const ULONGLONG offlineTimeoutMs = static_cast<ULONGLONG>(std::max(intervalSec * 3u, 90u)) * 1000u;
     std::vector<DiscoveredDevice> lost;
     {
         std::lock_guard lock(mutex_);
         for (auto& entry : lastSeenTick_) {
-            if (now - entry.second > offlineTimeoutMs) {
+            if (now - entry.second > kOfflineAfterMs) {
                 auto found = devices_.find(entry.first);
                 if (found != devices_.end() && found->second.online) {
                     found->second.online = false;

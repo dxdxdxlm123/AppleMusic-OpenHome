@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <limits>
 
 namespace ammod::raat {
 namespace {
@@ -17,12 +18,6 @@ std::uint32_t ReadBe32(const std::uint8_t* data) noexcept {
            (static_cast<std::uint32_t>(data[1]) << 16u) |
            (static_cast<std::uint32_t>(data[2]) << 8u) |
            static_cast<std::uint32_t>(data[3]);
-}
-
-std::uint16_t ReadBe16(const std::uint8_t* data) noexcept {
-    return static_cast<std::uint16_t>(
-        (static_cast<std::uint16_t>(data[0]) << 8u) |
-        static_cast<std::uint16_t>(data[1]));
 }
 
 void WriteBe32(std::uint8_t* data, std::uint32_t value) noexcept {
@@ -82,6 +77,18 @@ std::string ValueAfterKey(const std::string& json, const std::string& key,
     }
     valueStart = pos;
     return json.substr(pos);
+}
+
+std::string RequestNameOf(const std::string& json) noexcept {
+    const auto key = json.find("\"request\"");
+    if (key == std::string::npos) return {};
+    auto colon = json.find(':', key);
+    if (colon == std::string::npos) return {};
+    auto quote = json.find('"', colon);
+    if (quote == std::string::npos) return {};
+    const auto end = json.find('"', quote + 1);
+    if (end == std::string::npos) return {};
+    return json.substr(quote + 1, end - quote - 1);
 }
 
 } // namespace
@@ -159,8 +166,6 @@ bool JsonFindString(const std::string& json, const std::string& key,
         case 'r': out.push_back('\r'); break;
         case 't': out.push_back('\t'); break;
         case 'u': {
-            // Keep BMP escapes as UTF-8. Surrogate pairs are rare in the
-            // fields we consume; leave the low surrogate to the caller.
             if (i + 4 >= rest.size()) return false;
             unsigned codepoint = 0;
             for (int digit = 0; digit < 4; ++digit) {
@@ -207,13 +212,20 @@ bool JsonFindInt(const std::string& json, const std::string& key,
         ++pos;
     }
     if (pos >= rest.size() || rest[pos] < '0' || rest[pos] > '9') return false;
-    std::int64_t value = 0;
+    std::uint64_t value = 0;
+    constexpr std::uint64_t kMaxAbs = static_cast<std::uint64_t>(
+        std::numeric_limits<std::int64_t>::max());
     while (pos < rest.size() && rest[pos] >= '0' && rest[pos] <= '9') {
-        value = value * 10 + (rest[pos] - '0');
-        if (value > 0x7fffffff) break;
+        const std::uint64_t digit = static_cast<std::uint64_t>(rest[pos] - '0');
+        if (value > (kMaxAbs - digit) / 10ull) {
+            value = kMaxAbs;
+            break;
+        }
+        value = value * 10ull + digit;
         ++pos;
     }
-    out = negative ? -value : value;
+    out = negative ? -static_cast<std::int64_t>(value)
+                   : static_cast<std::int64_t>(value);
     return true;
 }
 
@@ -257,6 +269,13 @@ std::wstring NewUuidString() {
                       static_cast<unsigned long>(GetCurrentProcessId()));
         return fallback;
     }
+    const unsigned long long node =
+        (static_cast<unsigned long long>(guid.Data4[2]) << 40u) |
+        (static_cast<unsigned long long>(guid.Data4[3]) << 32u) |
+        (static_cast<unsigned long long>(guid.Data4[4]) << 24u) |
+        (static_cast<unsigned long long>(guid.Data4[5]) << 16u) |
+        (static_cast<unsigned long long>(guid.Data4[6]) << 8u) |
+        static_cast<unsigned long long>(guid.Data4[7]);
     wchar_t text[40]{};
     std::swprintf(text, std::size(text),
                   L"%08lX-%04X-%04X-%04X-%012llX",
@@ -265,11 +284,7 @@ std::wstring NewUuidString() {
                   static_cast<unsigned>(guid.Data3),
                   static_cast<unsigned>(guid.Data4[0]) * 256u +
                       static_cast<unsigned>(guid.Data4[1]),
-                  static_cast<unsigned long long>(guid.Data4[2]) << 32u |
-                      static_cast<unsigned long long>(guid.Data4[3]) << 24u |
-                      static_cast<unsigned long long>(guid.Data4[4]) << 16u |
-                      static_cast<unsigned long long>(guid.Data4[5]) << 8u |
-                      static_cast<unsigned long long>(guid.Data4[6]));
+                  node);
     return text;
 }
 
@@ -289,14 +304,17 @@ std::wstring TcpConnection::LocalAddress() const noexcept {
 
 void TcpConnection::Close() noexcept {
     if (socket_ != INVALID_SOCKET) {
-        closesocket(socket_);
+        (void)::shutdown(socket_, SD_BOTH);
+        ::closesocket(socket_);
         socket_ = INVALID_SOCKET;
     }
 }
 
 bool TcpConnection::Connect(const std::wstring& address, std::uint16_t port,
-                            std::uint32_t timeoutMs, std::wstring& error) noexcept {
+                            std::uint32_t timeoutMs, std::wstring& error,
+                            const std::wstring& bindAddress) noexcept {
     Close();
+    lastWsaError_ = 0;
     if (!EnsureWinsock()) {
         error = L"WSAStartup failed";
         return false;
@@ -311,9 +329,28 @@ bool TcpConnection::Connect(const std::wstring& address, std::uint16_t port,
     }
     socket_ = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (socket_ == INVALID_SOCKET) {
-        error = L"socket failed " + std::to_wstring(WSAGetLastError());
+        lastWsaError_ = WSAGetLastError();
+        error = L"socket failed " + std::to_wstring(lastWsaError_);
         return false;
     }
+
+    if (!bindAddress.empty()) {
+        const std::string bindUtf8 = ToUtf8(bindAddress);
+        sockaddr_in local{};
+        local.sin_family = AF_INET;
+        local.sin_port = 0;
+        if (inet_pton(AF_INET, bindUtf8.c_str(), &local.sin_addr) == 1) {
+            if (::bind(socket_, reinterpret_cast<const sockaddr*>(&local),
+                       sizeof(local)) == SOCKET_ERROR) {
+                lastWsaError_ = WSAGetLastError();
+                error = L"bind " + bindAddress + L" failed " +
+                        std::to_wstring(lastWsaError_);
+                Close();
+                return false;
+            }
+        }
+    }
+
     u_long nonBlocking = 1;
     (void)ioctlsocket(socket_, FIONBIO, &nonBlocking);
     const int connected = ::connect(socket_,
@@ -322,11 +359,13 @@ bool TcpConnection::Connect(const std::wstring& address, std::uint16_t port,
     if (connected == SOCKET_ERROR) {
         const int code = WSAGetLastError();
         if (code != WSAEWOULDBLOCK) {
+            lastWsaError_ = code;
             error = L"connect failed " + std::to_wstring(code);
             Close();
             return false;
         }
         if (!WaitWritable(socket_, timeoutMs)) {
+            lastWsaError_ = WSAETIMEDOUT;
             error = L"connect timed out";
             Close();
             return false;
@@ -336,6 +375,7 @@ bool TcpConnection::Connect(const std::wstring& address, std::uint16_t port,
         if (getsockopt(socket_, SOL_SOCKET, SO_ERROR,
                        reinterpret_cast<char*>(&socketError), &length) != 0 ||
             socketError != 0) {
+            lastWsaError_ = socketError;
             error = L"connect failed " + std::to_wstring(socketError);
             Close();
             return false;
@@ -346,19 +386,31 @@ bool TcpConnection::Connect(const std::wstring& address, std::uint16_t port,
     BOOL noDelay = TRUE;
     (void)::setsockopt(socket_, IPPROTO_TCP, TCP_NODELAY,
                        reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+    int sndbuf = 262144; // 256 KB send buffer
+    (void)::setsockopt(socket_, SOL_SOCKET, SO_SNDBUF,
+                       reinterpret_cast<const char*>(&sndbuf), sizeof(sndbuf));
+    int dscp = 0xB8; // DSCP EF (46) << 2
+    (void)::setsockopt(socket_, IPPROTO_IP, IP_TOS,
+                       reinterpret_cast<const char*>(&dscp), sizeof(dscp));
     return true;
 }
 
 bool TcpConnection::SendAll(const void* data, std::size_t size,
                             std::uint32_t timeoutMs) noexcept {
-    if (socket_ == INVALID_SOCKET) return false;
+    if (socket_ == INVALID_SOCKET) {
+        lastWsaError_ = WSAENOTCONN;
+        return false;
+    }
     const auto* bytes = static_cast<const std::uint8_t*>(data);
     std::size_t sent = 0;
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(timeoutMs);
     while (sent < size) {
         if (!WaitWritable(socket_, 50)) {
-            if (std::chrono::steady_clock::now() >= deadline) return false;
+            if (std::chrono::steady_clock::now() >= deadline) {
+                lastWsaError_ = WSAETIMEDOUT;
+                return false;
+            }
             continue;
         }
         const int chunk = send(socket_, reinterpret_cast<const char*>(bytes + sent),
@@ -367,142 +419,35 @@ bool TcpConnection::SendAll(const void* data, std::size_t size,
         if (chunk <= 0) {
             const int code = WSAGetLastError();
             if (code == WSAEWOULDBLOCK) continue;
+            lastWsaError_ = code;
             return false;
         }
         sent += static_cast<std::size_t>(chunk);
     }
+    lastWsaError_ = 0;
     return true;
 }
 
 bool TcpConnection::ReadSome(void* data, std::size_t capacity,
                              std::size_t& received, std::uint32_t timeoutMs) noexcept {
     received = 0;
-    if (socket_ == INVALID_SOCKET) return false;
+    if (socket_ == INVALID_SOCKET) {
+        lastWsaError_ = WSAENOTCONN;
+        return false;
+    }
     if (!WaitReadable(socket_, timeoutMs)) return false;
     const int chunk = recv(socket_, static_cast<char*>(data),
                            static_cast<int>(capacity), 0);
     if (chunk <= 0) {
-        if (chunk == 0) Close();
+        lastWsaError_ = chunk == 0 ? 0 : WSAGetLastError();
+        Close();
         return false;
     }
     received = static_cast<std::size_t>(chunk);
     return true;
 }
 
-bool ControlChannel::Connect(const std::wstring& address, std::uint16_t port,
-                             std::uint32_t timeoutMs, std::wstring& error) noexcept {
-    pending_.clear();
-    nextRid_ = 1;
-    if (!connection_.Connect(address, port, timeoutMs, error)) {
-        address_.clear();
-        port_ = 0;
-        return false;
-    }
-    address_ = address;
-    port_ = port;
-    // Every captured session opens with the "hi" frame. The reference sender
-    // sends it before echo/info; without it the firmware never installs the
-    // dispatcher that answers later requests.
-    std::wstring helloError;
-    (void)SendHello(helloError);
-    return true;
-}
-
-bool ControlChannel::SendHello(std::wstring& error) noexcept {
-    std::uint8_t frame[16]{};
-    WriteBe32(frame, 16u);
-    WriteBe32(frame + 4, kLlTypeHello);
-    WriteBe32(frame + 8, 2000u);
-    WriteBe32(frame + 12, 10000u);
-    if (!connection_.SendAll(frame, sizeof(frame), 1500u)) {
-        error = L"hello send failed";
-        return false;
-    }
-    // The device answers with a short non-LL ack (6 zero bytes on the VEGA) and
-    // then, every ~2 s, with an 8-byte type-3 event. Keep whatever is available
-    // in pending_; ReadFrame() skips both while looking for a real reply.
-    std::uint8_t ack[64]{};
-    std::size_t received = 0;
-    if (connection_.ReadSome(ack, sizeof(ack), received, 300u) && received > 0) {
-        pending_.insert(pending_.end(), ack, ack + received);
-    }
-    return true;
-}
-
-bool ControlChannel::WaitForReady(std::uint32_t timeoutMs,
-                                  std::wstring& error) noexcept {
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(timeoutMs);
-    for (;;) {
-        while (pending_.size() >= 8) {
-            const std::uint32_t total = ReadBe32(pending_.data());
-            if (total < 8 || total > 8u * 1024u * 1024u) {
-                // Six zero bytes of hi-ack, or a desync: slide one byte and
-                // resynchronise instead of declaring a bad frame.
-                pending_.erase(pending_.begin());
-                continue;
-            }
-            if (pending_.size() < total) break;
-            const std::uint32_t type = ReadBe32(pending_.data() + 4) & 0x7fffffffu;
-            pending_.erase(pending_.begin(), pending_.begin() + total);
-            if (type == 3) {
-                // Anything left is device-side event traffic, never a reply
-                // to a request: do not let it poison ReadFrame.
-                pending_.clear();
-                return true;
-            }
-        }
-        if (std::chrono::steady_clock::now() >= deadline) {
-            pending_.clear();
-            error = L"device ready event timed out";
-            return false;
-        }
-        std::uint8_t buffer[1024]{};
-        std::size_t received = 0;
-        if (!connection_.ReadSome(buffer, sizeof(buffer), received, 100u)) {
-            if (!connection_.IsOpen()) {
-                pending_.clear();
-                error = L"control connection closed";
-                return false;
-            }
-            continue;
-        }
-        pending_.insert(pending_.end(), buffer, buffer + received);
-    }
-}
-
-bool ControlChannel::SendProbe(const std::string& json,
-                               std::uint32_t timeoutMs) noexcept {
-    return SendFrame(nextRid_++, json, timeoutMs);
-}
-
-void ControlChannel::Close() noexcept {
-    connection_.Close();
-    pending_.clear();
-    stash_.clear();
-}
-
-namespace {
-
-// Extracts the value of a top-level `"request":"..."` field. Cheap and
-// allocation-free so it is safe to call on every outbound frame.
-std::string RequestNameOf(const std::string& json) noexcept {
-    const auto key = json.find("\"request\"");
-    if (key == std::string::npos) return {};
-    auto colon = json.find(':', key);
-    if (colon == std::string::npos) return {};
-    auto quote = json.find('"', colon);
-    if (quote == std::string::npos) return {};
-    const auto end = json.find('"', quote + 1);
-    if (end == std::string::npos) return {};
-    return json.substr(quote + 1, end - quote - 1);
-}
-
-}  // namespace
-
 bool IsInternalRequest(const std::string& json) noexcept {
-    // Requests the renderer's C layer implements itself. Everything else is
-    // owned by the injected Lua script and must go out without the high bit.
     static const char* const kInternal[] = {
         "load_script", "get_log", "set_log_level", "hi", "force_exit",
     };
@@ -512,6 +457,194 @@ bool IsInternalRequest(const std::string& json) noexcept {
         if (name == candidate) return true;
     }
     return false;
+}
+
+ControlChannel::~ControlChannel() { Close(); }
+
+void ControlChannel::SetEventCallback(EventCallback callback) noexcept {
+    std::lock_guard lock(stateMutex_);
+    eventCallback_ = std::move(callback);
+}
+
+bool ControlChannel::Connect(const std::wstring& address, std::uint16_t port,
+                             std::uint32_t timeoutMs, std::wstring& error,
+                             const std::wstring& bindAddress) noexcept {
+    Close();
+    nextRid_.store(1, std::memory_order_release);
+    lastRid_.store(0, std::memory_order_release);
+
+    if (!connection_.Connect(address, port, timeoutMs, error, bindAddress)) {
+        return false;
+    }
+
+    {
+        std::lock_guard lock(stateMutex_);
+        queues_.clear();
+        disconnectReason_.clear();
+    }
+
+    lastInboundMs_.store(GetTickCount64(), std::memory_order_release);
+    stopThreads_.store(false, std::memory_order_release);
+    open_.store(true, std::memory_order_release);
+
+    // Official Roon LL_BEGIN_KEEPALIVE (0x80000004) negotiating 2000ms interval
+    // and 10000ms inactivity timeout.
+    std::wstring helloError;
+    if (!SendHello(helloError)) {
+        Close();
+        error = helloError;
+        return false;
+    }
+
+    try {
+        readerThread_ = std::thread(&ControlChannel::ReaderMain, this);
+        keepaliveThread_ = std::thread(&ControlChannel::KeepaliveMain, this);
+    } catch (...) {
+        Close();
+        error = L"control worker thread start failed";
+        return false;
+    }
+    return true;
+}
+
+bool ControlChannel::SendHello(std::wstring& error) noexcept {
+    std::uint8_t frame[16]{};
+    WriteBe32(frame, 16u);
+    WriteBe32(frame + 4, kLlTypeBeginKeepalive);
+    WriteBe32(frame + 8, kLlDefaultKeepaliveMs);
+    WriteBe32(frame + 12, kLlDefaultKeepaliveTimeoutMs);
+    std::lock_guard lock(sendMutex_);
+    if (!connection_.SendAll(frame, sizeof(frame), 1500u)) {
+        error = L"hello send failed";
+        return false;
+    }
+    return true;
+}
+
+bool ControlChannel::SendKeepaliveFrame() noexcept {
+    // Official Roon LL_KEEPALIVE (0x80000003): 8-byte header, 0-byte payload,
+    // handled directly by the endpoint's native C layer without touching Lua.
+    std::uint8_t frame[8]{};
+    WriteBe32(frame, 8u);
+    WriteBe32(frame + 4, kLlTypeKeepalive);
+    std::lock_guard lock(sendMutex_);
+    return connection_.SendAll(frame, sizeof(frame), 1500u);
+}
+
+void ControlChannel::MarkDisconnectedLocked(const std::wstring& reason) noexcept {
+    if (disconnectReason_.empty()) disconnectReason_ = reason;
+    open_.store(false, std::memory_order_release);
+    frameCv_.notify_all();
+}
+
+void ControlChannel::ReaderMain() noexcept {
+    std::vector<std::uint8_t> pending;
+    pending.reserve(32768);
+    std::uint8_t buffer[8192]{};
+
+    while (!stopThreads_.load(std::memory_order_acquire)) {
+        std::size_t received = 0;
+        if (!connection_.ReadSome(buffer, sizeof(buffer), received, 100u)) {
+            if (!connection_.IsOpen()) {
+                std::lock_guard lock(stateMutex_);
+                MarkDisconnectedLocked(L"control connection closed");
+                break;
+            }
+            continue;
+        }
+        lastInboundMs_.store(GetTickCount64(), std::memory_order_release);
+        pending.insert(pending.end(), buffer, buffer + received);
+
+        while (pending.size() >= 8) {
+            const std::uint32_t total = ReadBe32(pending.data());
+            // Gracefully slide past any short non-LL hello ack bytes (such as
+            // the 6 zero bytes emitted by VEGA G2.2 right after 0x80000004)
+            // instead of aborting the connection with "bad control frame length 0".
+            if (total < 8u || total > kLlMaxMessageLen) {
+                pending.erase(pending.begin());
+                continue;
+            }
+            if (pending.size() < total) break;
+
+            const std::uint32_t type = ReadBe32(pending.data() + 4);
+            const std::uint32_t plainType = type & ~kLlTypeFlag;
+
+            if (type == kLlTypeKeepalive || plainType == 3u ||
+                type == kLlTypeBeginKeepalive || type == kLlTypeEndKeepalive) {
+                pending.erase(pending.begin(), pending.begin() + total);
+                continue;
+            }
+
+            if (plainType != 2u || total < 13u) {
+                pending.erase(pending.begin(), pending.begin() + total);
+                continue;
+            }
+
+            const std::uint32_t rid = ReadBe32(pending.data() + 8);
+            const bool isFinal = pending[12] != 0;
+            std::string json(reinterpret_cast<const char*>(pending.data()) + 13,
+                             total - 13u);
+            pending.erase(pending.begin(), pending.begin() + total);
+
+            EventCallback cb;
+            {
+                std::lock_guard lock(stateMutex_);
+                auto& q = queues_[rid];
+                if (q.size() >= 64u) q.pop_front();
+                q.push_back(QueuedFrame{json, isFinal});
+                cb = eventCallback_;
+            }
+            frameCv_.notify_all();
+            if (cb) {
+                cb(rid, json, isFinal);
+            }
+        }
+    }
+}
+
+void ControlChannel::KeepaliveMain() noexcept {
+    while (!stopThreads_.load(std::memory_order_acquire) &&
+           open_.load(std::memory_order_acquire)) {
+        for (int i = 0; i < 20 && !stopThreads_.load(std::memory_order_acquire); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+        if (stopThreads_.load(std::memory_order_acquire) ||
+            !open_.load(std::memory_order_acquire)) {
+            break;
+        }
+
+        // Official Roon watchdog: if > 10000ms with no inbound bytes, kill connection.
+        const std::uint64_t nowMs = GetTickCount64();
+        const std::uint64_t lastMs = lastInboundMs_.load(std::memory_order_acquire);
+        if (nowMs > lastMs && (nowMs - lastMs) > kLlDefaultKeepaliveTimeoutMs) {
+            {
+                std::lock_guard lock(stateMutex_);
+                MarkDisconnectedLocked(L"no data received for >10000ms");
+            }
+            connection_.Close();
+            break;
+        }
+
+        if (!SendKeepaliveFrame()) {
+            {
+                std::lock_guard lock(stateMutex_);
+                MarkDisconnectedLocked(L"keepalive send failed");
+            }
+            connection_.Close();
+            break;
+        }
+    }
+}
+
+void ControlChannel::Close() noexcept {
+    stopThreads_.store(true, std::memory_order_release);
+    open_.store(false, std::memory_order_release);
+    connection_.Close();
+    frameCv_.notify_all();
+    if (keepaliveThread_.joinable()) keepaliveThread_.join();
+    if (readerThread_.joinable()) readerThread_.join();
+    std::lock_guard lock(stateMutex_);
+    queues_.clear();
 }
 
 bool ControlChannel::SendFrame(std::uint32_t rid, const std::string& json,
@@ -525,76 +658,82 @@ bool ControlChannel::SendFrame(std::uint32_t rid, const std::string& json,
     if (!json.empty()) {
         std::memcpy(frame.data() + 12, json.data(), json.size());
     }
+    std::lock_guard lock(sendMutex_);
     return connection_.SendAll(frame.data(), frame.size(), timeoutMs);
+}
+
+bool ControlChannel::SendArtwork(const void* data, std::size_t size,
+                                 std::uint32_t timeoutMs) noexcept {
+    if (!IsOpen() || !data || size == 0 || size > kLlMaxMessageLen - 8u) {
+        return false;
+    }
+    const std::uint32_t total = static_cast<std::uint32_t>(8u + size);
+    std::vector<std::uint8_t> frame(total);
+    WriteBe32(frame.data(), total);
+    WriteBe32(frame.data() + 4, kLlTypeArtwork);
+    std::memcpy(frame.data() + 8, data, size);
+    std::lock_guard lock(sendMutex_);
+    return connection_.SendAll(frame.data(), frame.size(), timeoutMs);
+}
+
+bool ControlChannel::SendAsync(const std::string& json, std::uint32_t timeoutMs,
+                               std::uint32_t& outRid) noexcept {
+    outRid = 0;
+    if (!IsOpen()) return false;
+    const std::uint32_t rid = nextRid_.fetch_add(1, std::memory_order_acq_rel);
+    lastRid_.store(rid, std::memory_order_release);
+    outRid = rid;
+    return SendFrame(rid, json, timeoutMs);
+}
+
+bool ControlChannel::SendProbe(const std::string& json,
+                               std::uint32_t timeoutMs) noexcept {
+    std::uint32_t rid = 0;
+    return SendAsync(json, timeoutMs, rid);
+}
+
+bool ControlChannel::WaitForReady(std::uint32_t timeoutMs,
+                                  std::wstring& error) noexcept {
+    (void)timeoutMs;
+    error.clear();
+    return IsOpen();
 }
 
 bool ControlChannel::ReadFrame(std::uint32_t expectedRid, std::uint32_t timeoutMs,
                                std::string& response, bool& final,
                                std::wstring& error) noexcept {
-    if (expectedRid != 0) {
-        auto stashIt = stash_.find(expectedRid);
-        if (stashIt != stash_.end() && !stashIt->second.empty()) {
-            response = std::move(stashIt->second.front().first);
-            final = stashIt->second.front().second;
-            stashIt->second.erase(stashIt->second.begin());
-            if (stashIt->second.empty()) stash_.erase(stashIt);
-            return true;
-        }
-    }
+    response.clear();
+    final = false;
+    error.clear();
 
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::milliseconds(timeoutMs);
+    std::unique_lock lock(stateMutex_);
     for (;;) {
-        // A complete frame is 8 bytes of header plus body. Parse whatever is
-        // already buffered first.
-        while (pending_.size() >= 8) {
-            const std::uint32_t total = ReadBe32(pending_.data());
-            if (total < 8 || total > 8u * 1024u * 1024u) {
-                error = L"bad control frame length " + std::to_wstring(total);
-                return false;
+        const auto it = queues_.find(expectedRid);
+        if (it != queues_.end() && !it->second.empty()) {
+            QueuedFrame frame = std::move(it->second.front());
+            it->second.pop_front();
+            if (it->second.empty() && frame.isFinal) {
+                queues_.erase(it);
             }
-            if (pending_.size() < total) break;
-            const std::uint32_t type = ReadBe32(pending_.data() + 4);
-            // Responses arrive as 0x00000002 (Lua reply) or 0x80000002 (C-layer
-            // reply, e.g. load_script/get_log). Both are accepted; the rid is
-            // what pairs them with a request.
-            const std::uint32_t plainType = type & ~kLlTypeFlag;
-            if (plainType == 3) {
-                pending_.erase(pending_.begin(), pending_.begin() + total);
-                continue;
-            }
-            if (plainType != 2 || total < 13) {
-                pending_.erase(pending_.begin(), pending_.begin() + total);
-                continue;
-            }
-            const std::uint32_t rid = ReadBe32(pending_.data() + 8);
-            const bool isFinal = pending_[12] != 0;
-            std::string body(reinterpret_cast<const char*>(pending_.data()) + 13,
-                             total - 13);
-            pending_.erase(pending_.begin(), pending_.begin() + total);
-            if (expectedRid != 0 && rid != expectedRid) {
-                stash_[rid].emplace_back(std::move(body), isFinal);
-                continue;
-            }
-            response = std::move(body);
-            final = isFinal;
+            response = std::move(frame.json);
+            final = frame.isFinal;
             return true;
         }
-
-        if (std::chrono::steady_clock::now() >= deadline) {
+        if (!open_.load(std::memory_order_acquire)) {
+            error = disconnectReason_.empty() ? L"control connection closed"
+                                              : disconnectReason_;
+            return false;
+        }
+        if (frameCv_.wait_until(lock, deadline) == std::cv_status::timeout) {
+            const auto retryIt = queues_.find(expectedRid);
+            if (retryIt != queues_.end() && !retryIt->second.empty()) {
+                continue;
+            }
             error = L"control response timed out";
             return false;
         }
-        uint8_t buffer[4096]{};
-        std::size_t received = 0;
-        if (!connection_.ReadSome(buffer, sizeof(buffer), received, 100)) {
-            if (!connection_.IsOpen()) {
-                error = L"control connection closed";
-                return false;
-            }
-            continue;
-        }
-        pending_.insert(pending_.end(), buffer, buffer + received);
     }
 }
 
@@ -604,59 +743,31 @@ bool ControlChannel::Request(const std::string& json, std::uint32_t timeoutMs,
     response.clear();
     final = false;
     error.clear();
-    if (!connection_.IsOpen()) {
+    if (!IsOpen()) {
         error = L"control connection not open";
         return false;
     }
-    const std::uint32_t rid = nextRid_++;
-    lastRid_ = rid;
+    const std::uint32_t rid = nextRid_.fetch_add(1, std::memory_order_acq_rel);
+    lastRid_.store(rid, std::memory_order_release);
     if (!SendFrame(rid, json, timeoutMs)) {
         error = L"control request send failed";
         return false;
     }
-    if (ReadFrame(rid, timeoutMs, response, final, error)) return true;
-
-    // A read failure usually means the device dropped the session (its Lua
-    // dispatcher reloaded, or it closed the socket). Sending the same request
-    // again on a dead connection would fail identically, so reconnect once and
-    // retry with a fresh rid. Only do this when the socket is actually gone:
-    // retrying a live-but-slow device would double every timeout.
-    if (connection_.IsOpen() && error == L"control response timed out") return false;
-    if (address_.empty() || port_ == 0) return false;
-    Close();
-    std::wstring reconnectError;
-    if (!Connect(address_, port_, kControlReconnectTimeoutMs, reconnectError)) {
-        error = L"control reconnect failed: " + reconnectError;
-        return false;
-    }
-    const std::uint32_t retryRid = nextRid_++;
-    lastRid_ = retryRid;
-    if (!SendFrame(retryRid, json, timeoutMs)) {
-        error = L"control request resend failed";
-        return false;
-    }
-    return ReadFrame(retryRid, timeoutMs, response, final, error);
+    // Never silently reconnect TCP inside Request(): a fresh TCP socket has no
+    // injected Lua dispatcher, so resending a business RPC would only return
+    // NotImplemented. Propagate the failure so RaatSink rebuilds cleanly.
+    return ReadFrame(rid, timeoutMs, response, final, error);
 }
 
 namespace {
 
-// One "device" object out of an enumerate_devices reply. The signal band sends
-// a JSON array of objects; we only need the identity and the RAAT port, and we
-// must not confuse one output's tcp_port with another output's.
 struct WakeDeviceEntry final {
     std::string deviceId;
     std::string uniqueId;
     std::uint16_t tcpPort{};
 };
 
-// Splits the reply into the per-device `{ ... }` objects inside its "devices"
-// array and keeps the ones that carry a numeric tcp_port. Replies arrive as a
-// stream of JSON lines, so a truncated tail is normal and must not discard the
-// complete objects that preceded it.
 std::vector<WakeDeviceEntry> ParseWakeInventory(const std::string& text) {
-    // Narrow down to the device array. A reply may be wrapped in
-    // {"devices":[...]}, may be the bare array, or (from some bridges) a single
-    // object per line.
     std::size_t region = 0;
     std::size_t regionEnd = text.size();
     const std::size_t key = text.find("\"devices\"");
@@ -718,7 +829,7 @@ std::vector<WakeDeviceEntry> ParseWakeInventory(const std::string& text) {
                 }
             }
         }
-        if (depth != 0) break;  // truncated object: stop, keep what we have
+        if (depth != 0) break;
         const std::string object = text.substr(begin, end - begin);
         pos = end;
 
@@ -733,9 +844,6 @@ std::vector<WakeDeviceEntry> ParseWakeInventory(const std::string& text) {
     return entries;
 }
 
-// Picks the inventory entry that belongs to the requested endpoint. An empty
-// deviceId means "the only output", which is what a single-output RoonBridge
-// exposes.
 bool SelectWakeEntry(const std::vector<WakeDeviceEntry>& entries,
                      const std::string& deviceId,
                      WakeDeviceEntry& selected) {
@@ -757,10 +865,11 @@ bool SelectWakeEntry(const std::vector<WakeDeviceEntry>& entries,
 } // namespace
 
 bool WakeDevice(const std::wstring& address, const std::wstring& deviceId,
-                std::uint16_t& controlPort, std::wstring& error) noexcept {
+                std::uint16_t& controlPort, std::wstring& error,
+                const std::wstring& bindAddress) noexcept {
     error.clear();
     TcpConnection connection;
-    if (!connection.Connect(address, 9200, 2000, error)) return false;
+    if (!connection.Connect(address, 9200, 2000, error, bindAddress)) return false;
 
     const std::string enumerate = "{\"request\":\"enumerate_devices\",\"subscription_id\":\"0\"}\n";
     if (!connection.SendAll(enumerate.data(), enumerate.size(), 2000)) {
@@ -769,9 +878,6 @@ bool WakeDevice(const std::wstring& address, const std::wstring& deviceId,
     }
 
     const std::string wanted = ToUtf8(deviceId);
-
-    // Reads until the reply has a complete "devices" array (or the window
-    // closes) and returns whatever inventory was accumulated.
     const auto readInventory = [&](std::string& text) -> bool {
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::seconds(2);
@@ -800,8 +906,6 @@ bool WakeDevice(const std::wstring& address, const std::wstring& deviceId,
         return true;
     }
 
-    // Nothing usable yet: ask the signal band to bring the output up, keep the
-    // subscription alive, then re-enumerate.
     if (!wanted.empty()) {
         const std::string enable = "{\"request\":\"enable_device\",\"device_id\":\"" +
             JsonEscape(wanted) + "\",\"subscription_id\":\"0\"}\n";
@@ -817,9 +921,7 @@ bool WakeDevice(const std::wstring& address, const std::wstring& deviceId,
         connection.Close();
         return true;
     }
-
-    error = L"enable_device not confirmed (9200 silent/closed)";
-    connection.Close();
+    error = L"wake did not yield a tcp_port";
     return false;
 }
 

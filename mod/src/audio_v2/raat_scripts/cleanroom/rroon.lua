@@ -208,6 +208,8 @@ local function feed(chunk, off, avail)
   return true
 end
 
+local onClockPacketNoAlloc
+
 local function onClockPacketAlloc(err, data, srcAddr)
   if err or not data then return end
   onClockPacketNoAlloc(err, data, #data, srcAddr)

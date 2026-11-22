@@ -45,7 +45,12 @@ $trigger.Subscription = @'
 $action = $task.Actions.Create(0)
 $action.Path = $broker
 $action.WorkingDirectory = $install
-$registered = $folder.RegisterTaskDefinition($taskName, $task, 6, $sid, $null, 3, $null)
+try {
+    $registered = $folder.RegisterTaskDefinition($taskName, $task, 6, $sid, $null, 3, $null)
+} catch {
+    $registered = $folder.GetTask($taskName)
+    if (-not $registered) { throw $_ }
+}
 # Read back the persisted task, including the event and lifetime policy.
 $registered = $folder.GetTask($taskName)
 $definition = $registered.Definition

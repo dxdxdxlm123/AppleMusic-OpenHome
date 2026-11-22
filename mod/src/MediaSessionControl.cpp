@@ -150,6 +150,8 @@ std::wstring BoundedText(const hstring& text) {
 
 struct MediaRead {
     TrackSnapshot track;
+    std::uint32_t positionMs{};
+    bool hasPosition{};
     IRandomAccessStreamReference thumbnail{nullptr};
 };
 
@@ -162,6 +164,13 @@ MediaRead ReadTrack(const GlobalSystemMediaTransportControlsSession& session) {
     if (duration > (std::numeric_limits<std::uint32_t>::max)()) throw std::runtime_error("oversize media timeline");
     MediaRead result;
     result.track.durationMs = static_cast<std::uint32_t>(duration);
+    const auto posRaw = timeline.Position().count();
+    if (posRaw >= start) {
+        std::uint64_t posMs = static_cast<std::uint64_t>(posRaw - start) / 10000;
+        if (duration > 0 && posMs > duration) posMs = duration;
+        result.positionMs = static_cast<std::uint32_t>(posMs);
+        result.hasPosition = true;
+    }
     result.track.title = BoundedText(media.Title());
     result.track.artist = BoundedText(media.Artist());
     result.track.album = BoundedText(media.AlbumTitle());
@@ -318,6 +327,8 @@ int WatchTracks(bool once = false) {
     GlobalSystemMediaTransportControlsSessionManager manager{nullptr};
     GlobalSystemMediaTransportControlsSession previousSession{nullptr};
     TrackSnapshot current, printed;
+    std::uint32_t currentPositionMs = 0;
+    bool hasCurrentPosition = false;
     std::uint64_t generation = 0, lastPrint = 0, lastArtworkRequest = 0;
     bool havePrinted = false;
     const auto started = GetTickCount64();
@@ -330,8 +341,12 @@ int WatchTracks(bool once = false) {
                 if (previousSession) ++generation;
                 previousSession = nullptr;
                 current = {};
+                currentPositionMs = 0;
+                hasCurrentPosition = false;
             } else {
                 const auto media = ReadTrack(session);
+                currentPositionMs = media.positionMs;
+                hasCurrentPosition = media.hasPosition;
                 const bool changed = get_abi(previousSession) != get_abi(session) ||
                     !ammod::metadata::SameTrack(current, media.track);
                 if (changed) {
@@ -368,6 +383,8 @@ int WatchTracks(bool once = false) {
             previousSession = nullptr;
             manager = nullptr;
             current = {}; // Failed/disappeared sessions must not leave stale text or cover.
+            currentPositionMs = 0;
+            hasCurrentPosition = false;
         }
         const auto now = GetTickCount64();
         if (!havePrinted || !ammod::metadata::SameTrack(current, printed) ||
@@ -377,6 +394,9 @@ int WatchTracks(bool once = false) {
             printed = current;
             havePrinted = true;
             lastPrint = now;
+        }
+        if (hasCurrentPosition) {
+            std::fprintf(stdout, "POS2\t%u\n", static_cast<unsigned>(currentPositionMs));
         }
         // Ordered lightweight freshness proof without retransmitting large images.
         std::fputs("PULSE2\n", stdout);

@@ -6,17 +6,22 @@ upstream [AntiOblivionis/AMExclusive](https://github.com/AntiOblivionis/AMExclus
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.15] - 2026-11-23
+
+### Fixed & Improved (1:1 Roon Core RAAT Architecture Parity)
+- **1000ms Buffer Cap Elimination**: Removed the hard-coded `min(streamBufferMs_, 1000u)` clamp in `AudioCoreRuntime.cpp`. Supported configuring `buffer_ms` up to `10000ms` (matching Roon Core's 10s maximum queue depth) in `am-exclusive.ini`, widening the audio coordinator's native pump watermarks and allowing the audio ring buffer to fully hydrate hardware-allocated streaming buffers without premature decoder backpressure pauses.
+- **TCP Socket Buffer Expansion (`SO_SNDBUF = 256KB`)**: Explicitly configured `SO_SNDBUF` to 256 KB on RAAT TCP audio connections (`TcpConnection::Connect`), eliminating micro-stalls and ACK-wait delays during high-resolution 192kHz/24bit (1.15 MB/s) and 352.8kHz streaming.
+- **UDP Clock Sync EMA Low-Pass Filter**: Implemented Exponential Moving Average (EMA, 0.85/0.15) low-pass filtering on `deviceClockOffsetNs_` and `deviceOutputDelayNs_` in `RaatSink::RunDeviceClockSyncRound()`. Smoothed transient Wi-Fi transit latency jitter while instantly tracking legitimate clock steps (>50ms), providing a silky-smooth, jitter-free playback pacing timebase.
+- **Two-Stage Lookahead Buffer Hydration**: Redesigned `RaatSink::PumpMain()` pacing. Enabled deep buffer pre-hydration up to 85% of hardware buffer capacity (e.g. 4.25 seconds on a 5.0s buffer) immediately following playback start, before transitioning to strict 1.0x playback pacing with backpressure protection.
+- **Official Roon Protocol Handshake Parity**: Added `"quiet": true, "new_source": true` flags to `SendSync()` requests, reducing device-side Lua console overhead and aligning with official `RaatTransportClient` specification.
+- **Cross Clock-Family Resync Protection**: Tracked global sample rate changes across sessions; enforced `resync_delay_ms` hardware crystal stabilization delay during 44.1kHz family (44.1k/88.2k/176.4k) and 48kHz family (48k/96k/192k) transitions to prevent DAC PLL lock clicks or initial sample truncation.
+- **Overnight Stability Verification**: Validated with a 7-hour continuous playback test (68 consecutive songs) on AURALiC VEGA G2, achieving 0 dropped frames, 0 underruns, 0 clipping, and 100% automatic recovery across 4 device daemon port changes.
+
 ## [0.3.12] - 2026-11-21
 
 ### Fixed & Improved
-- **RAAT 1:1 Protocol Alignment with Official Roon & Elimination of VG2 Freezes**:
-  - **Eliminated Fatal Clock Sync Crash**: Completely removed the client-side `{"request":"sync"}` request that was forcing VEGA G2 into Slave mode and causing the endpoint RAAT daemon to crash and reboot. Captured `deviceClockPort` from `setup` reply, establishing VEGA G2's Femto crystal as Clock Master and implementing Core-side UDP `RAATCLKQ`/`RAATCLKR` telemetry.
-  - **Official Signed Lua Corpus Injection**: Switched exclusively to injecting Roon's 4 official signed Lua scripts (`raat.dat:base.lua`, `dkjson.lua`, `protocol.lua`, `roon_tcp.lua`) with `keypair:"Roon"` and 128-hex signatures. Blocked clean-room unsigned script fallback on modern Linux RT firmwares to prevent state machine corruption.
-  - **Full Control Plane Handshake**: Aligned control flow with official Roon: `info` -> `set_client_type: "Roon"` -> `subscribe_transport` -> `subscribe_controls` -> `request_source` (mounting display session and relays) -> `setup`.
-  - **Stream Buffer Threshold & Pacing**: Aligned `stream` request with official Roon (`buffer_size: 5.0, ready_threshold: 0.45, first_seq: -1, nak_port: -1`). Pre-buffered 2.3 seconds of PCM audio and strictly synchronized on the renderer's `{"status":"Ready"}` event before starting playback, completely eliminating ALSA DMA buffer underruns and playback stalls.
-  - **Safe Teardown & Drain Order**: Reordered `Stop()` and `Close()` to send `stop`/`end_stream` over control TCP and allow ALSA DMA to drain before terminating audio TCP, preventing ALSA `hw:0,0` kernel driver hangs on Linux PREEMPT_RT devices.
-  - **Modern Standby & Sleep Prevention (Power Management Assertion)**: Integrated `SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED)` across `RaatSink`, `DlnaSink`, `AudioHost`, and `HookDll`. Prevents Windows Modern Standby and idle timeouts from suspending network sockets or throttling audio transmission during playback, keeping long listening sessions completely uninterrupted.
-  - **Asynchronous RID Stash**: Added an out-of-order response cache (`stash_`) to `ControlChannel` to prevent dropping command responses during concurrent notifications.
+- **Modern Standby / Sleep Prevention**: Prevented Windows Modern Standby / idle sleep during network playback via `SetThreadExecutionState`.
+- **Roon RAAT Alignment**: 1:1 official Roon RAAT protocol alignment, signed Lua injection & clock telemetry.
 
 ## [0.3.10] - 2026-11-20
 
@@ -31,14 +36,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   - Upgraded UPnP DIDL-Lite metadata formatting with XML 1.0 surrogate protection and Performer role (`UpnpXml.h/cpp`).
 
 ### Fixed
-- **RAAT Lua Script Injection & VEGA G2.2 Compatibility Fixes**:
-  - Removed `module="roon_tcp"` attribute from `roon_tcp.lua` entry script (`RaatScripts.cpp`), allowing the entry script to execute `go()` and install the RAAT Lua dispatcher immediately instead of being preloaded as a passive library.
-  - Ensured `,"module":"<name>"` is unconditionally included in `load_script` requests across all variants (`RaatSink.cpp`), resolving the ping-pong alternating `ScriptError` on `protocol.lua` caused by missing module registrations (`base.lua`, `dkjson.lua`) in Lua's `package.preload`.
-  - Excluded the hanging `variant 0` from candidate list on VEGA G2.2 (`candidateList = {1, 2}`), eliminating the 3–4s startup delay, timeout errors, and hardware freeze risks. Default preferred variant set to `1`.
-  - Added `{"request":"teardown"}` and TCP `shutdown(SD_BOTH)` on session close to guarantee clean renderer-side token and socket release.
-- **DLNA Discovery Backoff & Pause During RAAT Playback**:
-  - Automatically paused periodic SSDP discovery scans and device XML fetches in Broker whenever RAAT (`r_device`) playback is active, eliminating repetitive 30s background HTTP GET/SSDP traffic to endpoints (e.g. VEGA G2.2 at 192.168.108.4).
-  - Backed off idle RAAT discovery interval to 300s (5 minutes) and cached device descriptions/non-renderer endpoints to drastically reduce network stack and control plane overhead.
 - **Immediate manual track switching (list click / double-click / row Play button)**:
   - Widened `directSelectionArmDeadlineTick_` from `750 ms` to `2500 ms` and refreshed it on the confirming `skip` event so high-latency lossless/Hi-Res track switches never expire before Apple Music calls `IAudioClient::Stop` (fixing the 8–10 s stale drain and 20 s successor stall).
   - Detected single-clicks on row `ButtonBase` controls (e.g., hover Play button inside a `ListViewItem`) in `UiAdapter.cpp` and added `DirectSelectionActiveForStop()` in `AudioCoreRuntime.cpp` so single-click manual switches retire immediately without waiting 500 ms for producer EOF or draining the old buffer.

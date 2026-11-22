@@ -18,7 +18,7 @@
 namespace ammod::audio_v2 {
 
 inline constexpr std::uint32_t kSharedRingMagic = 0x31454D41; // 'AME1'
-inline constexpr std::uint32_t kSharedRingVersion = 3;
+inline constexpr std::uint32_t kSharedRingVersion = 4;
 inline constexpr std::uint32_t kSharedRingChannels = 2;
 // v0.3.5: the ring is no longer capped at ~10 s. A 512 MiB section holds
 // 67,108,800 frames = ~349 s (5.8 min) at 192 kHz / 2 ch / 32-bit Q31.
@@ -57,6 +57,8 @@ struct SharedRingHeader final {
     // faults mid-stream so RemoteSink::State() reports Faulted instead of
     // staying silently Running.
     alignas(8) std::atomic<std::uint64_t> faultedGeneration{};
+    // v4: hook -> host successor signal for zero-gap Gapless handoff.
+    alignas(8) std::atomic<std::uint64_t> successorGeneration{};
     alignas(4) std::atomic<std::int32_t> hostLastError{};
     // A never-used generation is 0, so a freshly reset ring cannot look like
     // a completed one. Generations handed out by the hook start at 1.
@@ -97,6 +99,8 @@ inline void SharedRingReset(SharedRingHeader* header, std::uint32_t sampleRate,
                                         std::memory_order_release);
     header->faultedGeneration.store(SharedRingHeader::kNoGeneration,
                                     std::memory_order_release);
+    header->successorGeneration.store(SharedRingHeader::kNoGeneration,
+                                      std::memory_order_release);
     header->hostLastError.store(0, std::memory_order_release);
 }
 
@@ -168,6 +172,11 @@ public:
 
     void MarkEndOfStream() noexcept {
         if (header_) header_->endOfStream = 1;
+    }
+    void MarkSuccessorPending(std::uint64_t generation) noexcept {
+        if (header_ && generation != SharedRingHeader::kNoGeneration) {
+            header_->successorGeneration.store(generation, std::memory_order_release);
+        }
     }
 
     // True only when the host has confirmed drain of this exact generation.

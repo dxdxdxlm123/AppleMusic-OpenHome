@@ -171,6 +171,13 @@ public:
     void NotifyNextTrack() noexcept override {
         if (fallback_) fallback_->NotifyNextTrack();
     }
+    void CancelNaturalEndOfStreamDelayForSuccessor() noexcept override {
+        if (fallback_) {
+            fallback_->CancelNaturalEndOfStreamDelayForSuccessor();
+            return;
+        }
+        ring_.MarkSuccessorPending(generation_);
+    }
 
     bool UsingFallback() const noexcept { return fallback_ != nullptr; }
     std::uint32_t TargetKind() const noexcept { return targetKind_; }

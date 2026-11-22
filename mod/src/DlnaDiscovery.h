@@ -1,7 +1,6 @@
 #pragma once
 
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -38,19 +37,9 @@ public:
     bool Start(Callback callback, LogCallback log, std::wstring& error) noexcept;
     void Stop() noexcept;
     void Refresh() noexcept;
-    std::vector<DiscoveredDevice> Snapshot() const;
-
-    // Configures the periodic SSDP scanning interval. Default is 30s.
-    // When output is RAAT (idle), this can be lengthened (e.g. 300s).
-    void SetScanInterval(std::chrono::seconds interval) noexcept;
-    std::chrono::seconds ScanInterval() const noexcept;
-
-    // Pauses or resumes periodic SSDP scanning and device XML fetching.
-    // When paused (e.g. during active RAAT playback), periodic scans and
-    // XML fetches are completely suppressed to avoid control plane load on renderers.
-    // Explicit manual Refresh() calls are still honored.
     void SetPaused(bool paused) noexcept;
-    bool IsPaused() const noexcept;
+    void SetIntervalSeconds(std::uint32_t seconds) noexcept;
+    std::vector<DiscoveredDevice> Snapshot() const;
 
     // Adds a device from "http://host:port/device.xml", "http://host:port/"
     // or "host:port". Fails closed unless the description proves a renderer
@@ -70,12 +59,11 @@ private:
     std::atomic<bool> stop_{false};
     std::atomic<bool> refresh_{false};
     std::atomic<bool> paused_{false};
-    std::atomic<std::uint32_t> scanIntervalSec_{30};
+    std::atomic<std::uint32_t> intervalSeconds_{30};
     mutable std::mutex mutex_;
     std::condition_variable wake_;
     std::unordered_map<std::wstring, DiscoveredDevice> devices_;
     std::unordered_map<std::wstring, std::uint64_t> lastSeenTick_;
-    std::unordered_map<std::wstring, std::uint64_t> nonRendererCache_;
 };
 
 } // namespace ammod::dlna

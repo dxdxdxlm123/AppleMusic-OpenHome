@@ -125,6 +125,7 @@ winrt::weak_ref<Controls::ComboBox> g_roonCombo;
 winrt::weak_ref<Controls::TextBox> g_roonDeviceList;
 winrt::weak_ref<Controls::TextBox> g_roonBufferInput;
 winrt::weak_ref<Controls::ComboBox> g_roonBitsCombo;
+winrt::weak_ref<Controls::ComboBox> g_roonDisplayModeCombo;
 winrt::weak_ref<Controls::TextBox> g_roonLeadInput;
 winrt::weak_ref<Controls::TextBox> g_roonSoodPortInput;
 winrt::weak_ref<Controls::TextBlock> g_outputTargetStatus;
@@ -1914,10 +1915,11 @@ struct OutputSettings final {
     std::wstring roonAddress;
     std::wstring roonVersion;
     int roonPort{};
-    int roonBufferMs{600};
+    int roonBufferMs{5000};
     int roonStartLeadMs{300};
     int roonWireBits{};
     int roonSoodPort{};
+    std::wstring roonDisplayMode{L"standard"};
 };
 
 std::wstring ReadIniText(const wchar_t* section, const wchar_t* key,
@@ -1983,10 +1985,14 @@ OutputSettings ReadOutputSettings() {
     settings.roonAddress = readRoon(L"address");
     settings.roonVersion = readRoon(L"raat_version");
     settings.roonPort = readRoonInt(L"port", 0);
-    settings.roonBufferMs = readRoonInt(L"buffer_ms", 600);
+    settings.roonBufferMs = readRoonInt(L"buffer_ms", 5000);
     settings.roonStartLeadMs = readRoonInt(L"start_lead_ms", 300);
     settings.roonWireBits = readRoonInt(L"wire_bits", 0);
     settings.roonSoodPort = readRoonInt(L"sood_port", 0);
+    settings.roonDisplayMode = readRoon(L"display_mode", L"standard");
+    if (_wcsicmp(settings.roonDisplayMode.c_str(), L"pure") != 0) {
+        settings.roonDisplayMode = L"standard";
+    }
     return settings;
 }
 
@@ -2015,6 +2021,7 @@ void PersistOutputSettings(const OutputSettings& settings) {
         WriteIniText(sec, L"start_lead_ms", std::to_wstring(settings.roonStartLeadMs));
         WriteIniText(sec, L"wire_bits", std::to_wstring(settings.roonWireBits));
         WriteIniText(sec, L"sood_port", std::to_wstring(settings.roonSoodPort));
+        WriteIniText(sec, L"display_mode", settings.roonDisplayMode);
     }
     const auto path = StreamFormatIniPath();
     if (!path.empty()) {
@@ -2282,6 +2289,10 @@ void ApplyOutputSelection() {
             static constexpr int kBits[4] = {0, 16, 24, 32};
             const int index = combo.SelectedIndex();
             settings.roonWireBits = index >= 0 && index < 4 ? kBits[index] : 0;
+        }
+        if (auto combo = g_roonDisplayModeCombo.get()) {
+            const int index = combo.SelectedIndex();
+            settings.roonDisplayMode = (index == 1) ? L"pure" : L"standard";
         }
         settings.dlnaUdn.clear();
         settings.dlnaName.clear();
@@ -3095,6 +3106,44 @@ Controls::Border CreateOutputTargetCard(
     roonBitsRow.Children().Append(roonBitsLabel);
     roonBitsRow.Children().Append(roonBitsCombo);
     roonPanel.Children().Append(roonBitsRow);
+
+    Controls::StackPanel roonDisplayModeRow;
+    roonDisplayModeRow.Orientation(Controls::Orientation::Horizontal);
+    roonDisplayModeRow.Spacing(8.0);
+    roonDisplayModeRow.Margin(Xaml::Thickness{0, 4, 0, 0});
+    Controls::TextBlock roonDisplayModeLabel;
+    roonDisplayModeLabel.Text(Localized(L"听音模式 (屏显与控制扰动):",
+                                         L"Listening mode (display & transport noise):"));
+    roonDisplayModeLabel.VerticalAlignment(Xaml::VerticalAlignment::Center);
+    roonDisplayModeLabel.MinWidth(200.0);
+    Controls::ComboBox roonDisplayModeCombo;
+    roonDisplayModeCombo.Name(L"AMExclusiveRoonDisplayModeCombo");
+    roonDisplayModeCombo.MinWidth(220.0);
+    {
+        const std::wstring names[2] = {
+            Localized(L"标准模式 (完整屏显/平滑进度)", L"Standard (full display & progress)"),
+            Localized(L"极度纯净模式 (零控制包/超低扰动)", L"Extreme Pure (zero transport ticks)")};
+        for (const auto& name : names) {
+            Controls::ComboBoxItem item;
+            item.Content(box_value(name));
+            roonDisplayModeCombo.Items().Append(item);
+        }
+    }
+    roonDisplayModeCombo.SelectedIndex(
+        _wcsicmp(roonSettings.roonDisplayMode.c_str(), L"pure") == 0 ? 1 : 0);
+    roonDisplayModeRow.Children().Append(roonDisplayModeLabel);
+    roonDisplayModeRow.Children().Append(roonDisplayModeCombo);
+    roonPanel.Children().Append(roonDisplayModeRow);
+    g_roonDisplayModeCombo = winrt::make_weak(roonDisplayModeCombo);
+
+    Controls::TextBlock roonDisplayModeHint;
+    roonDisplayModeHint.Text(Localized(
+        L"标准模式：切歌发送全量元数据与封面，播放中轻量刷新进度条；极度纯净模式：起播后完全关闭控制口，设备 CPU 与屏幕零扰动。",
+        L"Standard: full metadata & artwork on track change, lightweight progress updates. Extreme Pure: initial info at start, zero transport packets during playback for lowest CPU/display noise."));
+    roonDisplayModeHint.TextWrapping(Xaml::TextWrapping::Wrap);
+    roonDisplayModeHint.Margin(Xaml::Thickness{0, 2, 0, 0});
+    if (nativeText.size() > 1) roonDisplayModeHint.Style(nativeText[1].Style());
+    roonPanel.Children().Append(roonDisplayModeHint);
 
     makeNumericRow(Localized(L"Start lead (ms, 300-4000):", L"Start lead (ms, 300-4000):"),
                    std::to_wstring(roonSettings.roonStartLeadMs), roonLeadInput);

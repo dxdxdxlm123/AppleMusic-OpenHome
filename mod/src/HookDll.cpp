@@ -1948,11 +1948,9 @@ void AudioCoreRuntimeEventCallback(void*, const ammod::audio_v2::AudioCoreRuntim
                            : (floatOutput || !sourceMappingExact) ? L"converted" : depthReduced ? (resampled ? L"resampled-requantized" : L"requantized") :
                                (resampled ? L"resampled" : L"native"),
                        displayFormat, snapshot.contextToken, snapshot.epoch, snapshot.sinkName);
-        SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_AWAYMODE_REQUIRED);
         break;
     }
     case ammod::audio_v2::AudioCoreRuntimeEvent::Faulted: {
-        SetThreadExecutionState(ES_CONTINUOUS);
         const bool playbackRejected = ammod::audio::IsPlaybackRejection(result);
         if (!playbackRejected) {
             // Runtime already retired this generation. Publication must never
@@ -1977,7 +1975,6 @@ void AudioCoreRuntimeEventCallback(void*, const ammod::audio_v2::AudioCoreRuntim
         break;
     }
     case ammod::audio_v2::AudioCoreRuntimeEvent::Disabled:
-        SetThreadExecutionState(ES_CONTINUOUS);
         SendAgentEvent(ammod::ipc::MessageType::StatusChanged,
                        ammod::ipc::RuntimeState::Off, false, {}, nullptr, S_OK,
                        ammod::ipc::ErrorCategory::None, {}, {}, snapshot.contextToken, snapshot.epoch);

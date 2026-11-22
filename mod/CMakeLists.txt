@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(AMExclusive VERSION 0.3.12 LANGUAGES CXX RC)
+project(AMExclusive VERSION 0.3.15 LANGUAGES CXX RC)
 
 if(NOT WIN32 OR NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
   message(FATAL_ERROR "AMExclusive supports Windows x64 only")
@@ -28,7 +28,7 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/RaatSelfTest.cpp")
     src/audio_v2/RaatSink.cpp)
   target_include_directories(am_exclusive_raat_selftest PRIVATE src)
   target_compile_definitions(am_exclusive_raat_selftest PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-  target_link_libraries(am_exclusive_raat_selftest PRIVATE ws2_32 ole32 iphlpapi)
+  target_link_libraries(am_exclusive_raat_selftest PRIVATE ws2_32 ole32 uuid windowscodecs iphlpapi)
 endif()
 
 # Explicit build/run only: drives DlnaSink + a synthetic PCM source against a
@@ -123,7 +123,7 @@ add_library(am_exclusive_hook SHARED
 target_include_directories(am_exclusive_hook PRIVATE
   src "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/rigtorp-SPSCQueue/include")
 target_compile_definitions(am_exclusive_hook PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(am_exclusive_hook PRIVATE minhook ole32 oleaut32 uuid advapi32 avrt
+target_link_libraries(am_exclusive_hook PRIVATE minhook ole32 oleaut32 uuid windowscodecs advapi32 avrt
   ws2_32 winhttp msxml6 bcrypt iphlpapi)
 set_target_properties(am_exclusive_hook PROPERTIES OUTPUT_NAME "am-exclusive-hook")
 
@@ -157,7 +157,7 @@ add_executable(am_exclusive_audiohost
   src/audio_v2/WasapiExclusiveSink.cpp)
 target_include_directories(am_exclusive_audiohost PRIVATE src)
 target_compile_definitions(am_exclusive_audiohost PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
-target_link_libraries(am_exclusive_audiohost PRIVATE ole32 oleaut32 uuid advapi32
+target_link_libraries(am_exclusive_audiohost PRIVATE ole32 oleaut32 uuid windowscodecs advapi32
   avrt ws2_32 winhttp msxml6 bcrypt iphlpapi winmm)
 set_target_properties(am_exclusive_audiohost PROPERTIES OUTPUT_NAME "am-exclusive-audiohost")
 

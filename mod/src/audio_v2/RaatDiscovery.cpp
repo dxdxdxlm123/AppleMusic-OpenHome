@@ -26,6 +26,8 @@ namespace {
 
 inline constexpr std::uint16_t kSoodPort = 9003;
 std::atomic<std::uint16_t> g_soodPort{kSoodPort};
+std::mutex g_bindInterfaceMutex;
+std::uint32_t g_bindInterfaceNetOrder{0};
 
 std::uint16_t SoodPort() noexcept {
     const auto port = g_soodPort.load(std::memory_order_relaxed);
@@ -193,6 +195,20 @@ std::vector<LocalInterface> DetectLocalInterfaces() {
 
     // Last resort: let the stack choose. A zero interface still reaches the
     // default route and is better than sending nothing.
+    std::uint32_t pinned = 0;
+    {
+        std::lock_guard lock(g_bindInterfaceMutex);
+        pinned = g_bindInterfaceNetOrder;
+    }
+    if (pinned != 0) {
+        std::vector<LocalInterface> filtered;
+        for (const auto& iface : interfaces) {
+            if (iface.address == pinned) filtered.push_back(iface);
+        }
+        if (!filtered.empty()) return filtered;
+        filtered.push_back(LocalInterface{pinned, htonl(0xFFFFFF00u)});
+        return filtered;
+    }
     if (interfaces.empty()) interfaces.push_back(LocalInterface{});
     return interfaces;
 }
@@ -326,6 +342,19 @@ std::uint64_t NowMs() {
 
 void SetSoodPort(std::uint16_t port) noexcept {
     g_soodPort.store(port ? port : kSoodPort, std::memory_order_relaxed);
+}
+
+void SetBindInterface(const std::wstring& ipv4) noexcept {
+    std::uint32_t parsed = 0;
+    if (!ipv4.empty()) {
+        const std::string utf8 = ToUtf8(ipv4);
+        in_addr addr{};
+        if (inet_pton(AF_INET, utf8.c_str(), &addr) == 1) {
+            parsed = addr.s_addr;
+        }
+    }
+    std::lock_guard lock(g_bindInterfaceMutex);
+    g_bindInterfaceNetOrder = parsed;
 }
 
 struct RaatDiscovery::Impl final
@@ -777,22 +806,19 @@ bool RaatDiscovery::QueryOnce(const std::wstring& deviceId,
                          sizeof(membership));
     }
 
+    // Always bind QueryOnce to an ephemeral UDP port (0) rather than :9003.
+    // On Windows, binding a second socket to :9003 with SO_REUSEADDR succeeds
+    // while Broker already owns :9003, causing Windows to deliver unicast SOOD
+    // replies (_replyport=9003) exclusively to Broker and timing out audiohost.
     sockaddr_in local{};
     local.sin_family = AF_INET;
     local.sin_addr.s_addr = INADDR_ANY;
-    local.sin_port = htons(SoodPort());
-    if (bind(socket, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == SOCKET_ERROR) {
-        // Another controller owns 9003; fall back to an ephemeral source port.
-        sockaddr_in fallback{};
-        fallback.sin_family = AF_INET;
-        fallback.sin_addr.s_addr = INADDR_ANY;
-        fallback.sin_port = 0;
-        if (bind(socket, reinterpret_cast<const sockaddr*>(&fallback),
-                 sizeof(fallback)) == SOCKET_ERROR) {
-            error = L"SOOD bind failed " + std::to_wstring(WSAGetLastError());
-            closesocket(socket);
-            return false;
-        }
+    local.sin_port = 0;
+    if (bind(socket, reinterpret_cast<const sockaddr*>(&local),
+             sizeof(local)) == SOCKET_ERROR) {
+        error = L"SOOD bind failed " + std::to_wstring(WSAGetLastError());
+        closesocket(socket);
+        return false;
     }
 
     // A captured foobar2000 "scan for Roon Ready devices" burst declares a

@@ -18,7 +18,8 @@ constexpr ScriptRecord kOfficial[] = {
      "bdc729ea2ce13cc7574b66ad396e2b7fef98a3887ad3184804467abcc003f943268aebf438a1709646cf39cd8186ba03514572986fbd4444b931c15e486f9f0e",
      "Roon", 3003, true},
     // The main entry script raat.dat:roon_tcp.lua must NOT declare a module:
-    // the renderer executes it (runs go()) to install message handlers.
+    // the renderer executes it (runs go()) to install message handlers instead
+    // of caching it in package.preload.
     {R"(raat.dat:roon_tcp.lua)", "",
      "56cf6c4d5311160d3eb0bb2efccf9e4d58bc69edb6a1bf213aa3d784c9a99ddaeeb39a90dcd926bf294ad58a291e14b1fe40afe58118d089e6754874ef4a0f0b",
      "Roon", 3004, true},
@@ -30,9 +31,6 @@ constexpr ScriptRecord kCleanroom[] = {
     {"rprotocol.lua", "rprotocol", "", "", 3007, false},
     // The main script must NOT declare a module: the renderer executes it
     // (it ends with go()/return roon) instead of caching it as a library.
-    // A captured working foobar2000 session sends rroon.lua without "module";
-    // adding one makes the device cache the main script and never install the
-    // dispatcher, so every later request returns NotImplemented.
     {"rroon.lua", "", "", "", 3008, false},
 };
 

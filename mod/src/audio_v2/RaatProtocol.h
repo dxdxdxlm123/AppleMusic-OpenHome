@@ -2,8 +2,14 @@
 
 #include <winsock2.h>
 
+#include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
+#include <functional>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -30,7 +36,8 @@ std::wstring NewUuidString();
 // process may not have initialized Winsock before RAAT is selected.
 bool EnsureWinsock() noexcept;
 
-// TCP helper: connect with a bounded timeout and write/read fixed frames.
+// TCP helper: connect with a bounded timeout, optional local interface bind,
+// graceful SD_BOTH shutdown, and last Winsock error reporting.
 class TcpConnection final {
 public:
     TcpConnection() = default;
@@ -40,7 +47,8 @@ public:
     TcpConnection& operator=(const TcpConnection&) = delete;
 
     bool Connect(const std::wstring& address, std::uint16_t port,
-                 std::uint32_t timeoutMs, std::wstring& error) noexcept;
+                 std::uint32_t timeoutMs, std::wstring& error,
+                 const std::wstring& bindAddress = {}) noexcept;
     void Close() noexcept;
     bool IsOpen() const noexcept { return socket_ != INVALID_SOCKET; }
 
@@ -51,108 +59,134 @@ public:
 
     SOCKET Handle() const noexcept { return socket_; }
     std::wstring LocalAddress() const noexcept;
+    int LastWsaError() const noexcept { return lastWsaError_; }
 
 private:
     SOCKET socket_{INVALID_SOCKET};
+    int lastWsaError_{0};
 };
 
-// Reconnect budget used when Request() has to re-establish a dropped session.
+// Official Roon LL timeouts and keepalive cadence (Roon.Audio.Raat.Client).
 inline constexpr std::uint32_t kControlReconnectTimeoutMs = 1500;
+inline constexpr std::uint32_t kLlDefaultKeepaliveMs = 2000;
+inline constexpr std::uint32_t kLlDefaultKeepaliveTimeoutMs = 10000;
+inline constexpr std::uint32_t kLlMaxMessageLen = 4u * 1024u * 1024u;
 
-// LL frame types. The 0x80000000 bit is NOT a global "real wire format" flag:
-// it selects which side of the renderer handles the request.
-//
-//   type = 0x80000001  -> internal / C-layer request. The firmware handles it
-//                         itself (load_script, get_log, hi). Any other request
-//                         sent with this bit gets {"status":"NotImplemented"}
-//                         WITHOUT ever reaching the Lua dispatcher.
-//   type = 0x00000001  -> Lua-dispatched request (echo, info, setup, stream,
-//                         sync, start, stop, teardown, ...). Only valid after
-//                         load_script installed a message handler on the
-//                         session; before that the C layer answers
-//                         NotImplemented.
-//
-// A captured foobar2000 session against an AURALiC VEGA G2.2 (raat_version
-// 1.1.41) shows exactly this split: load_script and get_log carry
-// 80 00 00 01, while echo/setup/stream/sync/start/stop/teardown all carry
-// 00 00 00 01. Responses mirror the request: 80 00 00 02 for internal calls,
-// 00 00 00 02 for Lua replies. The device's own log (raat_server.c:433
-// GOT[LL] -> SENT[LL]) confirms the C layer answers a high-bit echo in 19 us
-// while the Lua script is demonstrably running.
+// LL frame types (bit 31 = 0x80000000 selects native C-layer vs Lua dispatcher):
+//   0x80000001  LL_REQUEST          (load_script, get_log, set_log_level, force_exit)
+//   0x80000002  LL_RESPONSE         (C-layer reply)
+//   0x80000003  LL_KEEPALIVE        (0-byte binary keepalive every 2000ms)
+//   0x80000004  LL_BEGIN_KEEPALIVE  (initial keepalive negotiation / hello frame)
+//   0x80000005  LL_END_KEEPALIVE
+//   0x00000001  REQUEST             (Lua-dispatched JSON RPC)
+//   0x00000002  RESPONSE            (Lua reply, final=0 for async pushes)
+//   0x00000003  ARTWORK             (raw binary image blob before update_artwork)
 inline constexpr std::uint32_t kLlTypeFlag = 0x80000000u;
-inline constexpr std::uint32_t kLlTypeRequest = 0x00000001u;      // Lua dispatch
-inline constexpr std::uint32_t kLlTypeRequestInternal = 0x80000001u; // C layer
+inline constexpr std::uint32_t kLlTypeRequest = 0x00000001u;
+inline constexpr std::uint32_t kLlTypeRequestInternal = 0x80000001u;
 inline constexpr std::uint32_t kLlTypeResponse = 0x00000002u;
 inline constexpr std::uint32_t kLlTypeResponseInternal = 0x80000002u;
-inline constexpr std::uint32_t kLlTypeArtwork = 0x80000003u;
+inline constexpr std::uint32_t kLlTypeArtwork = 0x00000003u;
+inline constexpr std::uint32_t kLlTypeKeepalive = 0x80000003u;
 inline constexpr std::uint32_t kLlTypeHello = 0x80000004u;
+inline constexpr std::uint32_t kLlTypeBeginKeepalive = 0x80000004u;
+inline constexpr std::uint32_t kLlTypeEndKeepalive = 0x80000005u;
 
-// True for requests the renderer's C layer answers itself. These must be sent
-// with kLlTypeRequestInternal; every other request must NOT carry the bit or
-// the Lua dispatcher never sees it.
+// True for requests the renderer's C layer answers itself.
 bool IsInternalRequest(const std::string& json) noexcept;
 
-// RAAT control channel (the "LL" protocol).
-//
-// Hello frame   : u32be total_len(16), u32be type(0x80000004), u32be 2000, u32be 10000
-// Request frame : u32be total_len, u32be type(1 or 0x80000001), u32be rid, json
-// Response frame: u32be total_len, u32be type(2 or 0x80000002), u32be rid, u8 final, json
-// Artwork frame : u32be total_len, u32be type(0x80000003), binary blob
+// Official-parity RAAT LL control channel with:
+// - Background async reader thread dispatching frames by rid
+// - Native binary 0x80000003 LL_KEEPALIVE (2s interval, 10s inbound watchdog)
+// - Async event callback for non-final pushes (Dropout, OutputMessage, Lost, Teardown)
+// - No silent reconnect that bypasses Lua script injection
 class ControlChannel final {
 public:
+    using EventCallback = std::function<void(std::uint32_t rid,
+                                             const std::string& json,
+                                             bool isFinal)>;
+
+    ControlChannel() = default;
+    ~ControlChannel();
+
+    ControlChannel(const ControlChannel&) = delete;
+    ControlChannel& operator=(const ControlChannel&) = delete;
+
     bool Connect(const std::wstring& address, std::uint16_t port,
-                 std::uint32_t timeoutMs, std::wstring& error) noexcept;
+                 std::uint32_t timeoutMs, std::wstring& error,
+                 const std::wstring& bindAddress = {}) noexcept;
     void Close() noexcept;
-    bool IsOpen() const noexcept { return connection_.IsOpen(); }
+    bool IsOpen() const noexcept {
+        return open_.load(std::memory_order_acquire) && connection_.IsOpen();
+    }
     std::wstring LocalAddress() const noexcept { return connection_.LocalAddress(); }
 
-    // Sends one request and returns the first response carrying the same rid.
-    // Many RAAT handlers answer non-final (Buffering/Ready/Playing), so callers
-    // must not insist on final=true.
+    void SetEventCallback(EventCallback callback) noexcept;
+
+    // Sends one request and waits for the first response carrying the same rid.
     bool Request(const std::string& json, std::uint32_t timeoutMs,
                  std::string& response, bool& final, std::wstring& error) noexcept;
 
-    // Fire-and-forget request. echo/info are Lua-dispatched, so before
-    // load_script has installed the dispatcher they can only answer
-    // NotImplemented; the greeting burst must therefore not be waited on.
+    // Fire-and-forget request (returns the assigned rid so callers can watch
+    // async responses on another rid such as setup_rid for teardown).
+    bool SendAsync(const std::string& json, std::uint32_t timeoutMs,
+                   std::uint32_t& outRid) noexcept;
+
+    // Sends a raw binary artwork frame (0x00000003) before update_artwork.
+    bool SendArtwork(const void* data, std::size_t size,
+                     std::uint32_t timeoutMs) noexcept;
+
+    // Fire-and-forget probe (kept for test compatibility).
     bool SendProbe(const std::string& json, std::uint32_t timeoutMs) noexcept;
 
-    // Wait for the renderer's 8-byte type-3 "ready" event. Not used by the sink
-    // any more (direct testing showed the dispatcher installs without waiting
-    // for it), but kept for tools/tests that want to observe the event.
+    // Kept for tool/test compatibility.
     bool WaitForReady(std::uint32_t timeoutMs, std::wstring& error) noexcept;
 
-    // Rid used by the most recent Request()/SendFrame(). Some Lua handlers
-    // answer one request with several frames sharing that rid (setup sends
-    // {"status":"OutputMessage"} and only later the frame carrying the ports),
-    // so the caller has to keep reading on the same rid.
-    std::uint32_t LastRequestRid() const noexcept { return lastRid_; }
+    std::uint32_t LastRequestRid() const noexcept {
+        return lastRid_.load(std::memory_order_acquire);
+    }
 
-    // Reads the next frame with `expectedRid`. Public for the multi-frame
-    // responses described above; Request() uses it internally.
+    // Reads the next queued frame with `expectedRid` (for multi-frame replies
+    // such as setup OutputMessage -> port frame or stream Buffering -> Ready).
     bool ReadFrame(std::uint32_t expectedRid, std::uint32_t timeoutMs,
                    std::string& response, bool& final, std::wstring& error) noexcept;
 
 private:
+    struct QueuedFrame {
+        std::string json;
+        bool isFinal{false};
+    };
+
     bool SendHello(std::wstring& error) noexcept;
+    bool SendKeepaliveFrame() noexcept;
     bool SendFrame(std::uint32_t rid, const std::string& json,
                    std::uint32_t timeoutMs) noexcept;
+    void ReaderMain() noexcept;
+    void KeepaliveMain() noexcept;
+    void MarkDisconnectedLocked(const std::wstring& reason) noexcept;
 
     TcpConnection connection_;
-    std::vector<std::uint8_t> pending_;
-    std::unordered_map<std::uint32_t, std::vector<std::pair<std::string, bool>>> stash_;
-    std::uint32_t nextRid_{1};
-    std::uint32_t lastRid_{0};
-    // Remembered so Request() can reconnect once when the device drops the
-    // session mid-conversation.
-    std::wstring address_;
-    std::uint16_t port_{};
+    std::mutex sendMutex_;
+    std::mutex stateMutex_;
+    std::condition_variable frameCv_;
+    std::unordered_map<std::uint32_t, std::deque<QueuedFrame>> queues_;
+    std::wstring disconnectReason_;
+    EventCallback eventCallback_;
+
+    std::thread readerThread_;
+    std::thread keepaliveThread_;
+    std::atomic<bool> stopThreads_{false};
+    std::atomic<bool> open_{false};
+    std::atomic<std::uint64_t> lastInboundMs_{0};
+
+    std::atomic<std::uint32_t> nextRid_{1};
+    std::atomic<std::uint32_t> lastRid_{0};
 };
 
 // Minimal RoonBridge/RAATServer "signal band" wake: TCP 9200 carries line
-// delimited JSON. enumerate_devices lists outputs and their tcp_port;
-// enable_device brings a sleeping output up.
+// delimited JSON.
 bool WakeDevice(const std::wstring& address, const std::wstring& deviceId,
-                std::uint16_t& controlPort, std::wstring& error) noexcept;
+                std::uint16_t& controlPort, std::wstring& error,
+                const std::wstring& bindAddress = {}) noexcept;
 
 } // namespace ammod::raat

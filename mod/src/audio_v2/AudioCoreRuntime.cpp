@@ -323,7 +323,7 @@ void AudioCoreRuntime::SetOutputProfile(const OutputProfile& profile) noexcept {
     if (abandoned_.load(std::memory_order_acquire)) return;
     OutputProfile requested = profile;
     if (requested.kind == AudioSinkKind::Raat) {
-        requested.streamBufferMs = std::clamp(requested.streamBufferMs, 100u, 5000u);
+        requested.streamBufferMs = std::clamp(requested.streamBufferMs, 100u, 10000u);
     } else {
         if (requested.streamBufferMs < 200) requested.streamBufferMs = 200;
         if (requested.streamBufferMs > 3000) requested.streamBufferMs = 3000;
@@ -2014,7 +2014,8 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
                        reinterpret_cast<std::uintptr_t>(graphConverter_), trackChangePending_);
             return;
         }
-        if (ResolvedEngine() == EffectiveEngine::Dlna &&
+        if ((ResolvedEngine() == EffectiveEngine::Dlna ||
+             ResolvedEngine() == EffectiveEngine::Raat) &&
             coordinator_.Phase() == AudioCoreGatePhase::Active &&
             !coordinator_.EndOfStreamSubmitted()) {
             const bool userInitiated =
@@ -2119,6 +2120,11 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
     // engine so the deeper startup reservoir actually applies there.
     if (ResolvedEngine() == EffectiveEngine::Raat) {
         queueCapacity = kRaatStartupQueueCapacity;
+        const std::uint64_t raatReservoir = static_cast<std::uint64_t>(format.sampleRate) * streamBufferMs_ / 1000u;
+        const std::uint64_t neededBlocks = (raatReservoir * 5u / 4u + kMaxBlockFrames - 1u) / kMaxBlockFrames;
+        queueCapacity = static_cast<std::size_t>(std::clamp<std::uint64_t>(
+            std::max<std::uint64_t>(neededBlocks, queueCapacity),
+            kRaatStartupQueueCapacity, 4096u));
     }
     std::uint64_t reservoirFrames = 0;
     if (tuned) {
@@ -2208,10 +2214,7 @@ void AudioCoreRuntime::TryBindGraphLocked() noexcept {
         // Keep the reservoir near the configured target. The existing 9/10/11 ms
         // software pump performs the coarse drift correction; +/-10% covers
         // ordinary DAC clock drift with a 1-1.5 s reservoir.
-        const bool isRaatStream = engine == EffectiveEngine::Raat;
-        const auto effectiveBufferMs = isRaatStream
-            ? std::min<std::uint32_t>(streamBufferMs_, 1000u)
-            : streamBufferMs_;
+        const auto effectiveBufferMs = streamBufferMs_;
         nativePumpLowWaterFrames_ = rate * std::max<std::uint32_t>(effectiveBufferMs / 2u, 300u) / 1000u;
         nativePumpHighWaterFrames_ = rate * (effectiveBufferMs + 500u) / 1000u;
     } else {
