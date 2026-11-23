@@ -1019,6 +1019,15 @@ HRESULT DlnaSink::Open(const AudioSinkOpenParams& params) noexcept {
             std::to_wstring(format_.sampleRate) + L" bits=" +
             std::to_wstring(format_.validBits) + L" wav=" + std::to_wstring(wav_) +
             L" converted=" + std::to_wstring(converted_) + L" url=" + streamUrl_);
+    hasVolumeSupport_.store(target_.volume, std::memory_order_release);
+    if (hasVolumeSupport_.load(std::memory_order_acquire)) {
+        volumeWorkerStop_.store(false, std::memory_order_release);
+        volumeDirty_.store(false, std::memory_order_release);
+        muteDirty_.store(false, std::memory_order_release);
+        if (!volumeWorker_.joinable()) {
+            volumeWorker_ = std::thread(&DlnaSink::VolumeWorkerMain, this);
+        }
+    }
     lastError_.store(S_OK, std::memory_order_release);
     state_.store(AudioSinkState::Open, std::memory_order_release);
     return S_OK;
@@ -1048,6 +1057,19 @@ bool DlnaSink::SendStreamToDevice() noexcept {
     // and no size, and the connection close is the end-of-item signal.
     const auto didl = BuildStreamDidl();
     if (target_.openHome && !target_.openHomePlaylist.empty()) {
+        if (!target_.openHomeProduct.empty()) {
+            std::uint32_t currentSource = 0;
+            std::wstring sourceError;
+            if (control_.OpenHomeProductSourceIndex(target_, currentSource, sourceError)) {
+                if (currentSource != 0) {
+                    DlnaLog(L"openhome switching Product SourceIndex from " +
+                            std::to_wstring(currentSource) + L" to 0 (Playlist)");
+                    control_.OpenHomeProductSetSourceIndex(target_, 0, sourceError);
+                }
+            } else {
+                control_.OpenHomeProductSetSourceIndex(target_, 0, sourceError);
+            }
+        }
         // Verified against foo_upnp (BubbleUPnPServer 0.9-update51) on the LAN:
         // OpenHome Playlist has no SetStreams action. The sequence that actually
         // makes the renderer fetch our URL is
@@ -1195,15 +1217,15 @@ HRESULT DlnaSink::Start(IIntegerPcmSource& source) noexcept {
             producerExited_ = false;
         }
         producer_ = std::thread(&DlnaSink::ProducerMain, this);
-        // Fast start prefill gate: wait for a minimal 150 ms prefill (or header)
-        // so the renderer can GET immediately, while the producer continues to
-        // stream into the HTTP ring concurrently with network setup.
-        const auto prefillMs = std::min<std::uint32_t>(bufferMs_, 150u);
+        // Prefill gate: wait until the producer has buffered the configured
+        // amount before telling the device to play. Starting with an empty
+        // buffer makes renderers with small internal FIFO (e.g. VEGA G2.2)
+        // underrun on the very first HTTP chunk.
         const auto targetBytes = static_cast<std::size_t>(
             static_cast<std::uint64_t>(format_.sampleRate) *
             static_cast<std::uint64_t>(format_.channels) *
-            (format_.containerBits / 8u) * prefillMs / 1000u);
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+            (format_.containerBits / 8u) * bufferMs_ / 1000u);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
         while (session_ && session_->BufferedBytes() <
                    std::min<std::size_t>(targetBytes, session_->CapacityBytes() / 2u) &&
                std::chrono::steady_clock::now() < deadline) {
@@ -1702,6 +1724,11 @@ void DlnaSink::Stop() noexcept {
 }
 
 void DlnaSink::Close() noexcept {
+    volumeWorkerStop_.store(true, std::memory_order_release);
+    volumeCv_.notify_all();
+    if (volumeWorker_.joinable()) {
+        volumeWorker_.join();
+    }
     Stop();
     // Prune retired sessions whose grace period has expired.
     const auto now = GetTickCount64();
@@ -1758,6 +1785,87 @@ AudioSinkStats DlnaSink::Stats() const noexcept {
         if (entry.first) stats.bytesServed += entry.first->BytesServed();
     }
     return stats;
+}
+
+void DlnaSink::SetVolume(float volume) noexcept {
+    if (!hasVolumeSupport_.load(std::memory_order_acquire)) return;
+    const auto vol = static_cast<std::uint32_t>(
+        std::clamp(std::round(volume * 100.0f), 0.0f, 100.0f));
+    pendingVolume_.store(vol, std::memory_order_release);
+    volumeDirty_.store(true, std::memory_order_release);
+    volumeCv_.notify_one();
+}
+
+void DlnaSink::SetMute(bool mute) noexcept {
+    if (!hasVolumeSupport_.load(std::memory_order_acquire)) return;
+    pendingMute_.store(mute, std::memory_order_release);
+    muteDirty_.store(true, std::memory_order_release);
+    volumeCv_.notify_one();
+}
+
+void DlnaSink::VolumeWorkerMain() noexcept {
+    constexpr auto kMinInterval = std::chrono::milliseconds(80);
+    auto lastCallTime = std::chrono::steady_clock::now() - kMinInterval;
+
+    while (!volumeWorkerStop_.load(std::memory_order_acquire)) {
+        std::unique_lock lock(volumeMutex_);
+        volumeCv_.wait(lock, [this] {
+            return volumeWorkerStop_.load(std::memory_order_acquire) ||
+                   volumeDirty_.load(std::memory_order_acquire) ||
+                   muteDirty_.load(std::memory_order_acquire);
+        });
+
+        if (volumeWorkerStop_.load(std::memory_order_acquire)) break;
+
+        const auto now = std::chrono::steady_clock::now();
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastCallTime);
+        if (elapsed < kMinInterval) {
+            const auto waitTime = kMinInterval - elapsed;
+            lock.unlock();
+            std::this_thread::sleep_for(waitTime);
+            continue;
+        }
+
+        if (muteDirty_.exchange(false, std::memory_order_acq_rel)) {
+            const bool mute = pendingMute_.load(std::memory_order_acquire);
+            lock.unlock();
+
+            std::wstring error;
+            if (!control_.SetMute(target_, mute, error)) {
+                DlnaLog(L"DlnaSink: SetMute failed: " + error);
+                if (error.find(L"501") != std::wstring::npos ||
+                    error.find(L"606") != std::wstring::npos ||
+                    error.find(L"701") != std::wstring::npos) {
+                    hasVolumeSupport_.store(false, std::memory_order_release);
+                    DlnaLog(L"DlnaSink: device reported fixed output mode; disabling hardware volume sync");
+                }
+            } else {
+                DlnaLog(L"DlnaSink: SetMute(" + std::wstring(mute ? L"true" : L"false") + L") succeeded");
+            }
+            lastCallTime = std::chrono::steady_clock::now();
+            continue;
+        }
+
+        if (volumeDirty_.exchange(false, std::memory_order_acq_rel)) {
+            const std::uint32_t vol = pendingVolume_.load(std::memory_order_acquire);
+            lock.unlock();
+
+            std::wstring error;
+            if (!control_.SetVolume(target_, vol, error)) {
+                DlnaLog(L"DlnaSink: SetVolume(" + std::to_wstring(vol) + L") failed: " + error);
+                if (error.find(L"501") != std::wstring::npos ||
+                    error.find(L"606") != std::wstring::npos ||
+                    error.find(L"701") != std::wstring::npos) {
+                    hasVolumeSupport_.store(false, std::memory_order_release);
+                    DlnaLog(L"DlnaSink: device reported fixed output mode; disabling hardware volume sync");
+                }
+            } else {
+                DlnaLog(L"DlnaSink: SetVolume(" + std::to_wstring(vol) + L") succeeded");
+            }
+            lastCallTime = std::chrono::steady_clock::now();
+            continue;
+        }
+    }
 }
 
 } // namespace ammod::audio_v2

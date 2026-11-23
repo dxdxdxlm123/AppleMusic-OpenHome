@@ -287,6 +287,7 @@ bool DlnaControlClient::LoadDescription(DlnaTarget& target, std::wstring& error)
         (void)find(kOhVolume, target.openHomeVolume);
         (void)find(kOhInfo, target.openHomeInfo);
     }
+    if (!target.openHomeVolume.empty()) target.volume = true;
     target.nextUri = target.avTransport;
     target.seek = target.avTransport || target.openHome;
     // Receiver-only devices (pure Songcast endpoints) have neither Playlist
@@ -470,6 +471,9 @@ bool DlnaControlClient::GetPosition(const DlnaTarget& target,
 
 bool DlnaControlClient::SetVolume(const DlnaTarget& target, std::uint32_t volume,
                                   std::wstring& error) noexcept {
+    if (target.openHome && !target.openHomeVolume.empty()) {
+        return OpenHomeSetVolume(target, volume, error);
+    }
     if (!target.renderingControl.empty()) {
         std::vector<upnp::SoapValue> values;
         return Call(target.renderingControl, kRenderingControl, L"SetVolume",
@@ -485,6 +489,9 @@ bool DlnaControlClient::SetVolume(const DlnaTarget& target, std::uint32_t volume
 
 bool DlnaControlClient::GetVolume(const DlnaTarget& target, std::uint32_t& volume,
                                   std::wstring& error) noexcept {
+    if (target.openHome && !target.openHomeVolume.empty()) {
+        return OpenHomeGetVolume(target, volume, error);
+    }
     if (!target.renderingControl.empty()) {
         std::vector<upnp::SoapValue> values;
         if (!Call(target.renderingControl, kRenderingControl, L"GetVolume",
@@ -503,6 +510,50 @@ bool DlnaControlClient::GetVolume(const DlnaTarget& target, std::uint32_t& volum
         return OpenHomeGetVolume(target, volume, error);
     }
     error = L"no volume service available";
+    return false;
+}
+
+bool DlnaControlClient::SetMute(const DlnaTarget& target, bool mute,
+                                std::wstring& error) noexcept {
+    if (target.openHome && !target.openHomeVolume.empty()) {
+        return OpenHomeSetMute(target, mute, error);
+    }
+    if (!target.renderingControl.empty()) {
+        std::vector<upnp::SoapValue> values;
+        return Call(target.renderingControl, kRenderingControl, L"SetMute",
+                    L"<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredMute>" +
+                        std::wstring(mute ? L"1" : L"0") + L"</DesiredMute>", values, error);
+    }
+    if (!target.openHomeVolume.empty()) {
+        return OpenHomeSetMute(target, mute, error);
+    }
+    error = L"no volume/mute service available";
+    return false;
+}
+
+bool DlnaControlClient::GetMute(const DlnaTarget& target, bool& mute,
+                                std::wstring& error) noexcept {
+    if (target.openHome && !target.openHomeVolume.empty()) {
+        return OpenHomeGetMute(target, mute, error);
+    }
+    if (!target.renderingControl.empty()) {
+        std::vector<upnp::SoapValue> values;
+        if (!Call(target.renderingControl, kRenderingControl, L"GetMute",
+                  L"<InstanceID>0</InstanceID><Channel>Master</Channel>", values, error)) {
+            return false;
+        }
+        std::wstring text;
+        if (!FindValue(values, L"CurrentMute", text)) {
+            error = L"GetMute response lacks CurrentMute";
+            return false;
+        }
+        mute = (text == L"1" || text == L"true" || text == L"True");
+        return true;
+    }
+    if (!target.openHomeVolume.empty()) {
+        return OpenHomeGetMute(target, mute, error);
+    }
+    error = L"no volume/mute service available";
     return false;
 }
 
@@ -652,6 +703,26 @@ bool DlnaControlClient::OpenHomeGetVolume(const DlnaTarget& target, std::uint32_
         return false;
     }
     volume = static_cast<std::uint32_t>(_wtoi(text.c_str()));
+    return true;
+}
+
+bool DlnaControlClient::OpenHomeSetMute(const DlnaTarget& target, bool mute,
+                                       std::wstring& error) noexcept {
+    std::vector<upnp::SoapValue> values;
+    return Call(target.openHomeVolume, kOhVolume, L"SetMute",
+                L"<Value>" + std::wstring(mute ? L"1" : L"0") + L"</Value>", values, error);
+}
+
+bool DlnaControlClient::OpenHomeGetMute(const DlnaTarget& target, bool& mute,
+                                       std::wstring& error) noexcept {
+    std::vector<upnp::SoapValue> values;
+    if (!Call(target.openHomeVolume, kOhVolume, L"Mute", {}, values, error)) return false;
+    std::wstring text;
+    if (!FindValue(values, L"Value", text)) {
+        error = L"OpenHome Mute response lacks Value";
+        return false;
+    }
+    mute = (text == L"1" || text == L"true" || text == L"True");
     return true;
 }
 

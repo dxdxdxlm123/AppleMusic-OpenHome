@@ -141,9 +141,12 @@ private:
     std::atomic<ULONG> references_{1};
 };
 
-class PumpStreamVolume final : public IAudioStreamVolume {
+class PumpStreamVolume final : public IAudioStreamVolume, public ISimpleAudioVolume {
 public:
-    PumpStreamVolume() noexcept { volumes_.fill(1.0f); }
+    explicit PumpStreamVolume(const NativeAudioCallbacks& callbacks) noexcept
+        : callbacks_(callbacks) {
+        volumes_.fill(1.0f);
+    }
 
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
         if (ammod::ProcessExiting()) return AUDCLNT_E_SERVICE_NOT_RUNNING;
@@ -151,6 +154,11 @@ public:
         *object = nullptr;
         if (iid == __uuidof(IUnknown) || iid == __uuidof(IAudioStreamVolume)) {
             *object = static_cast<IAudioStreamVolume*>(this);
+            AddRef();
+            return S_OK;
+        }
+        if (iid == __uuidof(ISimpleAudioVolume)) {
+            *object = static_cast<ISimpleAudioVolume*>(this);
             AddRef();
             return S_OK;
         }
@@ -176,8 +184,12 @@ public:
     HRESULT STDMETHODCALLTYPE SetChannelVolume(UINT32 channel, const float volume) override {
         if (ammod::ProcessExiting()) return AUDCLNT_E_SERVICE_NOT_RUNNING;
         if (channel >= volumes_.size() || volume < 0.0f || volume > 1.0f) return E_INVALIDARG;
-        std::lock_guard lock(mutex_);
-        volumes_[channel] = volume;
+        {
+            std::lock_guard lock(mutex_);
+            volumes_[channel] = volume;
+            masterVolume_ = volume;
+        }
+        if (callbacks_.onVolumeChanged) callbacks_.onVolumeChanged(callbacks_.context, volume);
         return S_OK;
     }
 
@@ -198,8 +210,12 @@ public:
         for (UINT32 index = 0; index < channelCount; ++index) {
             if (volumes[index] < 0.0f || volumes[index] > 1.0f) return E_INVALIDARG;
         }
-        std::lock_guard lock(mutex_);
-        std::copy_n(volumes, volumes_.size(), volumes_.begin());
+        {
+            std::lock_guard lock(mutex_);
+            std::copy_n(volumes, volumes_.size(), volumes_.begin());
+            masterVolume_ = volumes[0];
+        }
+        if (callbacks_.onVolumeChanged) callbacks_.onVolumeChanged(callbacks_.context, volumes[0]);
         return S_OK;
     }
 
@@ -212,11 +228,53 @@ public:
         return S_OK;
     }
 
+    // ISimpleAudioVolume
+    HRESULT STDMETHODCALLTYPE SetMasterVolume(float fLevel, LPCGUID) override {
+        if (ammod::ProcessExiting()) return AUDCLNT_E_SERVICE_NOT_RUNNING;
+        if (fLevel < 0.0f || fLevel > 1.0f) return E_INVALIDARG;
+        {
+            std::lock_guard lock(mutex_);
+            masterVolume_ = fLevel;
+            volumes_.fill(fLevel);
+        }
+        if (callbacks_.onVolumeChanged) callbacks_.onVolumeChanged(callbacks_.context, fLevel);
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetMasterVolume(float* pfLevel) override {
+        if (ammod::ProcessExiting()) return AUDCLNT_E_SERVICE_NOT_RUNNING;
+        if (!pfLevel) return E_POINTER;
+        std::lock_guard lock(mutex_);
+        *pfLevel = masterVolume_;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE SetMute(BOOL bMute, LPCGUID) override {
+        if (ammod::ProcessExiting()) return AUDCLNT_E_SERVICE_NOT_RUNNING;
+        {
+            std::lock_guard lock(mutex_);
+            muted_ = (bMute != FALSE);
+        }
+        if (callbacks_.onMuteChanged) callbacks_.onMuteChanged(callbacks_.context, bMute != FALSE);
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetMute(BOOL* pbMute) override {
+        if (ammod::ProcessExiting()) return AUDCLNT_E_SERVICE_NOT_RUNNING;
+        if (!pbMute) return E_POINTER;
+        std::lock_guard lock(mutex_);
+        *pbMute = muted_ ? TRUE : FALSE;
+        return S_OK;
+    }
+
 private:
     ~PumpStreamVolume() = default;
 
+    NativeAudioCallbacks callbacks_{};
     std::mutex mutex_;
     std::array<float, 2> volumes_{};
+    float masterVolume_{1.0f};
+    bool muted_{false};
     std::atomic<ULONG> references_{1};
 };
 
@@ -687,11 +745,15 @@ HRESULT STDMETHODCALLTYPE NativeAudioClientProxy::GetService(REFIID iid, void** 
             } else {
                 result = E_OUTOFMEMORY;
             }
-        } else if (pumpMode_ && iid == __uuidof(IAudioStreamVolume)) {
-            if (!pumpVolume_) pumpVolume_ = new (std::nothrow) PumpStreamVolume();
+        } else if (pumpMode_ && (iid == __uuidof(IAudioStreamVolume) || iid == __uuidof(ISimpleAudioVolume))) {
+            if (!pumpVolume_) pumpVolume_ = new (std::nothrow) PumpStreamVolume(callbacks_);
             if (pumpVolume_) {
                 pumpVolume_->AddRef();
-                *service = pumpVolume_;
+                if (iid == __uuidof(ISimpleAudioVolume)) {
+                    *service = static_cast<ISimpleAudioVolume*>(static_cast<PumpStreamVolume*>(pumpVolume_));
+                } else {
+                    *service = pumpVolume_;
+                }
                 result = S_OK;
             } else {
                 result = E_OUTOFMEMORY;

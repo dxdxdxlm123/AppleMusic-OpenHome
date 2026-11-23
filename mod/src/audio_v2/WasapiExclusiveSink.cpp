@@ -18,6 +18,10 @@ namespace {
 constexpr REFERENCE_TIME kReferenceTimePerSecond = 10000000;
 constexpr REFERENCE_TIME kDefaultPeriod = 200000; // 20 ms
 
+static const GUID kAmVolumeContext = {
+    0x4f72696f, 0x6e56, 0x6f6c, { 0x75, 0x6d, 0x65, 0x53, 0x79, 0x6e, 0x63, 0x01 }
+};
+
 void Release(IUnknown*& value) noexcept {
     if (value) value->Release();
     value = nullptr;
@@ -112,6 +116,13 @@ HRESULT WasapiExclusiveSink::Open(const WasapiSinkConfig& config) noexcept {
             hr = enumerator_->GetDefaultAudioEndpoint(eRender, eConsole, &device_);
         } else {
             hr = enumerator_->GetDevice(config_.endpointId.c_str(), &device_);
+        }
+    }
+    if (SUCCEEDED(hr) && device_) {
+        if (SUCCEEDED(device_->Activate(__uuidof(IAudioEndpointVolume), CLSCTX_ALL, nullptr,
+                                       reinterpret_cast<void**>(&endpointVolume_))) &&
+            endpointVolume_) {
+            (void)endpointVolume_->QueryHardwareSupport(&hwSupportMask_);
         }
     }
     if (SUCCEEDED(hr)) hr = ActivateClient();
@@ -890,6 +901,7 @@ void WasapiExclusiveSink::StopInternal(bool preserveBuffer) noexcept {
 void WasapiExclusiveSink::Close() noexcept {
     if (state_.load(std::memory_order_acquire) == WasapiSinkState::Closed &&
         !renderThread_ && !client_ && !render_ && !device_ && !enumerator_ &&
+        !endpointVolume_ &&
         !shutdownEvent_ && !audioEvent_ && !mtaUsageCookie_) {
         return;
     }
@@ -918,7 +930,25 @@ void WasapiExclusiveSink::SetResumeBlocked(bool blocked) noexcept {
     if (!blocked && config_.sourceReadyEvent) SetEvent(config_.sourceReadyEvent);
 }
 
+void WasapiExclusiveSink::SetVolume(float volume) noexcept {
+    if (endpointVolume_ && (hwSupportMask_ & ENDPOINT_HARDWARE_SUPPORT_VOLUME)) {
+        (void)endpointVolume_->SetMasterVolumeLevelScalar(std::clamp(volume, 0.0f, 1.0f), &kAmVolumeContext);
+    }
+}
+
+void WasapiExclusiveSink::SetMute(bool mute) noexcept {
+    if (endpointVolume_) {
+        (void)endpointVolume_->SetMute(mute ? TRUE : FALSE, &kAmVolumeContext);
+    }
+}
+
+bool WasapiExclusiveSink::SupportsHardwareVolume() const noexcept {
+    return endpointVolume_ != nullptr && (hwSupportMask_ & ENDPOINT_HARDWARE_SUPPORT_VOLUME) != 0;
+}
+
 void WasapiExclusiveSink::ReleaseInterfaces() noexcept {
+    Release(endpointVolume_);
+    hwSupportMask_ = 0;
     Release(clock_);
     ResetClockTimeline();
     clockFrequency_.store(0, std::memory_order_relaxed);

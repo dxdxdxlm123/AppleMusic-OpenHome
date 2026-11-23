@@ -59,6 +59,12 @@ public:
     }
     void NotifyNextTrack() noexcept override;
 
+    void SetVolume(float volume) noexcept override;
+    void SetMute(bool mute) noexcept override;
+    bool SupportsHardwareVolume() const noexcept override {
+        return hasVolumeSupport_.load(std::memory_order_acquire);
+    }
+
 private:
     bool BuildFormatCandidates(const std::wstring& sinkProtocolInfo) noexcept;
     bool SetupStream() noexcept;
@@ -212,6 +218,18 @@ private:
     std::atomic<std::uint64_t> submittedFrames_{0};
     std::atomic<std::uint64_t> underruns_{0};
     std::atomic<std::uint64_t> controlFailures_{0};
+
+    void VolumeWorkerMain() noexcept;
+
+    std::atomic<bool> hasVolumeSupport_{false};
+    std::atomic<bool> volumeWorkerStop_{false};
+    std::atomic<bool> volumeDirty_{false};
+    std::atomic<bool> muteDirty_{false};
+    std::atomic<std::uint32_t> pendingVolume_{100};
+    std::atomic<bool> pendingMute_{false};
+    std::thread volumeWorker_;
+    std::mutex volumeMutex_;
+    std::condition_variable volumeCv_;
 };
 
 } // namespace ammod::audio_v2

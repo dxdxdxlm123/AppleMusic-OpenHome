@@ -3426,11 +3426,20 @@ HRESULT V2ResumeNativeGraphAfterFailedHandoff(void*, void* unit) noexcept {
     return result;
 }
 
+void V2OnNativeVolumeChanged(void* context, float volume) noexcept {
+    if (context) static_cast<ammod::audio_v2::AudioCoreRuntime*>(context)->OnUserVolumeChanged(volume);
+}
+
+void V2OnNativeMuteChanged(void* context, bool mute) noexcept {
+    if (context) static_cast<ammod::audio_v2::AudioCoreRuntime*>(context)->OnUserMuteChanged(mute);
+}
+
 ammod::audio_v2::NativeAudioCallbacks V2NativeCallbacks() noexcept {
     return {&g_audioCoreRuntime, &V2OnNativeInitialize, &V2OnNativeStart,
             &V2BeforeNativeStop, &V2OnNativeStop, &V2OnNativeReset, &V2ShouldSuppress,
             &V2OnNativeGetBuffer, &V2OnNativeReleaseBuffer, &V2OnNativeMethod,
-            &V2OnNativeService, &V2NativePumpPeriodMs};
+            &V2OnNativeService, &V2NativePumpPeriodMs,
+            &V2OnNativeVolumeChanged, &V2OnNativeMuteChanged};
 }
 
 void HookV2Device(IMMDevice* device);

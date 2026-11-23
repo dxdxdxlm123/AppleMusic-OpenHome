@@ -118,6 +118,15 @@ public:
     void SetSinkResumeBlocked(bool blocked) noexcept {
         if (sink_) sink_->SetResumeBlocked(blocked);
     }
+    void SetVolume(float volume) noexcept {
+        if (sink_) sink_->SetVolume(volume);
+    }
+    void SetMute(bool mute) noexcept {
+        if (sink_) sink_->SetMute(mute);
+    }
+    bool SupportsHardwareVolume() const noexcept {
+        return sink_ ? sink_->SupportsHardwareVolume() : false;
+    }
     void NotifyTrackChanged() noexcept {
         if (sink_) sink_->NotifyNextTrack();
     }

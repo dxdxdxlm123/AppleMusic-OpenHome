@@ -72,6 +72,9 @@ public:
         return endOfStreamComplete_.load(std::memory_order_acquire);
     }
     void SetResumeBlocked(bool blocked) noexcept override { (void)blocked; }
+    void SetVolume(float volume) noexcept override;
+    void SetMute(bool mute) noexcept override;
+    bool SupportsHardwareVolume() const noexcept override;
 
     // Official Roon persistent control session lifecycle:
     // - PrewarmFromIniAsync: connects & injects Lua VM in the background at host startup
@@ -90,6 +93,16 @@ private:
     struct DropoutRecord {
         std::uint64_t tickMs{0};
         std::uint64_t samples{0};
+    };
+
+    struct RaatVolumeCaps {
+        bool isSupported{false};
+        std::string type; // "db", "number", "incremental"
+        double min{0.0};
+        double max{100.0};
+        double step{1.0};
+        double value{100.0};
+        bool mute{false};
     };
 
     // Parked live RAAT session handed off across track transitions:
@@ -297,6 +310,23 @@ private:
     std::uint64_t lastSendTick_{0};
     std::vector<std::int32_t> block_;
     std::vector<std::int32_t> packedActive_;
+
+    void StartVolumeWorker() noexcept;
+    void StopVolumeWorker() noexcept;
+    void VolumeWorkerMain() noexcept;
+
+    mutable std::mutex volumeMutex_;
+    RaatVolumeCaps volumeCaps_;
+    std::atomic<bool> volumeSupported_{false};
+    std::atomic<bool> volumeDirty_{false};
+    std::atomic<float> pendingVolume_{1.0f};
+    std::atomic<bool> muteDirty_{false};
+    std::atomic<bool> pendingMute_{false};
+    std::thread volumeWorker_;
+    std::condition_variable volumeCv_;
+    std::mutex volumeWorkerMutex_;
+    std::atomic<bool> stopVolumeWorker_{false};
+    std::atomic<std::uint64_t> lastVolumeSendMs_{0};
 
     static inline std::mutex s_variantMutex;
     static inline std::unordered_map<std::wstring, int> s_preferredVariants;

@@ -584,6 +584,18 @@ void AudioCoreRuntime::OnTransportSkip(std::uint64_t epoch) noexcept {
     Wake();
 }
 
+void AudioCoreRuntime::OnUserVolumeChanged(float volume) noexcept {
+    if (!UiEnabled()) return;
+    ControlScope lock(*this);
+    coordinator_.SetVolume(volume);
+}
+
+void AudioCoreRuntime::OnUserMuteChanged(bool mute) noexcept {
+    if (!UiEnabled()) return;
+    ControlScope lock(*this);
+    coordinator_.SetMute(mute);
+}
+
 bool AudioCoreRuntime::DirectSelectionPending() const noexcept {
     const auto epoch = directSelectionArmEpoch_.load(std::memory_order_acquire);
     const auto generation = boundMediaGeneration_.load(std::memory_order_acquire);

@@ -24,6 +24,12 @@ std::string JsonGetString(const std::string& json, const std::string& key);
 bool JsonFindInt(const std::string& json, const std::string& key, std::int64_t& out);
 std::int64_t JsonGetInt(const std::string& json, const std::string& key,
                         std::int64_t fallback = 0);
+bool JsonFindDouble(const std::string& json, const std::string& key, double& out);
+double JsonGetDouble(const std::string& json, const std::string& key,
+                     double fallback = 0.0);
+bool JsonFindBool(const std::string& json, const std::string& key, bool& out);
+bool JsonGetBool(const std::string& json, const std::string& key,
+                 bool fallback = false);
 
 std::uint64_t NowMicroseconds() noexcept;
 // The renderer's clock domain is nanoseconds: RAATCLKR carries

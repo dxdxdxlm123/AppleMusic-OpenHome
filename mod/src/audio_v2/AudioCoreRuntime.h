@@ -171,6 +171,10 @@ public:
     void OnTransportSeekBegin(std::uint64_t epoch) noexcept;
     void OnTransportSeekCommit(std::uint64_t epoch) noexcept;
 
+    // Hardware volume synchronization from Apple Music UI / session.
+    void OnUserVolumeChanged(float volume) noexcept;
+    void OnUserMuteChanged(bool mute) noexcept;
+
     void OnConverterCreated(void* converter, const ApplePcmFormatView& source,
                             const ApplePcmFormatView& destination,
                             std::uint64_t observationId,

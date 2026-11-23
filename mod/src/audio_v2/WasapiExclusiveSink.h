@@ -5,6 +5,7 @@
 #include "PcmTypes.h"
 
 #include <audioclient.h>
+#include <endpointvolume.h>
 #include <mmdeviceapi.h>
 
 #include <atomic>
@@ -69,6 +70,10 @@ public:
     // check and its graph-control call.
     void SetResumeBlocked(bool blocked) noexcept override;
 
+    void SetVolume(float volume) noexcept override;
+    void SetMute(bool mute) noexcept override;
+    bool SupportsHardwareVolume() const noexcept override;
+
 private:
     static DWORD WINAPI RenderThreadThunk(void* context) noexcept;
     DWORD RenderThreadMain() noexcept;
@@ -93,6 +98,8 @@ private:
 
     IMMDeviceEnumerator* enumerator_{};
     IMMDevice* device_{};
+    IAudioEndpointVolume* endpointVolume_{};
+    DWORD hwSupportMask_{};
     IAudioClient* client_{};
     IAudioRenderClient* render_{};
     IAudioClock* clock_{};

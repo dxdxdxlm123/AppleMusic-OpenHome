@@ -477,6 +477,119 @@ void RaatSink::CancelNaturalEndOfStreamDelayForSuccessor() noexcept {
     successorPending_.store(true, std::memory_order_release);
 }
 
+void RaatSink::SetVolume(float volume) noexcept {
+    pendingVolume_.store(std::clamp(volume, 0.0f, 1.0f), std::memory_order_release);
+    volumeDirty_.store(true, std::memory_order_release);
+    volumeCv_.notify_one();
+}
+
+void RaatSink::SetMute(bool mute) noexcept {
+    pendingMute_.store(mute, std::memory_order_release);
+    muteDirty_.store(true, std::memory_order_release);
+    volumeCv_.notify_one();
+}
+
+bool RaatSink::SupportsHardwareVolume() const noexcept {
+    return volumeSupported_.load(std::memory_order_acquire);
+}
+
+void RaatSink::StartVolumeWorker() noexcept {
+    StopVolumeWorker();
+    stopVolumeWorker_.store(false, std::memory_order_release);
+    volumeWorker_ = std::thread(&RaatSink::VolumeWorkerMain, this);
+}
+
+void RaatSink::StopVolumeWorker() noexcept {
+    stopVolumeWorker_.store(true, std::memory_order_release);
+    volumeCv_.notify_all();
+    if (volumeWorker_.joinable()) {
+        volumeWorker_.join();
+    }
+}
+
+void RaatSink::VolumeWorkerMain() noexcept {
+    while (!stopVolumeWorker_.load(std::memory_order_acquire)) {
+        std::unique_lock lock(volumeWorkerMutex_);
+        volumeCv_.wait_for(lock, std::chrono::milliseconds(50), [this] {
+            return stopVolumeWorker_.load(std::memory_order_acquire) ||
+                   volumeDirty_.load(std::memory_order_acquire) ||
+                   muteDirty_.load(std::memory_order_acquire);
+        });
+
+        if (stopVolumeWorker_.load(std::memory_order_acquire)) break;
+
+        const std::uint64_t nowMs = GetTickCount64();
+        const std::uint64_t lastMs = lastVolumeSendMs_.load(std::memory_order_acquire);
+        if (nowMs >= lastMs && (nowMs - lastMs) < 60ull) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(60ull - (nowMs - lastMs)));
+        }
+
+        if (stopVolumeWorker_.load(std::memory_order_acquire)) break;
+
+        if (muteDirty_.exchange(false, std::memory_order_acq_rel)) {
+            const bool mute = pendingMute_.load(std::memory_order_acquire);
+            std::string req = "{\"request\":\"update_volume\",\"mute\":" +
+                              std::string(mute ? "true" : "false") + "}";
+            std::uint32_t rid = 0;
+            std::lock_guard ctrlLock(controlMutex_);
+            if (control_ && control_->IsOpen()) {
+                control_->SendAsync(req, 500, rid);
+                lastVolumeSendMs_.store(GetTickCount64(), std::memory_order_release);
+            }
+        }
+
+        if (volumeDirty_.exchange(false, std::memory_order_acq_rel)) {
+            const float V = pendingVolume_.load(std::memory_order_acquire);
+            RaatVolumeCaps caps;
+            {
+                std::lock_guard vLock(volumeMutex_);
+                caps = volumeCaps_;
+            }
+
+            if (caps.isSupported && caps.step > 0.0) {
+                double targetVal = 0.0;
+                if (caps.type == "db") {
+                    const double span = caps.max - caps.min;
+                    const double db = caps.min + span * std::pow(static_cast<double>(V), 2.0);
+                    targetVal = std::round(db / caps.step) * caps.step;
+                    if (targetVal < caps.min) targetVal = caps.min;
+                    if (targetVal > caps.max) targetVal = caps.max;
+                } else if (caps.type == "number") {
+                    const double span = caps.max - caps.min;
+                    const double num = caps.min + span * static_cast<double>(V);
+                    targetVal = std::round(num / caps.step) * caps.step;
+                    if (targetVal < caps.min) targetVal = caps.min;
+                    if (targetVal > caps.max) targetVal = caps.max;
+                } else {
+                    const double span = caps.max - caps.min;
+                    const double num = caps.min + span * static_cast<double>(V);
+                    targetVal = std::round(num / caps.step) * caps.step;
+                    if (targetVal < caps.min) targetVal = caps.min;
+                    if (targetVal > caps.max) targetVal = caps.max;
+                }
+
+                char valBuf[32]{};
+                std::snprintf(valBuf, sizeof(valBuf), "%.2f", targetVal);
+                std::string valStr = valBuf;
+                while (valStr.find('.') != std::string::npos &&
+                       (valStr.back() == '0' || valStr.back() == '.')) {
+                    const bool dot = (valStr.back() == '.');
+                    valStr.pop_back();
+                    if (dot) break;
+                }
+
+                std::string req = "{\"request\":\"update_volume\",\"value\":" + valStr + "}";
+                std::uint32_t rid = 0;
+                std::lock_guard ctrlLock(controlMutex_);
+                if (control_ && control_->IsOpen()) {
+                    control_->SendAsync(req, 500, rid);
+                    lastVolumeSendMs_.store(GetTickCount64(), std::memory_order_release);
+                }
+            }
+        }
+    }
+}
+
 double RaatSink::RequestedBufferSeconds() const noexcept {
     if (deviceVendor_.find("Data Conversion Systems") != std::string::npos) {
         return format_.sampleRate >= 352800u ? 2.0 : 4.0;
@@ -992,6 +1105,7 @@ HRESULT RaatSink::Open(const AudioSinkOpenParams& params) noexcept {
     streamId_ = static_cast<std::uint32_t>((GetTickCount64() & 0x7fffffffu) | 1u);
     lastError_.store(S_OK, std::memory_order_release);
     state_.store(AudioSinkState::Open, std::memory_order_release);
+    StartVolumeWorker();
     LogRaat(L"open device=" + target_.friendlyName + L" id=" + target_.deviceId +
             L" addr=" + target_.address + L":" + std::to_wstring(target_.controlPort) +
             L" raat=" + target_.raatVersion + L" rate=" +
@@ -1162,6 +1276,7 @@ void RaatSink::Stop() noexcept {
 }
 
 void RaatSink::Close() noexcept {
+    StopVolumeWorker();
     stop_.store(true, std::memory_order_release);
     paused_.store(false, std::memory_order_release);
     if (sourceReadyEvent_) SetEvent(sourceReadyEvent_);
@@ -1252,11 +1367,43 @@ void RaatSink::OnControlEvent(std::uint32_t rid, const std::string& json,
         }
     }
     if (rid == controlsSubRid_.load(std::memory_order_acquire)) {
-        if (json.find("\"volume\"") != std::string::npos) {
-            const std::int64_t val = JsonGetInt(json, "value", -1);
-            if (val >= 0) {
-                LogRaat(L"endpoint control volume=" + std::to_wstring(val));
+        const std::size_t volPos = json.find("\"volume\"");
+        if (volPos != std::string::npos && json.find("\"volume\":null") == std::string::npos) {
+            const std::string volJson = json.substr(volPos);
+            std::string type = JsonGetString(volJson, "type");
+            double min = JsonGetDouble(volJson, "min", 0.0);
+            double max = JsonGetDouble(volJson, "max", 100.0);
+            double step = JsonGetDouble(volJson, "step", 1.0);
+            double val = JsonGetDouble(volJson, "value", 100.0);
+            bool mute = JsonGetBool(volJson, "mute", false);
+
+            if (step <= 0.0 || step > 10.0) step = 1.0;
+            if (type.empty()) type = (min < 0.0) ? "db" : "number";
+            const bool supported = (type != "none");
+
+            {
+                std::lock_guard lock(volumeMutex_);
+                volumeCaps_.isSupported = supported;
+                volumeCaps_.type = type;
+                volumeCaps_.min = min;
+                volumeCaps_.max = max;
+                volumeCaps_.step = step;
+                volumeCaps_.value = val;
+                volumeCaps_.mute = mute;
+                volumeSupported_.store(supported, std::memory_order_release);
             }
+
+            LogRaat(L"endpoint control volume caps: type=" + ToWide(type) +
+                    L" min=" + std::to_wstring(min) +
+                    L" max=" + std::to_wstring(max) +
+                    L" step=" + std::to_wstring(step) +
+                    L" val=" + std::to_wstring(val) +
+                    L" mute=" + (mute ? L"1" : L"0"));
+        } else if (json.find("\"controls\"") != std::string::npos) {
+            std::lock_guard lock(volumeMutex_);
+            volumeCaps_.isSupported = false;
+            volumeSupported_.store(false, std::memory_order_release);
+            LogRaat(L"endpoint does not advertise volume controls (fixed output)");
         }
     }
     if (rid == streamRid_.load(std::memory_order_acquire)) {

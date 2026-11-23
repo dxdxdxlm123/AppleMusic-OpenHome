@@ -42,6 +42,10 @@ public:
                    std::wstring& error) noexcept;
     bool GetVolume(const DlnaTarget& target, std::uint32_t& volume,
                    std::wstring& error) noexcept;
+    bool SetMute(const DlnaTarget& target, bool mute,
+                 std::wstring& error) noexcept;
+    bool GetMute(const DlnaTarget& target, bool& mute,
+                 std::wstring& error) noexcept;
 
     // OpenHome Playlist / Time / Volume / Info. These are the primary path for
     // OpenHome renderers; AVTransport remains the transport-control fallback.
@@ -77,6 +81,10 @@ public:
                            std::wstring& error) noexcept;
     bool OpenHomeGetVolume(const DlnaTarget& target, std::uint32_t& volume,
                            std::wstring& error) noexcept;
+    bool OpenHomeSetMute(const DlnaTarget& target, bool mute,
+                         std::wstring& error) noexcept;
+    bool OpenHomeGetMute(const DlnaTarget& target, bool& mute,
+                         std::wstring& error) noexcept;
     bool OpenHomeInfo(const DlnaTarget& target, std::vector<upnp::SoapValue>& values,
                       std::wstring& error) noexcept;
 

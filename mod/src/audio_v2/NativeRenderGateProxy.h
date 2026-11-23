@@ -55,6 +55,8 @@ struct NativeAudioCallbacks final {
     void (*onService)(void* context, void* client, REFIID serviceIid,
                       HRESULT result) noexcept{};
     std::uint32_t (*pumpPeriodMs)(void* context) noexcept{};
+    void (*onVolumeChanged)(void* context, float volume) noexcept{};
+    void (*onMuteChanged)(void* context, bool mute) noexcept{};
 };
 
 class NativeRenderGateProxy;

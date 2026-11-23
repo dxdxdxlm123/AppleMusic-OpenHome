@@ -275,6 +275,12 @@ public:
     // no such wait, so their default remains a no-op.
     virtual void CancelNaturalEndOfStreamDelayForSuccessor() noexcept {}
     virtual void NotifyNextTrack() noexcept {}
+
+    // Hardware volume synchronization (0.0f - 1.0f).
+    // Default no-ops preserve backward compatibility for sinks without volume control.
+    virtual void SetVolume(float volume) noexcept {}
+    virtual void SetMute(bool mute) noexcept {}
+    virtual bool SupportsHardwareVolume() const noexcept { return false; }
 };
 
 } // namespace ammod::audio_v2

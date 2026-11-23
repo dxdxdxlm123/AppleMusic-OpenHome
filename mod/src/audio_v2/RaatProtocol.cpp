@@ -235,6 +235,46 @@ std::int64_t JsonGetInt(const std::string& json, const std::string& key,
     return JsonFindInt(json, key, out) ? out : fallback;
 }
 
+bool JsonFindDouble(const std::string& json, const std::string& key,
+                    double& out) {
+    std::size_t start = 0;
+    const auto rest = ValueAfterKey(json, key, start);
+    if (rest.empty()) return false;
+    char* end = nullptr;
+    const double value = std::strtod(rest.c_str(), &end);
+    if (end == rest.c_str()) return false;
+    out = value;
+    return true;
+}
+
+double JsonGetDouble(const std::string& json, const std::string& key,
+                     double fallback) {
+    double out = fallback;
+    return JsonFindDouble(json, key, out) ? out : fallback;
+}
+
+bool JsonFindBool(const std::string& json, const std::string& key,
+                  bool& out) {
+    std::size_t start = 0;
+    const auto rest = ValueAfterKey(json, key, start);
+    if (rest.empty()) return false;
+    if (rest.compare(0, 4, "true") == 0) {
+        out = true;
+        return true;
+    }
+    if (rest.compare(0, 5, "false") == 0) {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
+bool JsonGetBool(const std::string& json, const std::string& key,
+                 bool fallback) {
+    bool out = fallback;
+    return JsonFindBool(json, key, out) ? out : fallback;
+}
+
 std::uint64_t NowMicroseconds() noexcept {
     using Clock = std::chrono::steady_clock;
     return static_cast<std::uint64_t>(

@@ -396,6 +396,52 @@ local function reqGetControls(cx, req)
   end
 end
 
+local function reqUpdateVolume(cx, req)
+  if not (raat.volume and raat.volume.is_supported) then
+    cx:respond({ status = "NotSupported" })
+    return
+  end
+  if req.value ~= nil then
+    local val = tonumber(req.value)
+    if val then
+      if raat.volume.state and raat.volume.state.step and raat.volume.state.step > 0 then
+        val = math.floor(val / raat.volume.state.step + 0.5) * raat.volume.state.step
+      end
+      if not raat.volume.is_double_volume_supported then
+        val = math.floor(val)
+      end
+      if pcall(raat.volume.set_volume, val) then
+        cx:respond({ status = "Success" })
+        return
+      end
+    end
+  elseif req.mute ~= nil then
+    if pcall(raat.volume.set_mute, req.mute) then
+      cx:respond({ status = "Success" })
+      return
+    end
+  elseif req.toggle_mute then
+    if raat.volume.toggle_mute then
+      pcall(raat.volume.toggle_mute)
+    elseif raat.volume.state and raat.volume.set_mute then
+      pcall(raat.volume.set_mute, not raat.volume.state.mute)
+    end
+    cx:respond({ status = "Success" })
+    return
+  elseif req.increment ~= nil then
+    local inc = tonumber(req.increment)
+    if inc and raat.volume.state then
+      local nval = (raat.volume.state.value or 0) + inc
+      if raat.volume.state.max and nval > raat.volume.state.max then nval = raat.volume.state.max end
+      if raat.volume.state.min and nval < raat.volume.state.min then nval = raat.volume.state.min end
+      pcall(raat.volume.set_volume, nval)
+      cx:respond({ status = "Success" })
+      return
+    end
+  end
+  cx:respond({ status = "Success" })
+end
+
 local function reqSubscribe(cx, req, registry)
   if not (raat.volume.is_supported or raat.transport.is_supported) then
     cx:respond({ status = "NotSupported" })
@@ -714,6 +760,7 @@ local handlers = {
   unsubscribe_transport = function(cx, r) reqUnsubscribe(cx, r, subsTransport) end,
   subscribe_app_channel    = function(cx, r) reqSubscribe(cx, r, subsApp) end,
   unsubscribe_app_channel  = function(cx, r) reqUnsubscribe(cx, r, subsApp) end,
+  update_volume = reqUpdateVolume,
   setup         = reqSetup,
   stream        = reqStream,
   start         = reqStart,
