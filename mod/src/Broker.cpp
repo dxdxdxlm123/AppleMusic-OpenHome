@@ -1799,17 +1799,25 @@ std::wstring AudioHostPath() {
             L"am-exclusive-audiohost.exe").wstring();
 }
 
-// The host creates its pipe before accepting clients, so a successful open is
-// proof that another instance is already serving this session.
+// The host creates its mutex and pipe before accepting clients, so an existing
+// mutex or pipe (including busy pipe) is proof that another instance is already serving.
 bool AudioHostServing() {
     DWORD session = 0;
     (void)ProcessIdToSessionId(GetCurrentProcessId(), &session);
+    const std::wstring mutexName = L"Local\\AMEAudioHostMutex_" + std::to_wstring(session);
+    HANDLE mutex = OpenMutexW(SYNCHRONIZE, FALSE, mutexName.c_str());
+    if (mutex) {
+        CloseHandle(mutex);
+        return true;
+    }
     const std::wstring pipeName = L"\\\\.\\pipe\\AMEAudioHost_" + std::to_wstring(session);
-    HANDLE probe = CreateFileW(pipeName.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
-                               OPEN_EXISTING, 0, nullptr);
-    if (probe == INVALID_HANDLE_VALUE) return false;
-    CloseHandle(probe);
-    return true;
+    if (WaitNamedPipeW(pipeName.c_str(), 0)) {
+        return true;
+    }
+    if (GetLastError() == ERROR_PIPE_BUSY) {
+        return true;
+    }
+    return false;
 }
 
 HANDLE SpawnAudioHost() {

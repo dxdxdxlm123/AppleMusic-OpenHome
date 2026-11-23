@@ -1073,6 +1073,15 @@ HRESULT RaatSink::Open(const AudioSinkOpenParams& params) noexcept {
         static_cast<std::uint32_t>(std::max(configuredBlockBytes, 4096)),
         4096u, 131072u);
 
+    int configuredSliceMs = 50;
+    ReadSettingInt(configuredSliceMs, L"slice_ms", 50);
+    sliceMs_ = std::clamp<std::uint32_t>(
+        static_cast<std::uint32_t>(std::max(configuredSliceMs, 10)), 10u, 200u);
+
+    int debugPace = 0;
+    ReadSettingInt(debugPace, L"debug_pace", 0);
+    debugPaceLogging_ = (debugPace != 0);
+
     int configuredResyncMs = 200;
     ReadSettingInt(configuredResyncMs, L"resync_delay_ms", 200);
     resyncDelayMs_ = std::clamp<std::uint32_t>(
@@ -1098,7 +1107,11 @@ HRESULT RaatSink::Open(const AudioSinkOpenParams& params) noexcept {
 
     const std::uint32_t bytesPerFrame =
         std::max<std::uint32_t>(1u, format_.channels * (wireBits_ / 8u));
-    blockFrames_ = std::max<std::uint32_t>(256u, blockSizeBytes_ / bytesPerFrame);
+    const std::uint32_t sliceFrames = (format_.sampleRate > 0)
+        ? static_cast<std::uint32_t>((static_cast<std::uint64_t>(format_.sampleRate) * sliceMs_) / 1000u)
+        : 2048u;
+    const std::uint32_t maxFramesByBytes = blockSizeBytes_ / bytesPerFrame;
+    blockFrames_ = std::clamp<std::uint32_t>(sliceFrames, 256u, maxFramesByBytes);
     block_.assign(static_cast<std::size_t>(blockFrames_) * format_.channels, 0);
     packedActive_.reserve(block_.size());
 
@@ -2063,6 +2076,42 @@ void RaatSink::SendClientType() noexcept {
                             1000, response, final, error);
 }
 
+std::string RaatSink::GetPersistentControllerId() const noexcept {
+    static std::string s_cachedId;
+    static std::mutex s_cidMutex;
+    std::lock_guard lock(s_cidMutex);
+    if (!s_cachedId.empty()) return s_cachedId;
+
+    std::wstring cidW;
+    if (ReadSettingString(cidW, L"controller_id") && !cidW.empty()) {
+        s_cachedId = ToUtf8(cidW);
+        return s_cachedId;
+    }
+
+    HKEY hKey = nullptr;
+    wchar_t guidBuf[128]{};
+    DWORD guidSize = sizeof(guidBuf);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Cryptography", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        if (RegQueryValueExW(hKey, L"MachineGuid", nullptr, nullptr, reinterpret_cast<LPBYTE>(guidBuf), &guidSize) == ERROR_SUCCESS && guidBuf[0]) {
+            cidW = guidBuf;
+        }
+        RegCloseKey(hKey);
+    }
+
+    if (cidW.empty()) {
+        cidW = NewUuidString();
+    }
+
+    const auto path = IniPath();
+    if (!path.empty()) {
+        (void)WritePrivateProfileStringW(L"raat", L"controller_id", cidW.c_str(), path.c_str());
+    }
+
+    s_cachedId = ToUtf8(cidW);
+    LogRaat(L"persistent controller_id: " + cidW);
+    return s_cachedId;
+}
+
 void RaatSink::SendSubscriptions() noexcept {
     std::lock_guard lock(controlMutex_);
     if (!control_) return;
@@ -2071,10 +2120,9 @@ void RaatSink::SendSubscriptions() noexcept {
         transportSubRid_.store(tRid, std::memory_order_release);
     }
     std::uint32_t cRid = 0;
-    static const std::string s_controllerId = ToUtf8(NewUuidString());
     const std::string ctrlJson =
         "{\"request\":\"subscribe_controls\",\"controller_id\":\"" +
-        JsonEscape(s_controllerId) + "\"}";
+        JsonEscape(GetPersistentControllerId()) + "\"}";
     if (control_->SendAsync(ctrlJson, 1000, cRid)) {
         controlsSubRid_.store(cRid, std::memory_order_release);
     }
@@ -2212,13 +2260,20 @@ bool RaatSink::SendSetup(std::wstring& error) noexcept {
             format_.containerBits = bits;
             const std::uint32_t bytesPerFrame =
                 std::max<std::uint32_t>(1u, format_.channels * (wireBits_ / 8u));
-            blockFrames_ = std::max<std::uint32_t>(256u, blockSizeBytes_ / bytesPerFrame);
+            const std::uint32_t sliceFrames = (format_.sampleRate > 0)
+                ? static_cast<std::uint32_t>((static_cast<std::uint64_t>(format_.sampleRate) * sliceMs_) / 1000u)
+                : 2048u;
+            const std::uint32_t maxFramesByBytes = blockSizeBytes_ / bytesPerFrame;
+            blockFrames_ = std::clamp<std::uint32_t>(sliceFrames, 256u, maxFramesByBytes);
             block_.assign(static_cast<std::size_t>(blockFrames_) * format_.channels, 0);
             packedActive_.reserve(block_.size());
+            const std::uint32_t actualSliceMs = (format_.sampleRate > 0)
+                ? (blockFrames_ * 1000u) / format_.sampleRate : 0u;
             LogRaat(L"setup OK: device_clock udp/" + std::to_wstring(deviceClockPort_) +
                     L", audio tcp/" + std::to_wstring(audioPort_) +
                     L", wire=" + std::to_wstring(bits) + L"bit, packetFrames=" +
-                    std::to_wstring(blockFrames_));
+                    std::to_wstring(blockFrames_) + L" (~" + std::to_wstring(actualSliceMs) + L"ms, " +
+                    std::to_wstring(blockFrames_ * bytesPerFrame) + L" bytes)");
             return true;
         }
         LogRaat(L"setup " + ToWide(status) + L" at " + std::to_wstring(bits) + L"bit");
@@ -2742,7 +2797,9 @@ bool RaatSink::RunDeviceClockSyncRound() noexcept {
                           static_cast<unsigned long long>(bestRttNs / 1000ull),
                           driftPpm,
                           static_cast<unsigned long long>(finalOutputDelayNs / 1000000ull));
-            LogRaat(msg);
+            if (debugPaceLogging_ || std::abs(driftPpm) > 500.0) {
+                LogRaat(msg);
+            }
         }
     }
     return true;
@@ -3056,11 +3113,13 @@ void RaatSink::PumpMain() noexcept {
             const std::uint64_t leadMs = (format_.sampleRate > 0 && currentLeadFrames > 0)
                 ? (static_cast<std::uint64_t>(currentLeadFrames) * 1000ull) / format_.sampleRate
                 : 0ull;
-            LogRaat(L"pace sent=" + std::to_wstring(sampleIndex_) +
-                    L" nominal=" + std::to_wstring(nominalAllowed) +
-                    L" lead=" + std::to_wstring(currentLeadFrames) +
-                    L" (" + std::to_wstring(leadMs) + L"ms)" +
-                    L" qdepth=" + std::to_wstring(queuedFrames_.load(std::memory_order_acquire)));
+            if (debugPaceLogging_ || currentLeadFrames < 0) {
+                LogRaat(L"pace sent=" + std::to_wstring(sampleIndex_) +
+                        L" nominal=" + std::to_wstring(nominalAllowed) +
+                        L" lead=" + std::to_wstring(currentLeadFrames) +
+                        L" (" + std::to_wstring(leadMs) + L"ms)" +
+                        L" qdepth=" + std::to_wstring(queuedFrames_.load(std::memory_order_acquire)));
+            }
         }
 
         if (endOfStream) {
@@ -3253,6 +3312,12 @@ bool RaatSink::ReadSettingInt(int& value, const wchar_t* key, int fallback) cons
         return false;
     }
     wchar_t probe[32]{};
+    if (GetPrivateProfileStringW(L"raat", key, L"", probe,
+                                 static_cast<DWORD>(std::size(probe)),
+                                 path.c_str()) > 0) {
+        value = GetPrivateProfileIntW(L"raat", key, fallback, path.c_str());
+        return true;
+    }
     if (GetPrivateProfileStringW(L"r_device", key, L"", probe,
                                  static_cast<DWORD>(std::size(probe)),
                                  path.c_str()) > 0) {
@@ -3274,6 +3339,12 @@ bool RaatSink::ReadSettingString(std::wstring& value, const wchar_t* key) const 
     const std::wstring path = IniPath();
     if (path.empty()) return false;
     wchar_t buffer[128]{};
+    if (GetPrivateProfileStringW(L"raat", key, L"", buffer,
+                                 static_cast<DWORD>(std::size(buffer)),
+                                 path.c_str()) > 0) {
+        value = buffer;
+        return true;
+    }
     if (GetPrivateProfileStringW(L"r_device", key, L"", buffer,
                                  static_cast<DWORD>(std::size(buffer)),
                                  path.c_str()) > 0) {

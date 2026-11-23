@@ -156,6 +156,7 @@ private:
     bool SendInfo(std::wstring& error) noexcept;
     void SendClientType() noexcept;
     void SendSubscriptions() noexcept;
+    std::string GetPersistentControllerId() const noexcept;
     void SendRequestSource() noexcept;
     bool SendSetup(std::wstring& error) noexcept;
     bool OpenAudio(std::wstring& error) noexcept;
@@ -249,6 +250,8 @@ private:
     };
     DisplayMode displayMode_{DisplayMode::Standard};
     std::uint32_t transportIntervalMs_{3000};
+    std::uint32_t sliceMs_{50};
+    bool debugPaceLogging_{false};
 
     // Zero-heap allocation buffer pool for audio streaming
     std::vector<std::uint8_t> AcquireBuffer(std::size_t minCapacity) noexcept;

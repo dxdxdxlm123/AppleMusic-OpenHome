@@ -8,12 +8,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.3.17] - 2026-11-23
 
-### Fixed (DLNA / OpenHome Network Streaming Stability & Prefill Timing)
+### Fixed & Improved (DLNA / OpenHome Network Stability & RAAT Pacing Refinements)
 - **Reverted Aggressive Socket Tuning**: Reverted default `socket_tuning` to `0` (disabling `TCP_NODELAY` and `DSCP EF`) to eliminate TCP window collapse and `WSAECONNRESET` (error 10054) on strict network streamers (e.g. AURALiC VEGA G2 / G2.2).
 - **Removed Dynamic Socket Send Buffer (`SO_SNDBUF`)**: Removed connection-level `SO_SNDBUF` overrides on DLNA HTTP streaming sockets, restoring Windows TCP auto-tuning flow control to avoid overwhelming hardware streamer TCP receive windows.
 - **Restored Steady-State Hydration Burst (1.0s)**: Reverted initial HTTP streaming wire-speed pre-fill burst from 3.5s to the proven 1.0s window, preventing hardware DAC input FIFO overflow stalls.
 - **Restored Robust Prefill Threshold**: Restored full `bufferMs_` prefill gating with 3.0s deadline in `DlnaSink::Start()`, eliminating underrun races and playback cutoffs caused by under-buffered starts.
 - **OpenHome SourceIndex Switch Guarantee**: Automatically ensured OpenHome Playlist source selection (SourceIndex 0) when enqueueing audio streams, preventing silent playback if the renderer was previously occupied by other inputs.
+- **RAAT Dynamic Time-Slice Packet Chunking (`slice_ms = 50`)**: Replaced rigid fixed-size 60KB block chunking with uniform dynamic time-slice chunking (default 50ms, bounded by 60KB). On 44.1kHz/16-bit streams, packets are dispatched smoothly in ~8.8KB chunks every 50ms rather than accumulating 340ms bursts, eliminating network traffic burstiness and DAC FIFO jitter.
+- **Persistent RAAT Controller Identity**: Persisted a stable host `controller_id` (derived from hardware MachineGuid) across restarts and sessions, ensuring seamless ownership handover (`owner_id == controller_id`) on device firmware (`roon_tcp.lua`) without connection collision.
+- **Zero-IO Steady-State Playback**: Gated periodic 5-second pace logging and clock sync trace outputs behind diagnostic flag (`debug_pace`), achieving zero disk writes and zero file-lock contention during normal playback.
+- **Broker Watchdog Engine Vibration Fix**: Replaced pipe probe connections in Broker watchdog with non-invasive mutex and busy-pipe checks, completely eliminating 5-second spurious process spawn/exit cycles when audiohost is serving.
 
 ## [0.3.16] - 2026-11-23
 
