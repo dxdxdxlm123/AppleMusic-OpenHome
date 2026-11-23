@@ -252,6 +252,7 @@ private:
     std::uint32_t transportIntervalMs_{3000};
     std::uint32_t sliceMs_{50};
     bool debugPaceLogging_{false};
+    bool testMode_{false};
 
     // Zero-heap allocation buffer pool for audio streaming
     std::vector<std::uint8_t> AcquireBuffer(std::size_t minCapacity) noexcept;

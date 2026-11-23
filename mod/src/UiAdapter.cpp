@@ -126,6 +126,8 @@ winrt::weak_ref<Controls::TextBox> g_roonDeviceList;
 winrt::weak_ref<Controls::TextBox> g_roonBufferInput;
 winrt::weak_ref<Controls::ComboBox> g_roonBitsCombo;
 winrt::weak_ref<Controls::ComboBox> g_roonDisplayModeCombo;
+winrt::weak_ref<Controls::ToggleSwitch> g_roonTestModeToggle;
+winrt::weak_ref<Controls::ComboBox> g_roonBlockSizeCombo;
 winrt::weak_ref<Controls::TextBox> g_roonLeadInput;
 winrt::weak_ref<Controls::TextBox> g_roonSoodPortInput;
 winrt::weak_ref<Controls::TextBlock> g_outputTargetStatus;
@@ -1920,6 +1922,8 @@ struct OutputSettings final {
     int roonWireBits{};
     int roonSoodPort{};
     std::wstring roonDisplayMode{L"standard"};
+    int roonTestMode{0};
+    int roonBlockSizeBytes{60000};
 };
 
 std::wstring ReadIniText(const wchar_t* section, const wchar_t* key,
@@ -1993,6 +1997,8 @@ OutputSettings ReadOutputSettings() {
     if (_wcsicmp(settings.roonDisplayMode.c_str(), L"pure") != 0) {
         settings.roonDisplayMode = L"standard";
     }
+    settings.roonTestMode = readRoonInt(L"test_mode", 0);
+    settings.roonBlockSizeBytes = readRoonInt(L"block_size_bytes", 60000);
     return settings;
 }
 
@@ -2022,6 +2028,8 @@ void PersistOutputSettings(const OutputSettings& settings) {
         WriteIniText(sec, L"wire_bits", std::to_wstring(settings.roonWireBits));
         WriteIniText(sec, L"sood_port", std::to_wstring(settings.roonSoodPort));
         WriteIniText(sec, L"display_mode", settings.roonDisplayMode);
+        WriteIniText(sec, L"test_mode", std::to_wstring(settings.roonTestMode));
+        WriteIniText(sec, L"block_size_bytes", std::to_wstring(settings.roonBlockSizeBytes));
     }
     const auto path = StreamFormatIniPath();
     if (!path.empty()) {
@@ -2293,6 +2301,16 @@ void ApplyOutputSelection() {
         if (auto combo = g_roonDisplayModeCombo.get()) {
             const int index = combo.SelectedIndex();
             settings.roonDisplayMode = (index == 1) ? L"pure" : L"standard";
+        }
+        if (auto toggle = g_roonTestModeToggle.get()) {
+            settings.roonTestMode = toggle.IsOn() ? 1 : 0;
+        }
+        if (auto combo = g_roonBlockSizeCombo.get()) {
+            static constexpr int kBlockSizes[] = {1360, 2720, 4080, 8160, 14400, 60000};
+            const int index = combo.SelectedIndex();
+            if (index >= 0 && index < static_cast<int>(std::size(kBlockSizes))) {
+                settings.roonBlockSizeBytes = kBlockSizes[index];
+            }
         }
         settings.dlnaUdn.clear();
         settings.dlnaName.clear();
@@ -3144,6 +3162,84 @@ Controls::Border CreateOutputTargetCard(
     roonDisplayModeHint.Margin(Xaml::Thickness{0, 2, 0, 0});
     if (nativeText.size() > 1) roonDisplayModeHint.Style(nativeText[1].Style());
     roonPanel.Children().Append(roonDisplayModeHint);
+
+    Controls::StackPanel roonTestModeRow;
+    roonTestModeRow.Orientation(Controls::Orientation::Horizontal);
+    roonTestModeRow.Spacing(8.0);
+    roonTestModeRow.Margin(Xaml::Thickness{0, 6, 0, 0});
+    Controls::TextBlock roonTestModeLabel;
+    roonTestModeLabel.Text(Localized(L"Test 实验纯净模式 (USS):",
+                                     L"USS-Style Pure Pacing (Test Mode):"));
+    roonTestModeLabel.VerticalAlignment(Xaml::VerticalAlignment::Center);
+    roonTestModeLabel.MinWidth(200.0);
+    Controls::ToggleSwitch roonTestModeToggle;
+    roonTestModeToggle.Name(L"AMExclusiveRoonTestModeToggle");
+    roonTestModeToggle.OnContent(box_value(Localized(L"开", L"On")));
+    roonTestModeToggle.OffContent(box_value(Localized(L"关", L"Off")));
+    roonTestModeToggle.IsOn(roonSettings.roonTestMode != 0);
+    roonTestModeRow.Children().Append(roonTestModeLabel);
+    roonTestModeRow.Children().Append(roonTestModeToggle);
+    roonPanel.Children().Append(roonTestModeRow);
+    g_roonTestModeToggle = winrt::make_weak(roonTestModeToggle);
+
+    Controls::TextBlock roonTestModeHint;
+    roonTestModeHint.Text(Localized(
+        L"开启后启用 USS 风格小包直推、QPC 微秒级高精度等距节拍与 Pure 极静屏显，消除 340ms 脉冲突发；关闭则保持当前默认分包与节拍。",
+        L"Enable to activate USS-style MTU-aligned small packet streaming, QPC microstep pacing, and Pure screen silence. Off keeps standard behavior."));
+    roonTestModeHint.TextWrapping(Xaml::TextWrapping::Wrap);
+    roonTestModeHint.Margin(Xaml::Thickness{0, 2, 0, 0});
+    if (nativeText.size() > 1) roonTestModeHint.Style(nativeText[1].Style());
+    roonPanel.Children().Append(roonTestModeHint);
+
+    Controls::StackPanel roonBlockSizeRow;
+    roonBlockSizeRow.Orientation(Controls::Orientation::Horizontal);
+    roonBlockSizeRow.Spacing(8.0);
+    roonBlockSizeRow.Margin(Xaml::Thickness{0, 4, 0, 0});
+    Controls::TextBlock roonBlockSizeLabel;
+    roonBlockSizeLabel.Text(Localized(L"分包大小 (Block Size):",
+                                     L"Packet block size (Block Size):"));
+    roonBlockSizeLabel.VerticalAlignment(Xaml::VerticalAlignment::Center);
+    roonBlockSizeLabel.MinWidth(200.0);
+    Controls::ComboBox roonBlockSizeCombo;
+    roonBlockSizeCombo.Name(L"AMExclusiveRoonBlockSizeCombo");
+    roonBlockSizeCombo.MinWidth(260.0);
+    {
+        static constexpr int kBlockSizes[] = {1360, 2720, 4080, 8160, 14400, 60000};
+        const std::wstring names[] = {
+            Localized(L"1360 字节 (1x MTU 单包直推 · 7.7ms)", L"1360 bytes (1x MTU single-packet ~7.7ms)"),
+            Localized(L"2720 字节 (2x MTU 双包聚合 · 15.4ms · 推荐)", L"2720 bytes (2x MTU 2-packet ~15.4ms recommended)"),
+            Localized(L"4080 字节 (3x MTU 三包聚合 · 23.1ms)", L"4080 bytes (3x MTU 3-packet ~23.1ms)"),
+            Localized(L"8160 字节 (6x MTU 细密微流 · 46.3ms)", L"8160 bytes (6x MTU micro-stream ~46.3ms)"),
+            Localized(L"14400 字节 (中等分块 · ~100ms)", L"14400 bytes (medium chunk ~100ms)"),
+            Localized(L"60000 字节 (官方标准 60KB 大包 · ~340ms)", L"60000 bytes (standard 60KB block ~340ms)")
+        };
+        for (const auto& name : names) {
+            Controls::ComboBoxItem item;
+            item.Content(box_value(name));
+            roonBlockSizeCombo.Items().Append(item);
+        }
+        int selected = 1;
+        for (int i = 0; i < static_cast<int>(std::size(kBlockSizes)); ++i) {
+            if (kBlockSizes[i] == roonSettings.roonBlockSizeBytes) {
+                selected = i;
+                break;
+            }
+        }
+        roonBlockSizeCombo.SelectedIndex(selected);
+    }
+    roonBlockSizeRow.Children().Append(roonBlockSizeLabel);
+    roonBlockSizeRow.Children().Append(roonBlockSizeCombo);
+    roonPanel.Children().Append(roonBlockSizeRow);
+    g_roonBlockSizeCombo = winrt::make_weak(roonBlockSizeCombo);
+
+    Controls::TextBlock roonBlockSizeHint;
+    roonBlockSizeHint.Text(Localized(
+        L"贴合以太网 1500 字节 MTU（扣除 IP/TCP 头净荷 1360 字节）。1360 单包直推网络抖动最低；2720 双包聚合在各类数播网卡上兼顾平滑度与网卡中断平衡。",
+        L"Aligned to Ethernet 1500-byte MTU (1360 bytes TCP payload). 1360 gives lowest network burstiness; 2720 offers optimal balance between smoothness and NIC interrupt rate."));
+    roonBlockSizeHint.TextWrapping(Xaml::TextWrapping::Wrap);
+    roonBlockSizeHint.Margin(Xaml::Thickness{0, 2, 0, 0});
+    if (nativeText.size() > 1) roonBlockSizeHint.Style(nativeText[1].Style());
+    roonPanel.Children().Append(roonBlockSizeHint);
 
     makeNumericRow(Localized(L"Start lead (ms, 300-4000):", L"Start lead (ms, 300-4000):"),
                    std::to_wstring(roonSettings.roonStartLeadMs), roonLeadInput);

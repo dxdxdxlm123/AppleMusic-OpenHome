@@ -1066,12 +1066,16 @@ HRESULT RaatSink::Open(const AudioSinkOpenParams& params) noexcept {
     startLeadMs_ = std::clamp<std::uint32_t>(
         static_cast<std::uint32_t>(std::max(lead, 50)), 50u, 4000u);
 
+    int configuredTestMode = 0;
+    ReadSettingInt(configuredTestMode, L"test_mode", 0);
+    testMode_ = (configuredTestMode != 0);
+
     int configuredBlockBytes = static_cast<int>(kRaatDefaultBlockSizeBytes);
     ReadSettingInt(configuredBlockBytes, L"block_size_bytes",
                    static_cast<int>(kRaatDefaultBlockSizeBytes));
     blockSizeBytes_ = std::clamp<std::uint32_t>(
-        static_cast<std::uint32_t>(std::max(configuredBlockBytes, 4096)),
-        4096u, 131072u);
+        static_cast<std::uint32_t>(std::max(configuredBlockBytes, 512)),
+        512u, 131072u);
 
     int configuredSliceMs = 50;
     ReadSettingInt(configuredSliceMs, L"slice_ms", 50);
@@ -1100,6 +1104,12 @@ HRESULT RaatSink::Open(const AudioSinkOpenParams& params) noexcept {
         displayMode_ = (pureInt == 1) ? DisplayMode::Pure : DisplayMode::Standard;
     }
 
+    if (testMode_) {
+        // Test mode forces Pure listening mode (zero periodic transport packets) and zero pace disk logging
+        displayMode_ = DisplayMode::Pure;
+        debugPaceLogging_ = false;
+    }
+
     int intervalMs = 3000;
     ReadSettingInt(intervalMs, L"transport_interval_ms", 3000);
     transportIntervalMs_ = std::clamp<std::uint32_t>(
@@ -1107,11 +1117,15 @@ HRESULT RaatSink::Open(const AudioSinkOpenParams& params) noexcept {
 
     const std::uint32_t bytesPerFrame =
         std::max<std::uint32_t>(1u, format_.channels * (wireBits_ / 8u));
-    const std::uint32_t sliceFrames = (format_.sampleRate > 0)
-        ? static_cast<std::uint32_t>((static_cast<std::uint64_t>(format_.sampleRate) * sliceMs_) / 1000u)
-        : 2048u;
-    const std::uint32_t maxFramesByBytes = blockSizeBytes_ / bytesPerFrame;
-    blockFrames_ = std::clamp<std::uint32_t>(sliceFrames, 256u, maxFramesByBytes);
+    if (testMode_) {
+        blockFrames_ = std::max<std::uint32_t>(16u, blockSizeBytes_ / bytesPerFrame);
+    } else {
+        const std::uint32_t sliceFrames = (format_.sampleRate > 0)
+            ? static_cast<std::uint32_t>((static_cast<std::uint64_t>(format_.sampleRate) * sliceMs_) / 1000u)
+            : 2048u;
+        const std::uint32_t maxFramesByBytes = blockSizeBytes_ / bytesPerFrame;
+        blockFrames_ = std::clamp<std::uint32_t>(sliceFrames, 256u, maxFramesByBytes);
+    }
     block_.assign(static_cast<std::size_t>(blockFrames_) * format_.channels, 0);
     packedActive_.reserve(block_.size());
 
@@ -2260,11 +2274,15 @@ bool RaatSink::SendSetup(std::wstring& error) noexcept {
             format_.containerBits = bits;
             const std::uint32_t bytesPerFrame =
                 std::max<std::uint32_t>(1u, format_.channels * (wireBits_ / 8u));
-            const std::uint32_t sliceFrames = (format_.sampleRate > 0)
-                ? static_cast<std::uint32_t>((static_cast<std::uint64_t>(format_.sampleRate) * sliceMs_) / 1000u)
-                : 2048u;
-            const std::uint32_t maxFramesByBytes = blockSizeBytes_ / bytesPerFrame;
-            blockFrames_ = std::clamp<std::uint32_t>(sliceFrames, 256u, maxFramesByBytes);
+            if (testMode_) {
+                blockFrames_ = std::max<std::uint32_t>(16u, blockSizeBytes_ / bytesPerFrame);
+            } else {
+                const std::uint32_t sliceFrames = (format_.sampleRate > 0)
+                    ? static_cast<std::uint32_t>((static_cast<std::uint64_t>(format_.sampleRate) * sliceMs_) / 1000u)
+                    : 2048u;
+                const std::uint32_t maxFramesByBytes = blockSizeBytes_ / bytesPerFrame;
+                blockFrames_ = std::clamp<std::uint32_t>(sliceFrames, 256u, maxFramesByBytes);
+            }
             block_.assign(static_cast<std::size_t>(blockFrames_) * format_.channels, 0);
             packedActive_.reserve(block_.size());
             const std::uint32_t actualSliceMs = (format_.sampleRate > 0)
@@ -2273,7 +2291,8 @@ bool RaatSink::SendSetup(std::wstring& error) noexcept {
                     L", audio tcp/" + std::to_wstring(audioPort_) +
                     L", wire=" + std::to_wstring(bits) + L"bit, packetFrames=" +
                     std::to_wstring(blockFrames_) + L" (~" + std::to_wstring(actualSliceMs) + L"ms, " +
-                    std::to_wstring(blockFrames_ * bytesPerFrame) + L" bytes)");
+                    std::to_wstring(blockFrames_ * bytesPerFrame) + L" bytes, testMode=" +
+                    std::to_wstring(testMode_ ? 1 : 0) + L")");
             return true;
         }
         LogRaat(L"setup " + ToWide(status) + L" at " + std::to_wstring(bits) + L"bit");
@@ -3097,11 +3116,42 @@ void RaatSink::PumpMain() noexcept {
             const std::uint64_t allowed = allowedFramesAt(GetRemoteClockNs()) + hydrationLeadFrames;
             if (sampleIndex_ <= allowed) break;
             const std::uint64_t excessFrames = sampleIndex_ - allowed;
-            const std::uint64_t waitMs =
-                (excessFrames * 1000ull) / std::max<std::uint32_t>(1u, format_.sampleRate);
-            const std::uint32_t sleepMs = static_cast<std::uint32_t>(
-                std::clamp<std::uint64_t>(waitMs, 5u, 50u));
-            std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+            const std::uint64_t waitNs =
+                (excessFrames * 1000000000ull) / std::max<std::uint32_t>(1u, format_.sampleRate);
+            const std::uint64_t waitMs = waitNs / 1000000ull;
+
+            if (testMode_) {
+                // High-precision QPC microstep pacing (USS style)
+                if (waitMs > 2u) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(waitMs - 1u));
+                } else {
+                    static const std::int64_t s_qpcFreq = []() {
+                        LARGE_INTEGER f;
+                        QueryPerformanceFrequency(&f);
+                        return f.QuadPart;
+                    }();
+                    LARGE_INTEGER nowLi;
+                    QueryPerformanceCounter(&nowLi);
+                    const std::int64_t targetQpc = nowLi.QuadPart + static_cast<std::int64_t>((waitNs * s_qpcFreq) / 1000000000ull);
+                    while (!stop_.load(std::memory_order_acquire) && !paused_.load(std::memory_order_acquire)) {
+                        QueryPerformanceCounter(&nowLi);
+                        if (nowLi.QuadPart >= targetQpc) break;
+                        const std::int64_t remainingTicks = targetQpc - nowLi.QuadPart;
+                        const std::int64_t remainingUs = (remainingTicks * 1000000LL) / s_qpcFreq;
+                        if (remainingUs > 500) {
+                            std::this_thread::yield();
+                        } else {
+                            YieldProcessor();
+                        }
+                    }
+                    break;
+                }
+            } else {
+                // Standard coarse pacing
+                const std::uint32_t sleepMs = static_cast<std::uint32_t>(
+                    std::clamp<std::uint64_t>(waitMs, 5u, 50u));
+                std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
+            }
         }
 
         const std::uint64_t nowTickMs = GetTickCount64();
