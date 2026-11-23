@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cwctype>
+#include <mutex>
 #include <sstream>
 #include <string>
 
@@ -37,7 +38,29 @@ struct InternetHandle final {
     InternetHandle() = default;
     explicit InternetHandle(HINTERNET value) : handle(value) {}
     operator HINTERNET() const noexcept { return handle; }
+    void reset(HINTERNET value = nullptr) noexcept {
+        if (handle) WinHttpCloseHandle(handle);
+        handle = value;
+    }
 };
+
+static std::mutex s_winHttpMutex;
+static HINTERNET s_sessionHandle = nullptr;
+static HINTERNET s_cachedConnect = nullptr;
+static std::wstring s_cachedHost;
+static WORD s_cachedPort = 0;
+
+static HINTERNET GetSharedSession() noexcept {
+    if (!s_sessionHandle) {
+        s_sessionHandle = WinHttpOpen(L"AMExclusive/0.1",
+                                      WINHTTP_ACCESS_TYPE_NO_PROXY,
+                                      WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (s_sessionHandle) {
+            WinHttpSetTimeouts(s_sessionHandle, 3000, 3000, 5000, 8000);
+        }
+    }
+    return s_sessionHandle;
+}
 
 std::string ToUtf8(const std::wstring& text) {
     if (text.empty()) return {};
@@ -85,18 +108,36 @@ bool HttpRequest(const std::wstring& url, const std::wstring& method,
     const bool secure = parts.nScheme == INTERNET_SCHEME_HTTPS;
     const WORD port = parts.nPort ? parts.nPort : (secure ? 443 : 80);
 
-    InternetHandle session(WinHttpOpen(L"AMExclusive/0.1",
-                                       WINHTTP_ACCESS_TYPE_NO_PROXY,
-                                       WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0));
-    if (!session) {
-        error = L"WinHttpOpen failed";
-        return false;
+    HINTERNET session = nullptr;
+    HINTERNET connect = nullptr;
+    InternetHandle localConnect;
+    {
+        std::lock_guard<std::mutex> lock(s_winHttpMutex);
+        session = GetSharedSession();
+        if (!session) {
+            error = L"WinHttpOpen failed";
+            return false;
+        }
+        if (s_cachedConnect && s_cachedHost == host && s_cachedPort == port) {
+            connect = s_cachedConnect;
+        } else {
+            if (s_cachedConnect) {
+                WinHttpCloseHandle(s_cachedConnect);
+                s_cachedConnect = nullptr;
+            }
+            s_cachedConnect = WinHttpConnect(session, host.c_str(), port, 0);
+            s_cachedHost = host;
+            s_cachedPort = port;
+            connect = s_cachedConnect;
+        }
     }
-    WinHttpSetTimeouts(session, 3000, 3000, 5000, 8000);
-    InternetHandle connect(WinHttpConnect(session, host.c_str(), port, 0));
     if (!connect) {
-        error = L"connect failed";
-        return false;
+        localConnect.reset(WinHttpConnect(session, host.c_str(), port, 0));
+        connect = localConnect.handle;
+        if (!connect) {
+            error = L"connect failed";
+            return false;
+        }
     }
     InternetHandle request(WinHttpOpenRequest(
         connect, method.c_str(), path.c_str(), nullptr, WINHTTP_NO_REFERER,
@@ -112,8 +153,32 @@ bool HttpRequest(const std::wstring& url, const std::wstring& method,
                             headers.empty() ? 0 : static_cast<DWORD>(headers.size()),
                             bodySize ? const_cast<char*>(bodyBytes.data()) : nullptr,
                             bodySize, bodySize, 0)) {
-        error = L"send failed error=" + std::to_wstring(GetLastError());
-        return false;
+        bool retried = false;
+        {
+            std::lock_guard<std::mutex> lock(s_winHttpMutex);
+            if (s_cachedConnect) {
+                WinHttpCloseHandle(s_cachedConnect);
+                s_cachedConnect = WinHttpConnect(session, host.c_str(), port, 0);
+                connect = s_cachedConnect;
+            }
+        }
+        if (connect) {
+            request.reset(WinHttpOpenRequest(
+                connect, method.c_str(), path.c_str(), nullptr, WINHTTP_NO_REFERER,
+                WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0));
+            if (request.handle &&
+                WinHttpSendRequest(request,
+                                   headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+                                   headers.empty() ? 0 : static_cast<DWORD>(headers.size()),
+                                   bodySize ? const_cast<char*>(bodyBytes.data()) : nullptr,
+                                   bodySize, bodySize, 0)) {
+                retried = true;
+            }
+        }
+        if (!retried) {
+            error = L"send failed error=" + std::to_wstring(GetLastError());
+            return false;
+        }
     }
     if (!WinHttpReceiveResponse(request, nullptr)) {
         error = L"response failed error=" + std::to_wstring(GetLastError());
@@ -461,9 +526,22 @@ bool DlnaControlClient::OpenHomePlaylistPlay(const DlnaTarget& target,
 bool DlnaControlClient::OpenHomePlaylistPlayId(const DlnaTarget& target,
                                                std::uint32_t id,
                                                std::wstring& error) noexcept {
+    if (id != 0) {
+        if (!OpenHomeSeekId(target, id, error)) {
+            return false;
+        }
+    }
+    return OpenHomePlaylistPlay(target, error);
+}
+
+bool DlnaControlClient::OpenHomePlaylistTransportState(const DlnaTarget& target,
+                                                      std::wstring& state,
+                                                      std::wstring& error) noexcept {
     std::vector<upnp::SoapValue> values;
-    return Call(target.openHomePlaylist, kOhPlaylist, L"Play",
-                L"<Id>" + std::to_wstring(id) + L"</Id>", values, error);
+    if (!Call(target.openHomePlaylist, kOhPlaylist, L"TransportState", {}, values, error)) {
+        return false;
+    }
+    return FindValue(values, L"Value", state);
 }
 
 bool DlnaControlClient::OpenHomeDeleteAll(const DlnaTarget& target,

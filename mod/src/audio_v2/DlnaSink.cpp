@@ -51,6 +51,13 @@ std::wstring GuidToken() {
     return token;
 }
 
+static std::atomic<std::uint32_t> s_lastDlnaSampleRate{0};
+
+static inline bool IsDifferentClockFamily(std::uint32_t r1, std::uint32_t r2) noexcept {
+    if (r1 == 0 || r2 == 0 || r1 == r2) return false;
+    return (r1 % 44100 == 0) != (r2 % 44100 == 0);
+}
+
 std::wstring FeaturesOf(const std::wstring& protocolInfo) {
     // ProtocolInfo is <network>:<operation>:<content-type>:<additional-info>.
     // The additional-info field is a ';' separated list of DLNA.ORG_* key=value
@@ -434,7 +441,7 @@ bool DlnaSink::SetupStream() noexcept {
     // if a connection drops. Aborting here is the exact defect that caused
     // "tail cut off" and "HTTP 410 unknown token".
     if (session_) {
-        retiredSessions_.emplace_back(session_, GetTickCount64() + 60000);
+        retiredSessions_.emplace_back(session_, GetTickCount64() + 300000);
         session_.reset();
     }
     chunkFrames_ = std::min<std::uint32_t>(
@@ -612,7 +619,7 @@ void DlnaSink::CloseStream() noexcept {
     // Retire with a generous 60-second grace period instead of immediately
     // aborting and erasing the token, so in-flight HTTP reads drain smoothly.
     if (session_) {
-        retiredSessions_.emplace_back(session_, GetTickCount64() + 60000);
+        retiredSessions_.emplace_back(session_, GetTickCount64() + 300000);
         session_.reset();
     }
 }
@@ -630,11 +637,11 @@ void DlnaSink::RefreshTrackDurationFromSmtc(const std::wstring& previousTitle,
     const auto notBefore = GetTickCount64() + 300;
     auto& monitor = TrackMonitor::Instance();
     monitor.EnsureStarted();
-    auto info = monitor.Snapshot(fastTrackChange ? 300u : 2500u);
+    auto info = monitor.Snapshot(fastTrackChange ? 200u : 500u);
     // Open/seek clears the per-sink identity. Do not mistake a cached previous
-    // item for the new one; require a successful helper poll after this boundary.
+    // item for the new one; require a bounded helper poll after this boundary.
     if (previousTitle.empty()) {
-        const auto pollDeadline = GetTickCount64() + 2500;
+        const auto pollDeadline = GetTickCount64() + 600;
         while (info.stampTick < notBefore && GetTickCount64() < pollDeadline) {
             if (!previousTitle.empty() && producerStop_.load(std::memory_order_acquire)) return;
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
@@ -642,7 +649,7 @@ void DlnaSink::RefreshTrackDurationFromSmtc(const std::wstring& previousTitle,
         }
     }
     const auto previous = trackMetadata_;
-    const auto deadline = GetTickCount64() + (fastTrackChange ? 800u : 5000u);
+    const auto deadline = GetTickCount64() + (fastTrackChange ? 400u : 600u);
     if (!previousTitle.empty()) {
         // Compare full identity, not duration/title alone (same-length tracks,
         // covers of the same song and different albums are all common).
@@ -746,6 +753,8 @@ bool DlnaSink::AdvanceToNextTrack() noexcept {
     // session's open connections. Blocking the producer would only build up
     // the capture queue for nothing.
     if (producerStop_.load(std::memory_order_acquire)) return false;
+    prevTrackDurationMs_ = trackDurationMsExact_ ? trackDurationMsExact_ :
+        (format_.sampleRate ? static_cast<std::uint32_t>(sessionFramesProduced_ * 1000ull / format_.sampleRate) : 0u);
     const auto previousTitle = lastTrackTitle_;
     RefreshTrackDurationFromSmtc(previousTitle, shape_ == DlnaStreamShape::FlacLive);
     if (producerStop_.load(std::memory_order_acquire)) return false;
@@ -812,7 +821,9 @@ bool DlnaSink::AppendNextTrackToDevice() noexcept {
             // Watchdog: if the renderer does not start pulling the queued
             // track within this window (no auto-continuation), escalate to an
             // explicit Play. Checked from the producer loop, never blocking.
-            pendingPlayDeadlineTick_ = GetTickCount64() + 25000;
+            // Sized to the expected playback duration of the current track + grace period.
+            const auto leadMs = std::max<std::uint64_t>(prevTrackDurationMs_, 25000ULL) + 15000ULL;
+            pendingPlayDeadlineTick_ = GetTickCount64() + leadMs;
             return true;
         }
         controlFailures_.fetch_add(1, std::memory_order_relaxed);
@@ -827,7 +838,8 @@ bool DlnaSink::AppendNextTrackToDevice() noexcept {
         std::wstring nextError;
         if (control_.SetNextAvTransportUri(target_, streamUrl_, didl, nextError)) {
             DlnaLog(L"auto-advance: queued SetNextAVTransportURI url=" + streamUrl_);
-            pendingPlayDeadlineTick_ = GetTickCount64() + 25000;
+            const auto leadMs = std::max<std::uint64_t>(prevTrackDurationMs_, 25000ULL) + 15000ULL;
+            pendingPlayDeadlineTick_ = GetTickCount64() + leadMs;
             return true;
         }
         DlnaLog(L"SetNextAVTransportURI failed, falling back to immediate send: " + nextError);
@@ -863,6 +875,8 @@ bool DlnaSink::WaitForFirstGet(std::uint32_t timeoutMs) noexcept {
 HRESULT DlnaSink::Open(const AudioSinkOpenParams& params) noexcept {
     Close();
     naturalEosDelayCancel_.store(false, std::memory_order_release);
+    resyncDelayMs_ = static_cast<std::uint32_t>(GetPrivateProfileIntW(
+        L"dlna", L"resync_delay_ms", 200, IniPath().c_str()));
     if (!IsValidFormat(params.format)) return E_INVALIDARG;
     // [dlna] pcm_byte_order=little is a compatibility escape hatch for
     // renderers that ignore RFC 3551/3190. Anything else keeps big-endian.
@@ -1181,17 +1195,27 @@ HRESULT DlnaSink::Start(IIntegerPcmSource& source) noexcept {
             producerExited_ = false;
         }
         producer_ = std::thread(&DlnaSink::ProducerMain, this);
-        // The coordinator already prebuffered the configured reservoir into
-        // the P0 queue; move it into the HTTP ring before asking for Play.
+        // Fast start prefill gate: wait for a minimal 150 ms prefill (or header)
+        // so the renderer can GET immediately, while the producer continues to
+        // stream into the HTTP ring concurrently with network setup.
+        const auto prefillMs = std::min<std::uint32_t>(bufferMs_, 150u);
         const auto targetBytes = static_cast<std::size_t>(
             static_cast<std::uint64_t>(format_.sampleRate) *
             static_cast<std::uint64_t>(format_.channels) *
-            (format_.containerBits / 8u) * bufferMs_ / 1000u);
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            (format_.containerBits / 8u) * prefillMs / 1000u);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
         while (session_ && session_->BufferedBytes() <
                    std::min<std::size_t>(targetBytes, session_->CapacityBytes() / 2u) &&
                std::chrono::steady_clock::now() < deadline) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        const std::uint32_t prevRate = s_lastDlnaSampleRate.exchange(format_.sampleRate);
+        const bool crossFamily = (prevRate > 0 && IsDifferentClockFamily(prevRate, format_.sampleRate));
+        if (crossFamily && resyncDelayMs_ > 0) {
+            DlnaLog(L"cross clock-family transition: " + std::to_wstring(prevRate) +
+                    L" -> " + std::to_wstring(format_.sampleRate) + L" applying resync delay ms=" +
+                    std::to_wstring(resyncDelayMs_));
+            std::this_thread::sleep_for(std::chrono::milliseconds(resyncDelayMs_));
         }
         DlnaLog(L"start attempt=" + std::to_wstring(attempt) + L" rate=" +
                 std::to_wstring(format_.sampleRate) + L" bits=" +
@@ -1247,7 +1271,7 @@ void DlnaSink::ProducerMain() noexcept {
         if (!retiredSessions_.empty()) {
             const auto now = GetTickCount64();
             for (auto it = retiredSessions_.begin(); it != retiredSessions_.end();) {
-                if (now >= it->second) {
+                if (now >= it->second && retiredSessions_.size() > 2) {
                     if (it->first) server_.RemoveSession(it->first->Token());
                     it = retiredSessions_.erase(it);
                 } else {
@@ -1265,25 +1289,51 @@ void DlnaSink::ProducerMain() noexcept {
         // Play when nobody has come to read the queued session in time.
         if (pendingPlayDeadlineTick_ != 0 &&
             GetTickCount64() >= pendingPlayDeadlineTick_) {
-            pendingPlayDeadlineTick_ = 0;
             if (session_ && session_->ReadersCreated() == 0) {
-                DlnaLog(L"auto-advance: renderer did not pull the queued track, "
-                        L"forcing play");
-                std::wstring error;
-                bool forced = false;
-                if (lastOpenHomeId_ != 0) {
-                    forced = control_.OpenHomePlaylistPlayId(target_, lastOpenHomeId_,
-                                                             error);
+                bool isPlaying = false;
+                if (target_.openHome && !target_.openHomePlaylist.empty()) {
+                    std::wstring state;
+                    std::wstring err;
+                    if (control_.OpenHomePlaylistTransportState(target_, state, err)) {
+                        if (state == L"Playing" || state == L"Buffering") {
+                            isPlaying = true;
+                        }
+                    }
+                } else if (!target_.avTransportControl.empty()) {
+                    std::wstring state;
+                    std::wstring err;
+                    if (control_.GetTransportState(target_, state, err)) {
+                        if (state == L"PLAYING" || state == L"TRANSITIONING") {
+                            isPlaying = true;
+                        }
+                    }
                 }
-                if (!forced) {
-                    error.clear();
-                    forced = control_.OpenHomePlaylistPlay(target_, error);
+                if (isPlaying) {
+                    // Renderer is still actively playing the previous track!
+                    // Do NOT force play. Extend the watchdog check by 10s.
+                    pendingPlayDeadlineTick_ = GetTickCount64() + 10000;
+                } else {
+                    pendingPlayDeadlineTick_ = 0;
+                    DlnaLog(L"auto-advance: renderer did not pull the queued track, "
+                            L"forcing play");
+                    std::wstring error;
+                    bool forced = false;
+                    if (lastOpenHomeId_ != 0) {
+                        forced = control_.OpenHomePlaylistPlayId(target_, lastOpenHomeId_,
+                                                                 error);
+                    }
+                    if (!forced) {
+                        error.clear();
+                        forced = control_.OpenHomePlaylistPlay(target_, error);
+                    }
+                    if (!forced) {
+                        controlFailures_.fetch_add(1, std::memory_order_relaxed);
+                        DlnaLog(L"auto-advance force play failed device=" +
+                                target_.friendlyName + L" reason=" + error);
+                    }
                 }
-                if (!forced) {
-                    controlFailures_.fetch_add(1, std::memory_order_relaxed);
-                    DlnaLog(L"auto-advance force play failed device=" +
-                            target_.friendlyName + L" reason=" + error);
-                }
+            } else {
+                pendingPlayDeadlineTick_ = 0;
             }
         }
         if (!source_) break;
@@ -1583,9 +1633,13 @@ void DlnaSink::Stop() noexcept {
     // in the meantime, and this late Stop then lands on the NEW session and
     // silences the device (observed: transport STOPPED while the body was still
     // streaming at full rate).
+    const bool cancelledBySuccessor = naturalEosDelayCancel_.load(std::memory_order_acquire);
+    if (cancelledBySuccessor) {
+        naturalEosHold_.store(false, std::memory_order_release);
+    }
     const bool naturalEndInProgress =
-        naturalEosHold_.load(std::memory_order_acquire) != false;
-    if (naturalEosHold_.load(std::memory_order_acquire)) {
+        !cancelledBySuccessor && (naturalEosHold_.load(std::memory_order_acquire) != false);
+    if (naturalEndInProgress) {
         const auto holdDeadline =
             naturalEosHoldDeadlineTick_.load(std::memory_order_acquire);
         // Never inherit the whole 35 s here: this runs on the runtime worker, and
@@ -1597,13 +1651,15 @@ void DlnaSink::Stop() noexcept {
         const auto waitUntil = std::min<std::uint64_t>(
             holdDeadline, GetTickCount64() + kStopHoldWaitMs);
         while (naturalEosHold_.load(std::memory_order_acquire) &&
+               !naturalEosDelayCancel_.load(std::memory_order_acquire) &&
                GetTickCount64() < waitUntil) {
             Sleep(25);
         }
     }
     producerStop_.store(true, std::memory_order_release);
-    const bool naturalEos = endOfStreamSubmitted_.load(std::memory_order_acquire) ||
-                            naturalEndInProgress;
+    const bool naturalEos = !cancelledBySuccessor &&
+                            (endOfStreamSubmitted_.load(std::memory_order_acquire) ||
+                             naturalEndInProgress);
     // Wake a producer blocked in Append WITHOUT aborting the session first:
     // live connections must see the next playlist item rather than an RST.
     // If the producer still does not exit within a second, abort the session

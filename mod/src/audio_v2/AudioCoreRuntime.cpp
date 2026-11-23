@@ -620,6 +620,9 @@ bool AudioCoreRuntime::RetireDirectSelectionLocked() noexcept {
     directSelectionSkipEpoch_.store(0, std::memory_order_release);
     directSelectionArmDeadlineTick_.store(0, std::memory_order_release);
     AdvanceEventEpochLocked();
+    // Fast path: immediately cancel any network sink natural EOS hold (e.g. DLNA/OpenHome)
+    // so manual track switches do not wait for the trailing 8s hold or old buffer drain.
+    coordinator_.CancelNaturalEndOfStreamDelayForSuccessor();
     // Preserve only an already selected, identity-checked successor. Never
     // poll/rebind the retained old graph after retiring it.
     RetireCompletedCaptureLocked(converter);

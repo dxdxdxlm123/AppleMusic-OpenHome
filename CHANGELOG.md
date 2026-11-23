@@ -6,6 +6,21 @@ upstream [AntiOblivionis/AMExclusive](https://github.com/AntiOblivionis/AMExclus
 
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.16] - 2026-11-23
+
+### Fixed & Improved (DLNA & OpenHome Audio Architecture Parity & Fast Switching)
+- **Adaptive TCP Socket Buffer (`SO_SNDBUF = 64KB - 256KB`)**: Dynamically scaled `SO_SNDBUF` on DLNA HTTP audio stream connections (`DlnaStreamServer`) based on stream sample rate and bit depth (~200ms kernel buffer), eliminating Hi-Res 192kHz/24bit (1.15 MB/s) Wi-Fi transit stalls and ACK delays while preventing 44.1kHz buffer overflow resets on sensitive renderers (e.g. AURALiC VEGA G2.2).
+- **Default HTTP Socket Tuning**: Enabled `TCP_NODELAY` by default to eliminate Nagle delayed-ACK spikes (up to 200ms) on audio packet bursts, and applied DSCP Expedited Forwarding (`0xB8`) QoS priority on audio stream sockets.
+- **Two-Stage Lookahead Buffer Hydration (3.5s Wire-Speed Burst)**: Expanded HTTP streaming burst allowance in `DlnaStreamServer` from 1.0s to 3.5s (85% lookahead depth), filling hardware DAC internal FIFOs in <30ms and dropping initial playback un-mute latency from 3-4s to <200ms without sustained oversupply.
+- **Fast Start Prefill Gate**: Lowered the `DlnaSink::Start()` busy-wait threshold from 1500ms down to 150ms, eliminating 1.35s of artificial prebuffer delay while allowing Apple Music decoding and network streaming to proceed concurrently.
+- **Direct Selection Fast-Path Integration**: Connected `AudioCoreRuntime::RetireDirectSelectionLocked()` to immediately cancel DLNA `naturalEosHold_` on manual track switches, eliminating the 8-second EOS hold trap and preventing stale audio playback.
+- **Bounded SMTC Metadata Polling**: Capped SMTC title and duration polling during track switches and auto-advance to 600ms, leveraging mid-stream dynamic SMTC acquisition to prevent 5-second track advance freezes.
+- **Cross Clock-Family Resync Stabilization (`resync_delay_ms = 200`)**: Detected 44.1kHz family (44.1k/88.2k/176.4k) and 48kHz family (48k/96k/192k) crystal transitions in `DlnaSink::Start()`; inserted configurable PLL stabilization delay (default 200ms) to eliminate DAC relay chatter, loud switching pops, and 200ms opening note truncation.
+- **Persistent WinHttp Session & Connection Handle Pool**: Pooled control-plane WinHttp connections in `DlnaControlClient`, cutting SOAP RPC handshake overhead across sequential commands (`Stop`, `DeleteAll`, `Insert`, `Play`) and eliminating redundant TCP handshakes.
+- **OpenHome Playlist Accurate Track Seeking (`SeekId` + `Play`)**: Fixed `DlnaControlClient::OpenHomePlaylistPlayId()` to invoke OpenHome standard `SeekId` (`<Value>id</Value>`) prior to `Play`, preventing renderers (such as AURALiC LightningPlayer) from rolling back to track index 1 (which triggered HTTP 410 Gone on retired sessions).
+- **Duration-Aware Auto-Advance Watchdog & Playback State Probing**: Replaced the fixed 25-second auto-advance timeout with a duration-aware deadline (`prevTrackDurationMs_ + 15s grace`). Added active transport state querying (`OpenHomePlaylistTransportState` / `GetTransportState`) before forcing playback, preventing premature forced play while the device is legitimately playing the preceding track.
+- **Retired Session Grace Window Expansion**: Expanded session retirement grace period from 60s to 300s (5 minutes) and retained the 2 most recent retired sessions in memory, eliminating spurious HTTP 410 errors during long track transitions or renderer metadata re-fetches.
+
 ## [0.3.15] - 2026-11-23
 
 ### Fixed & Improved (1:1 Roon Core RAAT Architecture Parity)

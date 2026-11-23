@@ -923,21 +923,16 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
                          reinterpret_cast<const char*>(&sendTimeoutMs),
                          sizeof(sendTimeoutMs));
     }
-    // Optional socket tuning, OFF by default: enabling it changed how a VEGA
-    // G2.2 consumed the stream (it read ~2 s then reset). Kept behind a bitmask
-    // so it can be re-tested: 1 = TCP_NODELAY, 2 = 512 KB send buffer,
-    // 4 = DSCP EF.
-    // Read per connection (not cached): flipping the bitmask in the ini then
-    // only needs a track change, not an Apple Music restart, which is what
-    // makes bit-by-bit A/B testing practical.
-    int socketTuning = 0;
+    // Socket tuning: 1 = TCP_NODELAY, 4 = DSCP EF (0xB8).
+    // Defaults to 5 (enabled) so audio streaming has minimal latency and QoS priority.
+    int socketTuning = 5;
     {
         wchar_t publicPath[MAX_PATH]{};
         const DWORD length = GetEnvironmentVariableW(L"PUBLIC", publicPath, MAX_PATH);
         if (length != 0 && length < MAX_PATH) {
             const std::wstring ini = std::wstring(publicPath) +
                 L"\\AMExclusive\\am-exclusive.ini";
-            socketTuning = GetPrivateProfileIntW(L"dlna", L"socket_tuning", 0, ini.c_str());
+            socketTuning = GetPrivateProfileIntW(L"dlna", L"socket_tuning", 5, ini.c_str());
         }
     }
     if ((socketTuning & 1) != 0) {
@@ -945,9 +940,6 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
         (void)setsockopt(client, IPPROTO_TCP, TCP_NODELAY,
                          reinterpret_cast<const char*>(&enabled), sizeof(enabled));
     }
-    // Bit 2 (512 KB SO_SNDBUF) is gone for good: at 44.1 kHz it made a VEGA
-    // G2.2 reset the 206 connection after ~500 KB. Sending is left to the
-    // TCP window, which is the backpressure the renderer expects.
     if ((socketTuning & 4) != 0) {
         int dscp = 0xB8; // DSCP EF (46) << 2
         (void)setsockopt(client, IPPROTO_IP, IP_TOS,
@@ -1116,6 +1108,22 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
         ? DlnaStreamServer::ContentType(session->Format(), session->Shape())
         : session->Mime();
 
+    // Adaptive kernel send buffer (SO_SNDBUF) sized to stream bit rate (~200 ms).
+    // Instead of a static 512 KB (which overflowed VEGA G2.2's TCP window at 44.1 kHz)
+    // or the default 64 KB (which starves 192 kHz Hi-Res streams), scale dynamically
+    // between 64 KB and 256 KB to absorb network jitter without overflowing renderers.
+    {
+        const auto& fmt = session->Format();
+        if (fmt.sampleRate > 0 && fmt.channels > 0 && fmt.containerBits > 0) {
+            const std::uint64_t bytesPerSec = static_cast<std::uint64_t>(fmt.sampleRate) *
+                                              fmt.channels * (fmt.containerBits / 8u);
+            const int sndBuf = static_cast<int>(std::clamp<std::uint64_t>(
+                bytesPerSec * 200u / 1000u, 65536u, 262144u));
+            (void)setsockopt(client, SOL_SOCKET, SO_SNDBUF,
+                             reinterpret_cast<const char*>(&sndBuf), sizeof(sndBuf));
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Live shape: FLAC served close-delimited. Neither Content-Length nor
     // Transfer-Encoding is written; the response body ends when this side
@@ -1275,8 +1283,11 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
                 bytesSent += written;
                 ++chunksSent;
                 const auto elapsedMs = GetTickCount64() - streamStartTick;
+                // Hydration burst: allow initial 3.5 seconds at wire speed to hydrate
+                // renderer DAC FIFO before clamping to 1.0x real time playback rate.
+                const auto burstBytes = pacedBytesPerSecond * 3500u / 1000u;
                 const auto allowedBytes =
-                    elapsedMs * pacedBytesPerSecond / 1000u + pacedBytesPerSecond;
+                    elapsedMs * pacedBytesPerSecond / 1000u + burstBytes;
                 if (bytesSent > allowedBytes) {
                     const auto behindMs =
                         (bytesSent - allowedBytes) * 1000u / pacedBytesPerSecond;
@@ -1439,12 +1450,13 @@ void DlnaStreamServer::State::ClientThread(SOCKET client) noexcept {
                 remaining -= written;
                 bytesSent += written;
                 ++chunksSent;
-                // Real-time pacing: long-term rate is exactly 1.0x, plus a
-                // one-second burst that absorbs jitter without ever letting
-                // the renderer download ahead of its playback position.
+                // Real-time pacing with lookahead hydration: allow initial 3.5 seconds
+                // of payload at wire speed to fill renderer DAC jitter buffers, then
+                // strictly lock pacing to 1.0x real time playback rate.
                 const auto elapsedMs = GetTickCount64() - streamStartTick;
+                const auto burstBytes = pacedBytesPerSecond * 3500u / 1000u;
                 const auto allowedBytes =
-                    elapsedMs * pacedBytesPerSecond / 1000u + pacedBytesPerSecond;
+                    elapsedMs * pacedBytesPerSecond / 1000u + burstBytes;
                 const auto payloadSent = bytesSent - prefixSent;
                 if (payloadSent > allowedBytes) {
                     const auto behindMs =

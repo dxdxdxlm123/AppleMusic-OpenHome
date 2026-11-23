@@ -140,6 +140,7 @@ private:
     // previous session, and the offset would grow by the padding on every
     // track. 0 means "no exact value" and falls back to streamSeconds_.
     std::uint32_t trackDurationMsExact_{0};
+    std::uint32_t prevTrackDurationMs_{0};
     // Auto-advance bookkeeping, producer thread only. Frames belonging to the
     // current track (exact length) and how many have been appended so far.
     // Reaching the exact count without a source EOF means Apple Music has
@@ -167,6 +168,7 @@ private:
     // violate the spec.
     bool bigEndianPcm_{true};
     // Live-mode alias token: the stable URL component the playlist sees. The
+    std::uint32_t resyncDelayMs_{200};
     // per-track sessions rotate underneath it (see SetAliasSession).
     std::wstring liveAlias_;
     // Live track changes switch the playlist item via SeekId; the previous

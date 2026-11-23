@@ -56,6 +56,9 @@ public:
     bool OpenHomePlaylistPlay(const DlnaTarget& target, std::wstring& error) noexcept;
     bool OpenHomePlaylistPlayId(const DlnaTarget& target, std::uint32_t id,
                                 std::wstring& error) noexcept;
+    bool OpenHomePlaylistTransportState(const DlnaTarget& target,
+                                        std::wstring& state,
+                                        std::wstring& error) noexcept;
     bool OpenHomeInsert(const DlnaTarget& target, std::uint32_t afterId,
                         const std::wstring& uri, const std::wstring& metadata,
                         std::uint32_t& newId, std::wstring& error) noexcept;
